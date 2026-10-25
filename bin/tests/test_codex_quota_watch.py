@@ -21,7 +21,7 @@ spec.loader.exec_module(watch)
 
 
 def snapshot(allowed=True, **changes):
-    bucket = {"limitId": "codex", "primary": {"usedPercent": 25, "resetsAt": 1},
+    bucket = {"limitId": "codex", "primary": {"usedPercent": 25, "resetsAt": 0.001},
               "secondary": {"usedPercent": 15}, "spendControlReached": False,
               "rateLimitReachedType": None}
     bucket.update(changes)
@@ -32,6 +32,7 @@ def snapshot(allowed=True, **changes):
 def options(**changes):
     result = dict(codex="fake-codex", server_socket=None, timeout=1,
                   turn_timeout=1, watch=True, interval=0.001, max_checks=6,
+                  recovery_delay=0, retry_interval=0.001, max_retries=7,
                   limit_id="codex", continue_thread="test-main", stop_file=None)
     result.update(changes)
     return argparse.Namespace(**result)
@@ -111,6 +112,7 @@ class MonitorTests(unittest.TestCase):
     def exercise(self, clients, stop_on_recovery=True, **changes):
         events = []
         sleeps = []
+        clock = [0.0]
         remaining = iter(clients)
         changes.setdefault("max_checks", len(clients))
         with tempfile.TemporaryDirectory() as folder:
@@ -120,9 +122,33 @@ class MonitorTests(unittest.TestCase):
                 events.append((event, fields))
                 if stop_on_recovery and event in ("recovery_complete", "quota_recovered"):
                     stop.touch()
+            def sleep(seconds):
+                sleeps.append(seconds)
+                clock[0] += seconds
             with patch.object(watch, "log", side_effect=emit):
-                code = watch.run(options(**changes), lambda *args: next(remaining), emit, sleeps.append)
+                code = watch.run(options(**changes), lambda *args: next(remaining),
+                                 emit, sleep, now=lambda: clock[0])
         return code, events, sleeps
+
+    def test_first_recovery_attempt_is_one_hour_after_reset_time(self):
+        blocked = snapshot(False, primary={"resetsAt": 100})
+        code, events, sleeps = self.exercise(
+            [FakeClient(blocked), FakeClient(snapshot(True))],
+            recovery_delay=3600, retry_interval=3600,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(sum(sleeps), 3700)
+        scheduled = next(fields for event, fields in events if event == "recovery_scheduled")
+        self.assertEqual(scheduled["delay_seconds"], 3600)
+
+    def test_seven_retries_stop_after_eight_recovery_attempts(self):
+        clients = [FakeClient(snapshot(False)) for _ in range(9)]
+        code, events, _ = self.exercise(clients, stop_on_recovery=False,
+                                        max_checks=9, max_retries=7)
+        self.assertEqual(code, 4)
+        limit = [fields for event, fields in events if event == "recovery_retry_limit_reached"]
+        self.assertEqual(len(limit), 1)
+        self.assertEqual(limit[0]["attempts"], 8)
 
     def test_blocked_then_recovered_submits_exactly_one_continue(self):
         clients = [FakeClient(snapshot(False)), FakeClient(snapshot(False)), FakeClient(snapshot(True))]
@@ -138,7 +164,7 @@ class MonitorTests(unittest.TestCase):
         clients = [FakeClient(snapshot(allowed)) for allowed in [False, True, True, False, True, True]]
         code, events, sleeps = self.exercise(clients, stop_on_recovery=False)
         self.assertEqual(code, 3)  # Explicit max-checks is the test's stop condition.
-        self.assertEqual(len(sleeps), 5)
+        self.assertEqual(len(sleeps), 4)
         self.assertEqual(sum(m == "turn/start" for c in clients for m, _ in c.calls), 2)
         recoveries = [fields for event, fields in events if event == "recovery_complete"]
         self.assertEqual([fields["cycle"] for fields in recoveries], [1, 2])
@@ -405,7 +431,8 @@ for line in sys.stdin:
         env = dict(os.environ, QUOTA_WATCH_FIXTURE_DIR=str(fixture))
         result = subprocess.run([
             sys.executable, str(SCRIPT), "--codex", str(executable),
-            "--watch", "--continue-thread", "test-main", "--interval", "0.01", "--max-checks", "8",
+        "--watch", "--continue-thread", "test-main", "--interval", "0.01",
+        "--recovery-delay", "0.01", "--retry-interval", "0.01", "--max-checks", "8",
             "--stop-file", str(fixture / "stop"),
         ], env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

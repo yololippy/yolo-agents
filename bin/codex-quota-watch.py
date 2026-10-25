@@ -2,7 +2,9 @@
 """Poll Codex quota without model calls; optionally resume one existing thread.
 
 Default: one read-only check. --watch keeps monitoring across quota recoveries.
---continue-thread sends one continuation per observed block/recovery cycle.
+When a blocked response supplies a reset time, the next recovery attempt is
+scheduled for one hour after that time. Later attempts occur hourly, with at
+most seven retries after the first attempt.
 Stop with Ctrl-C, SIGTERM, or --stop-file when the overall work is complete.
 No launch agent, task checkpoint, or config is installed.
 
@@ -201,6 +203,22 @@ def quota_state(data: dict, limit_id: str) -> tuple[str, str, dict]:
     return "unknown", "explicit usage permission or requested quota bucket unavailable", summary
 
 
+def recovery_reset_at(summary: dict) -> float | None:
+    """Return the short-window reset time, falling back only when it is absent.
+
+    The API does not identify which window caused a denial. The primary window
+    is its next recovery estimate; secondary is used only if primary has no
+    usable timestamp. A scheduled time never substitutes for a fresh permission
+    check before a continuation is sent.
+    """
+    for name in ("primary", "secondary"):
+        window = summary.get(name)
+        value = window.get("resetsAt") if isinstance(window, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            return float(value)
+    return None
+
+
 def is_quota_error(error: dict | None) -> bool:
     if not isinstance(error, dict):
         return False
@@ -271,9 +289,9 @@ def stop_requested(args: argparse.Namespace, emit: Any) -> bool:
     return False
 
 
-def wait_interval(args: argparse.Namespace, emit: Any, sleep: Any) -> bool:
+def wait_seconds(args: argparse.Namespace, seconds: float, emit: Any, sleep: Any) -> bool:
     """Allow an external completion signal to stop a long polling wait promptly."""
-    remaining = args.interval
+    remaining = seconds
     while remaining > 0:
         if stop_requested(args, emit):
             return True
@@ -283,17 +301,38 @@ def wait_interval(args: argparse.Namespace, emit: Any, sleep: Any) -> bool:
     return stop_requested(args, emit)
 
 
+def wait_interval(args: argparse.Namespace, emit: Any, sleep: Any) -> bool:
+    return wait_seconds(args, args.interval, emit, sleep)
+
+
+def schedule_retry(args: argparse.Namespace, now: Any, emit: Any, attempts: int,
+                   reason: str) -> tuple[float | None, bool]:
+    """Return the next recovery attempt time, or signal that the retry budget ended."""
+    if attempts > args.max_retries:
+        emit("recovery_retry_limit_reached", attempts=attempts,
+             retries=args.max_retries, reason=reason)
+        return None, True
+    next_attempt = now() + args.retry_interval
+    emit("recovery_retry_scheduled", attempt=attempts,
+         retry=args.max_retries, reason=reason,
+         next_attempt_at=datetime.fromtimestamp(next_attempt, timezone.utc).isoformat())
+    return next_attempt, False
+
+
 def run(args: argparse.Namespace, client_factory: Any = AppServer,
-        emit: Any = log, sleep: Any = time.sleep) -> int:
+        emit: Any = log, sleep: Any = time.sleep, now: Any = time.time) -> int:
     command = [args.codex, "app-server"]
     command += ["proxy", "--sock", args.server_socket] if args.server_socket else ["--stdio"]
     armed = False
     resume_paused = False
     cycles = 0
+    recovery_attempts = 0
+    next_recovery_attempt: float | None = None
     for attempt in range(1, (args.max_checks or sys.maxsize) + 1):
         if stop_requested(args, emit):
             return 0
         continuation_attempted = False
+        was_armed = armed
         try:
             with client_factory(command, args.timeout) as client:
                 data = client.request("account/rateLimits/read")
@@ -301,44 +340,97 @@ def run(args: argparse.Namespace, client_factory: Any = AppServer,
                 emit("quota_check", attempt=attempt, state=state, reason=reason, **summary)
                 if not args.watch:
                     return {"available": 0, "blocked": 2, "unknown": 3}[state]
-                if state == "blocked":
+                if state == "blocked" and not armed:
                     armed = True
-                elif state == "available" and armed and not resume_paused:
-                    if stop_requested(args, emit):
-                        return 0
-                    if not args.continue_thread:
-                        emit("quota_recovered", attempt=attempt, action="read_only")
-                        armed = False
+                    recovery_attempts = 0
+                    reset_at = recovery_reset_at(summary)
+                    if reset_at is None:
+                        next_recovery_attempt = now() + args.retry_interval
+                        emit("recovery_time_unavailable", attempt=attempt,
+                             next_attempt_at=datetime.fromtimestamp(next_recovery_attempt, timezone.utc).isoformat())
                     else:
-                        continuation_attempted = True
-                        try:
-                            outcome = continue_thread(client, args.continue_thread, args.turn_timeout)
-                        except UnknownDelivery as exc:
-                            emit("continue_unknown", attempt=attempt, error=str(exc))
-                            resume_paused = True
-                        except NeedsInput as exc:
-                            emit("needs_user_input", attempt=attempt, error=str(exc))
-                            resume_paused = True
-                        except (RpcError, RuntimeError) as exc:
-                            emit("continue_error", attempt=attempt, error=str(exc))
-                            resume_paused = True
+                        next_recovery_attempt = max(now(), reset_at + args.recovery_delay)
+                        emit("recovery_scheduled", attempt=attempt,
+                             reset_at=datetime.fromtimestamp(reset_at, timezone.utc).isoformat(),
+                             next_attempt_at=datetime.fromtimestamp(next_recovery_attempt, timezone.utc).isoformat(),
+                             delay_seconds=args.recovery_delay)
+                elif was_armed:
+                    recovery_attempts += 1
+                    if recovery_attempts > args.max_retries + 1:
+                        emit("recovery_retry_limit_reached", attempts=recovery_attempts - 1,
+                             retries=args.max_retries, reason="quota check did not recover")
+                        return 4
+                    if state == "available" and not resume_paused:
+                        if stop_requested(args, emit):
+                            return 0
+                        if not args.continue_thread:
+                            cycles += 1
+                            armed = False
+                            next_recovery_attempt = None
+                            emit("quota_recovered", attempt=attempt, cycle=cycles, action="read_only")
                         else:
-                            if outcome == "completed":
-                                cycles += 1
-                                armed = False
-                                emit("recovery_complete", attempt=attempt, cycle=cycles,
-                                     monitoring="continues")
-                            # A quota error or a busy target keeps the monitor armed.
-                        if resume_paused:
-                            emit("resume_paused", attempt=attempt, monitoring="continues",
-                                 reason="inspect the prior result before restarting automatic continuation")
-                        continuation_attempted = False
+                            continuation_attempted = True
+                            try:
+                                outcome = continue_thread(client, args.continue_thread, args.turn_timeout)
+                            except UnknownDelivery as exc:
+                                emit("continue_unknown", attempt=attempt, error=str(exc))
+                                resume_paused = True
+                                emit("resume_paused", attempt=attempt, monitoring="continues",
+                                     reason="inspect the prior result before restarting automatic continuation")
+                            except NeedsInput as exc:
+                                emit("needs_user_input", attempt=attempt, error=str(exc))
+                                resume_paused = True
+                                emit("resume_paused", attempt=attempt, monitoring="continues",
+                                     reason="inspect the prior result before restarting automatic continuation")
+                            except (RpcError, RuntimeError) as exc:
+                                emit("continue_error", attempt=attempt, error=str(exc))
+                                resume_paused = True
+                                emit("resume_paused", attempt=attempt, monitoring="continues",
+                                     reason="inspect the prior result before restarting automatic continuation")
+                            else:
+                                if outcome == "completed":
+                                    cycles += 1
+                                    armed = False
+                                    next_recovery_attempt = None
+                                    emit("recovery_complete", attempt=attempt, cycle=cycles,
+                                         monitoring="continues")
+                                else:
+                                    next_recovery_attempt, exhausted = schedule_retry(
+                                        args, now, emit, recovery_attempts, "continued turn remains limited or busy")
+                                    if exhausted:
+                                        return 4
+                            if resume_paused:
+                                next_recovery_attempt, exhausted = schedule_retry(
+                                    args, now, emit, recovery_attempts,
+                                    "continuation needs manual inspection")
+                                if exhausted:
+                                    return 4
+                            continuation_attempted = False
+                    elif state == "available" and resume_paused:
+                        emit("resume_paused", attempt=attempt, monitoring="continues",
+                             reason="inspect the prior result before restarting automatic continuation")
+                        next_recovery_attempt, exhausted = schedule_retry(
+                            args, now, emit, recovery_attempts,
+                            "continuation remains paused")
+                        if exhausted:
+                            return 4
+                    else:
+                        next_recovery_attempt, exhausted = schedule_retry(
+                            args, now, emit, recovery_attempts, reason)
+                        if exhausted:
+                            return 4
         except NeedsInput as exc:
             emit("needs_user_input", attempt=attempt, error=str(exc))
             if not args.watch:
                 return 5
             resume_paused = True
             emit("resume_paused", attempt=attempt, monitoring="continues")
+            if was_armed:
+                recovery_attempts += 1
+                next_recovery_attempt, exhausted = schedule_retry(
+                    args, now, emit, recovery_attempts, "quota check needs user input")
+                if exhausted:
+                    return 4
         except (OSError, TimeoutError, EOFError, RuntimeError, KeyError, ValueError) as exc:
             emit("check_error", attempt=attempt, error_type=type(exc).__name__, error=str(exc))
             if continuation_attempted:
@@ -349,13 +441,24 @@ def run(args: argparse.Namespace, client_factory: Any = AppServer,
                 emit("resume_paused", attempt=attempt, monitoring="continues")
             if not args.watch:
                 return 1
+            if was_armed:
+                recovery_attempts += 1
+                next_recovery_attempt, exhausted = schedule_retry(
+                    args, now, emit, recovery_attempts, "quota check failed")
+                if exhausted:
+                    return 4
         if stop_requested(args, emit):
             return 0
         if args.max_checks and attempt == args.max_checks:
             emit("check_limit_reached", attempts=attempt)
             return 3
-        emit("waiting", seconds=args.interval)
-        if wait_interval(args, emit, sleep):
+        if armed and next_recovery_attempt is not None:
+            wait_for = max(0.0, next_recovery_attempt - now())
+            emit("waiting", seconds=wait_for, purpose="scheduled_recovery")
+        else:
+            wait_for = args.interval
+            emit("waiting", seconds=wait_for, purpose="quota_poll")
+        if wait_seconds(args, wait_for, emit, sleep):
             return 0
     return 3
 
@@ -394,7 +497,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--watch", action="store_true", help="keep monitoring across quota recoveries until explicitly stopped")
     parser.add_argument("--continue-thread", metavar="THREAD_ID", help="send 继续 once per block/recovery cycle, then keep monitoring")
     parser.add_argument("--stop-file", metavar="PATH", help="stop gracefully when this file exists; create it when all work is complete")
-    parser.add_argument("--interval", type=positive_number, default=900, help="seconds between attempts (default: 900)")
+    parser.add_argument("--interval", type=positive_number, default=3600, help="seconds between ordinary quota checks (default: 3600)")
+    parser.add_argument("--recovery-delay", type=positive_number, default=3600,
+                        help="seconds to wait after API reset time before first recovery attempt (default: 3600)")
+    parser.add_argument("--retry-interval", type=positive_number, default=3600,
+                        help="seconds between recovery retry attempts (default: 3600)")
+    parser.add_argument("--max-retries", type=positive_int, default=7,
+                        help="maximum retries after the first recovery attempt (default: 7)")
     parser.add_argument("--timeout", type=positive_number, default=30, help="timeout for each protocol request (default: 30)")
     parser.add_argument("--turn-timeout", type=positive_number, default=3600, help="seconds to wait for a continued turn (default: 3600)")
     parser.add_argument("--max-checks", type=positive_int, help="stop after this many checks; otherwise unlimited in watch mode")

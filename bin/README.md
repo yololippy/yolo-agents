@@ -1,5 +1,7 @@
 # Codex 额度恢复脚本
 
+当前启动、停止、运行目录和重试节奏以 [CODEX_QUOTA_WATCH.md](CODEX_QUOTA_WATCH.md) 为准。下面保留的原始命令仅供底层单次或测试调用，不作为正式启动方式。
+
 `codex-quota-watch.py` 使用 Python 标准库和已登录的 Codex CLI，通过官方 app-server 协议查询套餐额度。查询和等待不调用模型；发送“继续”后产生的正常执行仍使用套餐额度。
 
 ## 用法
@@ -10,24 +12,19 @@
 # 默认只查询一次，不发送消息，也不加载会话
 python3 bin/codex-quota-watch.py
 
-# 每 15 分钟检查；观察到恢复后继续监控，仍不发消息
-python3 bin/codex-quota-watch.py --watch --interval 900
+# 每小时检查；观察到恢复后继续监控，仍不发消息
+python3 bin/codex-quota-watch.py --watch --interval 3600
 
 # 每个受限→恢复周期向 main 发一次“继续”，随后继续监控
-python3 bin/codex-quota-watch.py --watch --interval 900 \
+python3 bin/codex-quota-watch.py --watch --interval 3600 \
   --continue-thread 01a16c79-0f8f-7d53-b0dd-e36b607d9094
 
-# 用唯一的停止标记表达“整体任务完成”或“用户叫停”
-task_monitor_dir="$(mktemp -d "${TMPDIR:-/tmp}/trading-agent-monitor.XXXXXX")"
-printf '停止标记：%s\n' "$task_monitor_dir/stop"
-python3 bin/codex-quota-watch.py --watch --interval 900 \
-  --continue-thread 01a16c79-0f8f-7d53-b0dd-e36b607d9094 \
-  --stop-file "$task_monitor_dir/stop"
-# 在另一个终端或 main 完成整体任务后，对上面显示的实际路径执行 touch
-# touch /实际临时目录/stop
+# 正式启动与停止使用仓库脚本；它们的状态在 runtime/codex-quota-watch/
+python3 bin/start-codex-quota-watch.py <MAIN_THREAD_ID>
+python3 bin/stop-codex-quota-watch.py
 
 # 有共享 app-server 控制 socket 时，使用原运行时续跑
-python3 bin/codex-quota-watch.py --watch --interval 900 \
+python3 bin/codex-quota-watch.py --watch --interval 3600 \
   --server-socket /path/to/app-server-control.sock \
   --continue-thread 01a16c79-0f8f-7d53-b0dd-e36b607d9094
 
@@ -37,14 +34,14 @@ python3 bin/codex-quota-watch.py --watch --interval 2 --max-checks 3
 
 脚本不自动启动、不注册系统服务、不创建自动化、不改 Codex 配置，也不创建业务进度文件。需要常驻时在终端手动运行；Ctrl-C／SIGTERM 可停止。续跑模式仅锁定同一会话的其他脚本实例，锁文件保存在系统临时目录。
 
-正常监控持续到整体任务完成或用户叫停。一次额度恢复或 main 的一次回复完成不会停止监控。脚本不能从一次回复自动判定整个项目完成：main 验收完当前已授权开发任务后，创建 `--stop-file` 指定的停止标记；它只是一个停止信号。等待间隔中约一秒内响应；正在续跑时等待该轮结束后退出。已经存在的停止文件会让脚本直接退出，新一轮使用新的唯一停止路径。
+正常监控持续到整体任务完成或用户叫停。一次额度恢复或 main 的一次回复完成不会停止监控。正式启动脚本把运行状态放在 `runtime/codex-quota-watch/`，并由停止脚本创建其中的停止标记；它只是一个停止信号。等待间隔中约一秒内响应；正在续跑时等待该轮结束后退出。已经存在的停止文件会让脚本直接退出，新一轮启动会清理它。
 
 ## 检查与重试语义
 
 - 依赖服务端明确的 `ordinaryUsageAllowed`；不把百分比下降、预计重置时间已过或请求成功当成额度恢复。未知字段、网络失败、超时分别记录，继续等待。
 - 优先检查 `rateLimitsByLimitId` 中的 `codex`，可用 `--limit-id` 指定其他额度桶。显式的限额/支出限制仍会阻止续跑；不会购买额度、消耗重置券或切换计费方式。
 - 启动时额度可用只会监控，不发送“继续”。必须先观察到受限，再观察到明确恢复；脚本重启后重新观察，不根据上次的业务进度猜测。
-- 每轮续跑成功后重新等待下一次受限；持续可用期间不重复发送。可连续处理多轮耗尽/恢复，直到停止信号或人为限定的检查次数上限。
+- 每轮续跑成功后重新等待下一次受限；持续可用期间不重复发送。每次受限后按接口重置时间安排首次尝试，并在首次尝试后最多重试七次；达到上限则停止本次监控。
 - 启用 `--continue-thread` 才读取/恢复指定会话；目标正在运行时等待，不主动打断。发送的正文只有“继续”，脚本不向其他会话分派任务。
 - 发送后等待 `turn/completed` 的真实结束状态。若仍明确报 `usageLimitExceeded` / `rateLimitExceeded`，继续检查并重试；不能以提交被接受代替成功结果。
 - 提交或执行结果不明时报告 `continue_unknown`，继续只读检查，但暂停自动发送，避免重复执行。默认单次请求超时 30 秒，续跑等待上限 3600 秒，分别用 `--timeout` / `--turn-timeout` 调整。
@@ -63,6 +60,6 @@ python3 bin/codex-quota-watch.py --watch --interval 2 --max-checks 3
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bin/tests -v
 ```
 
-退出码：`0` 单次查询可用或收到停止文件；`1` 单次查询/启动错误；`2` 单次检查明确受限；`3` 单次状态未知或达到明确设置的检查次数上限；`5` 单次请求需要用户处理；`130` Ctrl-C／SIGTERM。监控模式下的自动发送暂停以日志事件表示，不因一次恢复或这些运行异常退出。
+退出码：`0` 单次查询可用或收到停止文件；`1` 单次查询/启动错误；`2` 单次检查明确受限；`3` 单次状态未知或达到明确设置的检查次数上限；`4` 达到恢复重试上限；`5` 单次请求需要用户处理；`130` Ctrl-C／SIGTERM。监控模式下的自动发送暂停以日志事件表示，不因一次恢复或这些运行异常退出。
 
 协议依据：[OpenAI 官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)。具体字段以本机 `codex app-server generate-json-schema` 生成的协议为准。
