@@ -109,4 +109,4 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=server .venv/bin/python -W error::ResourceW
 
 官方 TestModel／FunctionModel 离线验证已补入可选集成测试，包含真实 Harness 工具执行与流式失败，所有数据均位于测试临时目录。后续由用户配置真实模型，验证供应商流式行为、费用、中文召回、实际记忆写入决策及长时间运行；确定性离线模型不证明真实模型会正确选择工具或记忆内容。
 
-参考：[官方同步流源码（v2.61.0）](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/result.py)、[完整 Conversation](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/conversation.py)、[官方 Harness](https://pydantic.dev/docs/ai/harness/)、[项目调研](../RESEARCH_PYDANTICAI.md)。
+参考：[官方同步流源码（v2.61.0）](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/result.py)、[完整 Conversation](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/conversation.py)、[官方 Harness](https://pydantic.dev/docs/ai/harness/)、[项目调研](../docs/RESEARCH_PYDANTICAI.md)。
