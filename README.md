@@ -1,6 +1,20 @@
-# Trading Agent
+# Yolo Agents
 
-运行在个人 Mac 上的对话式 IBKR 助手，Apple 客户端与本机后台服务分离。当前先实现聊天、持久化与跨设备通信，券商和交易能力后续接入。
+运行在个人 Mac 上、可扩展为多个 Agent 的本地 Agent Host。交易 Agent 是第一个实例；Mac 和 iOS App 通过本机服务连接它。
+
+```text
+packages/                       跨 Agent/App 的可复用包
+  protocol/                     通信协议与数据模型
+  core-python/                  Host、认证、存储和通用运行时
+  sdk-swift/                    Swift 通信 SDK 与联调 probe
+  ui-swift/                     可复用 SwiftUI 聊天界面
+agents/                         各 Agent 的领域运行时
+  trading-agent/runtime-python/ 第一个 Agent：只读 IBKR 集成
+  b-agent/runtime-python/       第二个 Agent 的扩展骨架
+apps/                           各 Agent 的用户客户端
+  trading-agent/{ios,macos,xcode}/
+  b-agent/{ios,macos,xcode}/
+```
 
 ## 本轮可运行内容
 
@@ -14,16 +28,16 @@
 现有 Python 3.11+ 即可，不需要安装第三方依赖：
 
 ```sh
-PYTHONPATH=server python3 -m trading_agent --mode demo
+PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python python3 -m yolo_trading --mode demo
 ```
 
 默认地址 `http://127.0.0.1:8765`。控制台提供两个十分钟有效的一次性配对码，分别给 Mac / iOS 使用；配对成功后客户端将设备 token 保存到 Keychain。演示回复会明确说明没有调用真实模型或 IBKR。
 
-- [后端启动与 HTTPS 配置](server/README.md)
-- [Agent、存储与真实模型适配边界](server/AGENT.md)
-- [Apple 客户端](apple/README.md)
-- [通信协议 v1](docs/COMMUNICATION_V1.md)
-- [IBKR 配置与只读接入](server/IBKR.md)
+- [共享 Host、存储与真实模型适配边界](packages/core-python/HOST.md)
+- [共享 Agent 运行时说明](packages/core-python/README.md)
+- [交易 Agent 与只读 IBKR 配置](agents/trading-agent/README.md)
+- [交易 Agent 的 Apple 客户端](apps/trading-agent/README.md)
+- [通信协议 v1](packages/protocol/COMMUNICATION_V1.md)
 - [需求与架构](docs/PROJECT_OUTLINE.md)
 - [开发任务](docs/TODO.md)
 - [Agent 设计与验证边界](docs/RESEARCH_PYDANTICAI.md)
@@ -31,11 +45,12 @@ PYTHONPATH=server python3 -m trading_agent --mode demo
 ## 验证
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=server .venv/bin/python -m unittest discover -s server/tests -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m unittest discover -s packages/core-python/tests -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m unittest discover -s agents/trading-agent/runtime-python/tests -v
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bin/tests -v
 python3 bin/test-chat-integration.py --probe
-cd apple
-swift test
+swift test --package-path packages/sdk-swift
+swift test --package-path packages/ui-swift
 ```
 
-本轮已通过后端 65 项测试、完整 Xcode 下的 25 项 Swift SDK 单元测试，以及 iPhone 17 Pro / iOS 27.0 模拟器中的 27 项测试。模拟器测试覆盖真实 Keychain 读写和原生 SDK→Python 演示服务的中文消息、幂等重试、事件补齐与设备撤销；后端另有证书校验开启的本地 HTTPS 验证。已修复 Agent 首次并发初始化的存储竞争和流提前关闭的资源清理问题，并验证服务正常启动/退出。模拟器使用本地临时签名，无需开发者账号，运行步骤见 Apple 说明。云端供应商、外网连接和 iPhone 真机分别验收，离线模型通过不代表真实模型决策、券商或真机已经验证。
+本次目录重构已通过 94 项 Python 测试、26 项 Swift SDK 测试及本地 Swift SDK→Python demo 联调；新的 Mac 和 iOS Xcode targets 均构建成功。此前的 iOS Simulator 验证覆盖真实 Keychain、中文消息、幂等重试、事件补齐与设备撤销。云端供应商、外网连接、IBKR Gateway 与 iPhone 真机仍须单独验收。

@@ -1,0 +1,6 @@
+-r ../../../packages/python/requirements.lock
+aeventkit==2.1.0
+ib_async==2.1.0
+nest-asyncio==1.6.0
+numpy==2.5.4
+tzdata==2025.3

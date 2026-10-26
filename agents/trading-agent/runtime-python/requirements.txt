@@ -1,0 +1,4 @@
+# Shared Agent-host dependencies plus the optional, read-only IBKR adapter.
+# No Gateway software or authentication credentials are installed by this file.
+-r ../../../packages/core-python/requirements.txt
+ib_async==2.1.0

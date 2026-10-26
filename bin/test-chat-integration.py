@@ -63,46 +63,48 @@ def main():
         parser.error("Swift tools are required; install/enable Xcode or Command Line Tools first")
     if args.testing_plugin and not args.testing_plugin.is_file():
         parser.error("--testing-plugin must point to an existing installed library")
-    sys.path.insert(0, str(root / "server"))
-    from trading_agent.agent_runtime import create_runtime
-    from trading_agent.api import ChatHTTPServer
-    from trading_agent.auth import DeviceAuth
-    from trading_agent.service import ChatService
-    from trading_agent.store import Store
-    with tempfile.TemporaryDirectory(prefix="trading-agent-integration-") as temp:
+    sys.path.insert(0, str(root / "packages/core-python"))
+    sys.path.insert(0, str(root / "agents/trading-agent/runtime-python"))
+    from yolo_agents.agent_runtime import create_runtime
+    from yolo_agents.api import ChatHTTPServer
+    from yolo_agents.auth import DeviceAuth
+    from yolo_agents.service import ChatService
+    from yolo_agents.store import Store
+    from yolo_trading.api_extension import TradingAPIExtension
+    with tempfile.TemporaryDirectory(prefix="yolo-agents-integration-") as temp:
         folder = Path(temp)
         store = Store(folder / "app.sqlite3")
         runtime = create_runtime("demo", None, folder, store)
         service = ChatService(store, runtime)
         auth = DeviceAuth(folder / "devices.sqlite3")
-        server = ChatHTTPServer(("127.0.0.1", 0), service, auth)
+        server = ChatHTTPServer(("127.0.0.1", 0), service, auth, extension=TradingAPIExtension())
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
-        package = root / "apple"
+        package = root / "packages/sdk-swift"
         if args.sdk_only or args.probe:
             package = folder / "swift-sdk"
             package.mkdir()
             (package / "Sources").mkdir()
-            (package / "Sources/TradingAgentSDK").symlink_to(root / "apple/Sources/TradingAgentSDK", target_is_directory=True)
+            (package / "Sources/YoloAgentsSDK").symlink_to(root / "packages/sdk-swift/Sources/YoloAgentsSDK", target_is_directory=True)
             if args.probe:
-                (package / "Sources/TradingAgentProbe").mkdir()
-                (package / "Sources/TradingAgentProbe/Probe.swift").symlink_to(root / "apple/Sources/TradingAgentProbe/Probe.swift")
-                second_target = '.executableTarget(name: "TradingAgentProbe", dependencies: ["TradingAgentSDK"]),'
+                (package / "Sources/YoloAgentsProbe").mkdir()
+                (package / "Sources/YoloAgentsProbe/Probe.swift").symlink_to(root / "packages/sdk-swift/Sources/YoloAgentsProbe/Probe.swift")
+                second_target = '.executableTarget(name: "YoloAgentsProbe", dependencies: ["YoloAgentsSDK"]),'
             else:
                 (package / "Tests").mkdir()
-                (package / "Tests/TradingAgentSDKTests").symlink_to(root / "apple/Tests/TradingAgentSDKTests", target_is_directory=True)
-                second_target = '.testTarget(name: "TradingAgentSDKTests", dependencies: ["TradingAgentSDK"]),'
+                (package / "Tests/YoloAgentsSDKTests").symlink_to(root / "packages/sdk-swift/Tests/YoloAgentsSDKTests", target_is_directory=True)
+                second_target = '.testTarget(name: "YoloAgentsSDKTests", dependencies: ["YoloAgentsSDK"]),'
             (package / "Package.swift").write_text('''// swift-tools-version: 6.0
 import PackageDescription
-let package = Package(name: "TradingAgentIntegration", platforms: [.macOS(.v14)], targets: [
-    .target(name: "TradingAgentSDK"),
+let package = Package(name: "YoloAgentsIntegration", platforms: [.macOS(.v14)], targets: [
+    .target(name: "YoloAgentsSDK"),
     ''' + second_target + '''
 ])
 ''')
         test_environment = dict(
-            TRADING_AGENT_TEST_URL=f"http://127.0.0.1:{server.server_port}",
-            TRADING_AGENT_PAIRING_CODE=auth.issue_pairing_code("ios" if args.ios_simulator else "macos"),
-            TRADING_AGENT_TEST_PLATFORM="ios" if args.ios_simulator else "macos")
+            YOLO_AGENTS_TEST_URL=f"http://127.0.0.1:{server.server_port}",
+            YOLO_AGENTS_PAIRING_CODE=auth.issue_pairing_code("ios" if args.ios_simulator else "macos"),
+            YOLO_AGENTS_TEST_PLATFORM="ios" if args.ios_simulator else "macos")
         env = dict(os.environ, **test_environment)
         print("Testing the Swift SDK against a disposable loopback demo service; no cloud calls.", flush=True)
         try:
@@ -113,7 +115,7 @@ let package = Package(name: "TradingAgentIntegration", platforms: [.macOS(.v14)]
                            "-destination", f"platform=iOS Simulator,id={args.ios_simulator}",
                            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1"]
             elif args.probe:
-                command = [swift, "run", "--build-system", "native", "--package-path", str(package), "TradingAgentProbe"]
+                command = [swift, "run", "--build-system", "native", "--package-path", str(package), "YoloAgentsProbe"]
             else:
                 command = [swift, "test", "--package-path", str(package), "--filter", "liveServiceRoundTrip"]
                 if args.testing_plugin:

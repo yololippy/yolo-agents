@@ -1,3 +1,0 @@
-# Optional broker adapter only. main coordinates installation in the shared .venv.
-# No Gateway software or authentication credentials are installed by this file.
-ib_async==2.1.0
