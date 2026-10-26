@@ -20,6 +20,8 @@ from uuid import uuid4
 from trading_agent.agent_runtime import create_runtime
 from trading_agent.api import ChatHTTPServer
 from trading_agent.auth import DeviceAuth
+from trading_agent.ibkr import IBKRAdapter
+from trading_agent.ibkr_config import IBKRConfig
 from trading_agent.service import ChatService
 from trading_agent.store import Store
 
@@ -32,7 +34,8 @@ class HTTPTests(unittest.TestCase):
         self.auth = DeviceAuth(folder / "auth.sqlite3")
         runtime = create_runtime("demo", None, folder, self.store)
         self.app = ChatService(self.store, runtime)
-        self.server = ChatHTTPServer(("127.0.0.1", 0), self.app, self.auth)
+        self.broker = IBKRAdapter(IBKRConfig("paper", account="DUexample"), client_factory=object)
+        self.server = ChatHTTPServer(("127.0.0.1", 0), self.app, self.auth, broker=self.broker)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         _, response = self.request("POST", "/v1/devices/pair", {
@@ -88,7 +91,16 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["agent_mode"], "demo")
         self.assertIs(body["trade_execution_enabled"], False)
+        self.assertEqual(body["broker"]["configuration"]["environment"], "paper")
+        self.assertFalse(body["broker"]["execution_enabled"])
         self.assertNotIn("token", json.dumps(body))
+
+    def test_broker_health_is_authenticated_and_does_not_expose_account(self):
+        self.assertEqual(self.request("GET", "/v1/broker/health")[0], 401)
+        status, body = self.request("GET", "/v1/broker/health", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["broker"]["state"], "disconnected")
+        self.assertNotIn("DUexample", json.dumps(body))
 
     def test_authentication_and_revocation(self):
         self.assertEqual(self.request("GET", "/v1/conversations")[0], 401)

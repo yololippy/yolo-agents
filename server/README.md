@@ -36,6 +36,24 @@ PYTHONPATH=server python3 -m trading_agent --mode demo --host 0.0.0.0 \
 
 设备撤销、消息幂等和同步细节见 [通信协议](../docs/COMMUNICATION_V1.md)。iPhone 首版仅聊天与查看；交易执行、确认和预授权接口均返回 403。
 
+## IBKR 模拟盘 / 正式市场
+
+IBKR 使用独立、显式的 `paper` 或 `live` 配置；环境不会根据端口或账户号猜测。聊天服务启动时只读取配置并公开安全的健康摘要，**不会自动连接 Gateway，更不会交易**。例如：
+
+```sh
+PYTHONPATH=server .venv/bin/python -m trading_agent --mode demo \
+  --ibkr-environment paper --ibkr-account DU123456 --ibkr-client-id 20
+```
+
+切换至正式环境必须停止当前服务并以新的完整配置重启；环境切换不会继承模拟盘的账户、主机、端口或 client ID：
+
+```sh
+PYTHONPATH=server .venv/bin/python -m trading_agent --mode demo \
+  --ibkr-environment live --ibkr-account U123456 --ibkr-client-id 21
+```
+
+`GET /v1/health` 会包含券商摘要，已配对设备也可调用 `GET /v1/broker/health`。两种环境都固定为只读、执行关闭；配置的完整规则、离线检查及 Gateway 准备步骤见 [IBKR 说明](IBKR.md)。不要把用户名、密码或配对 token 放入 JSON 配置或命令行。
+
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=server python3 -m unittest discover -s server/tests -v
 ```

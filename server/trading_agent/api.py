@@ -35,8 +35,8 @@ class ChatHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, address, service, auth):
-        self.service, self.auth = service, auth
+    def __init__(self, address, service, auth, broker=None):
+        self.service, self.auth, self.broker = service, auth, broker
         super().__init__(address, Handler)
 
 
@@ -122,9 +122,14 @@ class Handler(BaseHTTPRequestHandler):
         path, query = url.path.rstrip("/"), parse_qs(url.query)
         app, auth = self.server.service, self.server.auth
         if method == "GET" and path == "/v1/health":
+            broker = self.server.broker.health() if self.server.broker else {
+                "state": "not_configured", "connected": False, "execution_enabled": False,
+                "environment_verified": False, "data_complete": False,
+                "blockers": [{"code": "not_configured", "message": "尚未选择 IBKR paper/live 环境。"}],
+            }
             self.send_json(200, {"status": "ok", "api_version": 1, "server_id": auth.server_id,
                                  "agent_mode": app.runtime.mode, "model": app.runtime.model_name,
-                                 "trade_execution_enabled": False})
+                                 "trade_execution_enabled": False, "broker": broker})
             return
         if method == "POST" and path == "/v1/devices/pair":
             data = self.read_json()
@@ -134,6 +139,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         caller = auth.authenticate(self.headers.get("Authorization"))
         auth.require(caller, "chat:read" if method == "GET" else "chat:write")
+        if path == "/v1/broker/health" and method == "GET":
+            broker = self.server.broker.health() if self.server.broker else {
+                "state": "not_configured", "connected": False, "execution_enabled": False,
+                "environment_verified": False, "data_complete": False,
+                "blockers": [{"code": "not_configured", "message": "尚未选择 IBKR paper/live 环境。"}],
+            }
+            self.send_json(200, {"broker": broker})
+            return
         if path.startswith(("/v1/orders", "/v1/approvals", "/v1/automations", "/v1/trades")):
             raise APIError(403, "trade_execution_disabled", "首版不开放交易执行、确认或交易预授权接口。")
         if path == "/v1/devices" and method == "GET":

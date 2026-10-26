@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import ipaddress
+import json
 import os
 from pathlib import Path
 import signal
@@ -11,6 +12,8 @@ import sys
 
 from .api import ChatHTTPServer
 from .auth import DeviceAuth
+from .ibkr import IBKRAdapter
+from .ibkr_config import ENV_PREFIX, IBKRConfigurationError, load_ibkr_config
 from .service import ChatService
 
 
@@ -23,6 +26,13 @@ def main():
     parser.add_argument("--model", default=os.environ.get("TRADING_AGENT_MODEL"))
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument("--ibkr-config", type=Path, help="IBKR JSON 配置；不接受登录凭据")
+    parser.add_argument("--ibkr-environment", choices=("paper", "live"))
+    parser.add_argument("--ibkr-host")
+    parser.add_argument("--ibkr-port", type=int)
+    parser.add_argument("--ibkr-client-id", type=int)
+    parser.add_argument("--ibkr-account")
+    parser.add_argument("--ibkr-connect-timeout", type=float)
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("port must be between 0 and 65535")
@@ -36,6 +46,7 @@ def main():
         parser.error("binding outside loopback requires --tls-cert and --tls-key")
     if args.mode == "pydantic" and not args.model:
         parser.error("--model or TRADING_AGENT_MODEL is required for pydantic mode")
+    broker = load_broker(args, parser)
     args.data_dir = args.data_dir.expanduser().resolve()
     args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (args.data_dir / "server.lock").open("a")
@@ -56,7 +67,7 @@ def main():
     auth = DeviceAuth(args.data_dir / "devices.sqlite3")
     service = ChatService(store, runtime)
     service.recover_interrupted()
-    server = ChatHTTPServer((args.host, args.port), service, auth)
+    server = ChatHTTPServer((args.host, args.port), service, auth, broker=broker)
     if args.tls_cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -65,7 +76,8 @@ def main():
     for platform in ("macos", "ios"):
         print(f"{platform} pairing code (one use, expires in 10 minutes): {auth.issue_pairing_code(platform)}", flush=True)
     scheme = "https" if args.tls_cert else "http"
-    print(f"{scheme}://{args.host}:{server.server_address[1]} | agent={runtime.mode} | trading=disabled", flush=True)
+    broker_summary = "not_configured" if broker is None else f"{broker.config.environment}:read_only"
+    print(f"{scheme}://{args.host}:{server.server_address[1]} | agent={runtime.mode} | ibkr={broker_summary} | trading=disabled", flush=True)
     def stop(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
@@ -80,6 +92,32 @@ def main():
         store.close()
         lock.close()
     return 0
+
+
+def load_broker(args, parser):
+    """Load an explicit broker profile without opening a Gateway socket."""
+    base = None
+    if args.ibkr_config:
+        try:
+            base = json.loads(args.ibkr_config.expanduser().read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            parser.error("--ibkr-config 必须是可读取的 JSON 配置文件，且不得包含登录凭据")
+    overrides = {
+        "environment": args.ibkr_environment,
+        "host": args.ibkr_host,
+        "port": args.ibkr_port,
+        "client_id": args.ibkr_client_id,
+        "account": args.ibkr_account,
+        "connect_timeout": args.ibkr_connect_timeout,
+    }
+    overrides = {key: value for key, value in overrides.items() if value is not None}
+    has_environment = any(key.startswith(ENV_PREFIX) for key in os.environ)
+    if base is None and not overrides and not has_environment:
+        return None
+    try:
+        return IBKRAdapter(load_ibkr_config(base, overrides=overrides))
+    except IBKRConfigurationError as exc:
+        parser.error(f"IBKR 配置无效：{exc}")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 | 方法与路径 | 请求 | 响应 |
 | --- | --- | --- |
 | `GET /v1/health` | 无认证 | `{status, api_version, server_id, agent_mode, model, trade_execution_enabled:false}` |
+| `GET /v1/broker/health` | 已配对设备 | `{broker}`；配置摘要、连接/对账状态及固定只读限制，不含账户标识或凭据 |
 | `POST /v1/devices/pair` | `{pairing_code, device_name, platform}` | 201 `{device, token, server_id, api_version}` |
 | `GET /v1/devices` | Mac 管理凭据 | `{devices:[device]}` |
 | `DELETE /v1/devices/{id}` | 自己或 Mac 管理凭据 | `{device}`；撤销后既有凭据无效 |

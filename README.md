@@ -7,7 +7,7 @@
 - Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE。
 - Agent：明确演示模式，以及 PydanticAI Core / Harness 适配。依赖已装入 `.venv`，官方 SDK 离线模型已验证真实记忆工具、历史召回、压缩和会话恢复；实际云端模型仍需供应商配置与联调。
 - Apple：共享 Swift 通信 SDK、Keychain 与离线同步状态、SwiftUI macOS / iOS 客户端及 Xcode 工程。本机已安装完整 Xcode 27.1，iOS 模拟器版本构建通过。
-- 当前没有 IBKR 连接、账户数据或订单执行；客户端和后端都不提供可执行交易的入口。
+- IBKR 已有显式 paper/live 的本机只读配置与适配层，支持安全切换并在健康接口中显示脱敏状态；当前未安装/登录 Gateway，尚无账户连接、账户数据或订单执行。
 
 ## 先运行后端演示
 
@@ -23,6 +23,7 @@ PYTHONPATH=server python3 -m trading_agent --mode demo
 - [Agent、存储与真实模型适配边界](server/AGENT.md)
 - [Apple 客户端](apple/README.md)
 - [通信协议 v1](docs/COMMUNICATION_V1.md)
+- [IBKR 配置与只读接入](server/IBKR.md)
 - [需求与架构](docs/PROJECT_OUTLINE.md)
 - [开发任务](docs/TODO.md)
 - [Agent 设计与验证边界](docs/RESEARCH_PYDANTICAI.md)
