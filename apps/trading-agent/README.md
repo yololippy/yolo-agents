@@ -29,11 +29,11 @@ iOS 模拟器 SDK 的 Debug 通用目标已构建成功，使用 iPhoneSimulator
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -project YoloAgents.xcodeproj -scheme YoloAgentsIOS \
   -configuration Debug -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath /tmp/trading-agent-ios-derived-data \
+  -derivedDataPath /tmp/yolo-agents-ios-derived-data \
   build
 ```
 
-产物为 `/tmp/trading-agent-ios-derived-data/Build/Products/Debug-iphonesimulator/YoloAgentsIOS.app`；生成的 Info.plist 经 `plutil -lint` 检查通过。最初关闭签名的版本仅验证了编译，main 实际启动后遇到 Keychain -34018。工程现已对 Simulator 的 App / SDK 测试 target 配置本地 ad-hoc 签名和专用模拟器 entitlement；不要再传 `CODE_SIGNING_ALLOWED=NO` 运行该 App。`LOCALDEV00` 是仅用于 Simulator 的本地身份前缀，不是开发者账号；真机仍需用户自己的签名配置。Xcode 将模拟器权限嵌入 Mach-O 的 `__TEXT/__entitlements`，因此 `codesign -d --entitlements` 显示空字典不代表模拟器权限缺失。最新 `build-for-testing` 已成功，并检查嵌入的 application-identifier / keychain-access-groups 和完整签名。
+产物为 `/tmp/yolo-agents-ios-derived-data/Build/Products/Debug-iphonesimulator/YoloAgentsIOS.app`；生成的 Info.plist 经 `plutil -lint` 检查通过。最初关闭签名的版本仅验证了编译，main 实际启动后遇到 Keychain -34018。工程现已对 Simulator 的 App / SDK 测试 target 配置本地 ad-hoc 签名和专用模拟器 entitlement；不要再传 `CODE_SIGNING_ALLOWED=NO` 运行该 App。`LOCALDEV00` 是仅用于 Simulator 的本地身份前缀，不是开发者账号；真机仍需用户自己的签名配置。Xcode 将模拟器权限嵌入 Mach-O 的 `__TEXT/__entitlements`，因此 `codesign -d --entitlements` 显示空字典不代表模拟器权限缺失。最新 `build-for-testing` 已成功，并检查嵌入的 application-identifier / keychain-access-groups 和完整签名。
 
 早期只有 CLT 时，SwiftPM 的 TestingMacros 插件发现不稳定，曾通过显式加载其自带官方插件完成相同单元测试；该环境的旧构建系统还缺少 Testing framework 搜索路径。此记录保留为历史，当前使用上面的完整 Xcode 正常命令。代码中的 `ViewState` 是经典 SwiftUI `State` 属性包装器的类型别名，用于避开早期 CLT 未附带的同名宏插件；没有修改系统 SDK 或使用私有 API。
 
@@ -44,7 +44,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -project YoloAgents.xcodeproj -scheme YoloAgentsMac -configuration Debug \
-  -destination 'generic/platform=macOS' -derivedDataPath /tmp/trading-agent-ios-derived-data \
+  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-ios-derived-data \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
 ```
 
@@ -99,12 +99,12 @@ python3 bin/test-chat-integration.py --sdk-only --testing-plugin /Library/Develo
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -project YoloAgents.xcodeproj -scheme YoloAgentsIOS -configuration Debug \
   -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath /tmp/trading-agent-ios-derived-data build-for-testing
+  -derivedDataPath /tmp/yolo-agents-ios-derived-data build-for-testing
 ```
 
 输出为 `TEST BUILD SUCCEEDED`。当前测试运行描述文件为：
 
-`/tmp/trading-agent-ios-derived-data/Build/Products/YoloAgentsIOS_iphonesimulator27.1-arm64-x86_64.xctestrun`
+`/tmp/yolo-agents-ios-derived-data/Build/Products/YoloAgentsIOS_iphonesimulator27.1-arm64-x86_64.xctestrun`
 
 这是 format 1 的标准 xctestrun，顶层 target 名称 `YoloAgentsIOSSDKTests`；App、测试 bundle 都已本地签名。main 使用 iPhone 17 Pro / iOS 27.0 完成了实际运行，最低部署版本仍为 iOS 17。
 
@@ -113,7 +113,7 @@ main 的统一 runner 可在仓库根目录运行，设备 ID 从外部提供：
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer python3 bin/test-chat-integration.py \
   --ios-simulator "$YOLO_AGENTS_SIMULATOR_ID" \
-  --xctestrun /tmp/trading-agent-ios-derived-data/Build/Products/YoloAgentsIOS_iphonesimulator27.1-arm64-x86_64.xctestrun
+  --xctestrun /tmp/yolo-agents-ios-derived-data/Build/Products/YoloAgentsIOS_iphonesimulator27.1-arm64-x86_64.xctestrun
 ```
 
 使用已有的外部临时服务时，将 `YOLO_AGENTS_TEST_URL`、`YOLO_AGENTS_PAIRING_CODE`、`YOLO_AGENTS_TEST_PLATFORM=ios` 注入**临时副本** xctestrun 的 `YoloAgentsIOSSDKTests.EnvironmentVariables`，保留 `YOLO_AGENTS_RUNNING_SDK_TESTS=1`；不要把配对码写入共享 scheme 或仓库。单纯设置 xcodebuild 自身进程的环境不保证传入 iOS 测试进程。副本保存在权限为 0600 的临时文件，移动副本前应将原始 `__TESTROOT__` 替换为原始 xctestrun 所在目录的绝对路径，保留 XCTest 自己解析的 `__TESTHOST__` 等占位符，再执行：

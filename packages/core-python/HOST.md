@@ -20,7 +20,7 @@ PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo
 本地协议验证可以指定临时或单独的数据目录和端口：
 
 ```sh
-PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --data-dir /tmp/trading-agent-demo --port 8765
+PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --data-dir /tmp/yolo-agents-demo --port 8765
 ```
 
 关闭客户端窗口不会停止独立运行的后端。终端 Ctrl-C / SIGTERM 关闭服务；相同数据目录只允许一个服务实例。重启保留会话、消息、事件和设备授权；Runtime 已保存的完整回复可补齐产品结果，其余未完成回复显示中断，不自动重新执行模型或工具。
