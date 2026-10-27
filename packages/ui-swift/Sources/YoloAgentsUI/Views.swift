@@ -20,7 +20,9 @@ public struct YoloAgentsRootView: View {
             }
         }
         .task { await model.start() }
-        .onChange(of: scenePhase) { _, phase in model.setActive(phase == .active) }
+        .onAppear { updateActivity(scenePhase) }
+        .onChange(of: scenePhase, initial: true) { _, phase in updateActivity(phase) }
+        .onDisappear { model.setActive(false) }
         .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil }, set: {
             if !$0 { model.errorMessage = nil }
         })) {
@@ -28,6 +30,13 @@ public struct YoloAgentsRootView: View {
         } message: { Text(model.errorMessage ?? "") }
         #if os(macOS)
         .frame(minWidth: 760, minHeight: 560)
+        #endif
+    }
+    private func updateActivity(_ phase: ScenePhase) {
+        #if os(iOS)
+        model.setActive(phase == .active)
+        #else
+        model.setActive(phase != .background)
         #endif
     }
 }
@@ -147,8 +156,10 @@ private struct ChatShell: View {
     @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
+    @ViewState private var showAccount = false
     @ViewState private var renaming: Conversation? = nil
     @ViewState private var newTitle = ""
+    @ViewState private var drafts = ComposerDrafts()
     private var conversations: [Conversation] {
         model.state.conversations.filter {
             (includeArchived || !$0.archived) &&
@@ -159,6 +170,9 @@ private struct ChatShell: View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 List(selection: $model.selectedID) {
+                    Button { Task { await model.createConversation() } } label: {
+                        Label("新会话", systemImage: "square.and.pencil")
+                    }.disabled(!model.isOnline || model.busy)
                     ForEach(conversations) { conversation in
                         NavigationLink(value: conversation.id) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -180,6 +194,10 @@ private struct ChatShell: View {
                 }
                 Toggle("显示归档", isOn: $includeArchived)
                     .toggleStyle(.switch).font(.caption).padding()
+                Button { showAccount = true } label: {
+                    Label("Codex 账号", systemImage: "person.crop.circle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).padding(.horizontal).padding(.top, 8)
                 Button { showSettings = true } label: {
                     Label(model.connectionState.label, systemImage: "gearshape")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -187,17 +205,15 @@ private struct ChatShell: View {
             }
             .navigationTitle("会话")
             .searchable(text: $query, prompt: "搜索已同步的会话标题")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { Task { await model.createConversation() } } label: {
-                        Label("新会话", systemImage: "square.and.pencil")
-                    }.disabled(!model.isOnline || model.busy)
-                }
-            }
         } detail: {
-            ChatDetail(model: model, openSettings: { showSettings = true })
+            ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true }, openAccount: { showAccount = true })
         }
         .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
+        .sheet(isPresented: $showAccount) {
+            if let connection = model.connection {
+                CodexAccountView(connection: connection) { Task { await model.refreshModels() } }
+            }
+        }
         .alert("重命名会话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("会话名称", text: $newTitle)
             Button("保存") {
@@ -213,14 +229,15 @@ private struct ChatShell: View {
 
 private struct ChatDetail: View {
     @ObservedObject var model: ChatModel
+    @Binding var drafts: ComposerDrafts
     let openSettings: () -> Void
-    @ViewState private var drafts: [UUID: String] = [:]
-    @FocusState private var composerFocused: Bool
-    private var draft: Binding<String> {
-        Binding(get: { model.selectedID.flatMap { drafts[$0] } ?? "" }, set: {
-            if let id = model.selectedID { drafts[id] = $0 }
-        })
+    let openAccount: () -> Void
+    private var composerAvailability: ComposerAvailability {
+        ComposerAvailability(hasConversation: model.selectedID != nil,
+                             archived: model.selectedConversation?.archived == true,
+                             online: model.isOnline, busy: model.busy)
     }
+
     var body: some View {
         VStack(spacing: 0) {
             connectionBanner
@@ -234,6 +251,8 @@ private struct ChatDetail: View {
                         .disabled(!model.isOnline || model.busy)
                 }
             } else {
+                modelSelector
+                Divider()
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
@@ -255,41 +274,95 @@ private struct ChatDetail: View {
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding().frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
                     }
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: model.messages) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                     .onChange(of: model.partialReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 }
                 .task(id: model.selectedID) { await model.loadSelectedMessages() }
-                Divider()
-                HStack(alignment: .bottom, spacing: 12) {
-                    TextField(model.isOnline ? "输入消息…" : "离线时可查看历史", text: draft, axis: .vertical)
-                        .lineLimit(1...6).textFieldStyle(.plain).focused($composerFocused)
-                        .padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                        .disabled(!model.isOnline || model.selectedConversation?.archived == true)
-                    Button {
-                        let content = draft.wrappedValue
-                        let conversationID = model.selectedID
-                        Task {
-                            guard model.selectedID == conversationID else { return }
-                            if await model.send(content), let id = conversationID, drafts[id] == content { drafts[id] = nil }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 30))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("发送消息")
-                    .disabled(!model.isOnline || model.busy || model.selectedConversation?.archived == true ||
-                              draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }.padding()
             }
         }
         .navigationTitle(model.selectedConversation?.title ?? "Trading Agent")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) { Button(action: openSettings) { Label("连接设置", systemImage: "gearshape") } }
+            #if os(iOS)
+            ToolbarItem(placement: .topBarLeading) { newConversationButton }
+            #else
+            ToolbarItem(placement: .navigation) { newConversationButton }
+            #endif
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(action: openAccount) { Label("Codex 账号", systemImage: "person.crop.circle") }
+                Button(action: openSettings) { Label("连接设置", systemImage: "gearshape") }
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            Text("仅聊天与查看 · 数据以 Mac 服务端为准")
-                .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 6)
+            VStack(spacing: 0) {
+                if let id = model.selectedID {
+                    Divider()
+                    ChatComposer(conversationID: id, text: Binding(
+                        get: { drafts.text(for: id) }, set: { drafts.set($0, for: id) }),
+                        isEditable: composerAvailability.canEdit,
+                        canSend: composerAvailability.canSend,
+                        online: model.isOnline, onSend: { sendDraft(in: id) })
+                        .id(id)
+                }
+                Text("仅聊天与查看 · 数据以 Mac 服务端为准")
+                    .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 6)
+            }.background(.bar)
         }
+    }
+    private var newConversationButton: some View {
+        Button { Task { await model.createConversation() } } label: {
+            Label("新会话", systemImage: "square.and.pencil")
+        }
+        .keyboardShortcut("n", modifiers: .command)
+        .accessibilityIdentifier("chat.new-conversation")
+        .disabled(!model.isOnline || model.busy)
+    }
+    private func sendDraft(in id: UUID) {
+        guard let submission = drafts.submission(for: id) else { return }
+        Task {
+            guard model.selectedID == id else { return }
+            let accepted = await model.send(submission.content)
+            drafts.finish(submission, accepted: accepted)
+        }
+    }
+    private var modelSelector: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Menu {
+                    Button {
+                        Task { await model.changeModel(.serverDefault) }
+                    } label: {
+                        if model.selectedConversation?.model == nil { Label("使用服务默认模型", systemImage: "checkmark") }
+                        else { Text("使用服务默认模型") }
+                    }
+                    ForEach(model.modelCatalog?.models ?? []) { option in
+                        Button {
+                            Task { await model.changeModel(.model(option.id)) }
+                        } label: {
+                            if model.selectedConversation?.model == option.id { Label(option.name, systemImage: "checkmark") }
+                            else { Text(option.name) }
+                        }
+                    }
+                    Divider()
+                    Button("刷新模型列表") { Task { await model.refreshModels() } }
+                        .disabled(model.modelCatalogLoading)
+                } label: {
+                    Label(model.selectedModelName, systemImage: "chevron.down")
+                }
+                .accessibilityLabel("会话模型")
+                .accessibilityIdentifier("chat.model-picker")
+                .disabled(!model.isOnline || model.busy || model.selectedConversation?.archived == true)
+                Spacer()
+                if model.modelCatalogLoading { ProgressView().controlSize(.small) }
+                if model.modelCatalog?.auth?.needsLogin == true {
+                    Text("请在 Mac 上完成 Codex 登录").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            if let error = model.modelCatalogError {
+                Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                Button("重新加载模型") { Task { await model.refreshModels() } }.font(.caption)
+            }
+        }.padding(.horizontal).padding(.vertical, 8)
     }
     private var connectionBanner: some View {
         HStack(spacing: 8) {
@@ -297,10 +370,8 @@ private struct ChatDetail: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.connectionState.label).font(.caption.bold())
                 if case .offline(let reason) = model.connectionState { Text(reason).font(.caption2).lineLimit(2) }
-                if let health = model.health {
-                    Text(health.agentMode == "demo" ? "演示模式 · 未调用真实模型或券商" :
-                         "助手模式：\(health.agentMode)\(health.model.map { " · \($0)" } ?? "")")
-                        .font(.caption2).foregroundStyle(.secondary)
+                if let health = model.health, health.agentMode == "demo" {
+                    Text("演示模式 · 未调用真实模型或券商").font(.caption2).foregroundStyle(.secondary)
                 }
             }
             Spacer()

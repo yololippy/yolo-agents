@@ -22,17 +22,35 @@ public final class ChatModel: ObservableObject {
     @Published public private(set) var state = ClientState()
     @Published public private(set) var connectionState: ConnectionState = .disconnected
     @Published public private(set) var health: Health?
+    @Published public private(set) var modelCatalog: ModelCatalog?
+    @Published public private(set) var modelCatalogError: String?
+    @Published public private(set) var modelCatalogLoading = false
     @Published public private(set) var busy = false
     @Published public var selectedID: UUID?
     @Published public var errorMessage: String?
     private let repository: ClientRepository
-    private var polling: Task<Void, Never>?
+    private let transport: any HTTPTransport
+    private let streamTransport: any SSETransport
+    private var synchronizationTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = true
 
-    public init(repository: ClientRepository = ClientRepository()) { self.repository = repository }
+    public init(repository: ClientRepository = ClientRepository(),
+                transport: any HTTPTransport = URLSessionTransport(),
+                streamTransport: any SSETransport = URLSessionSSETransport()) {
+        self.repository = repository; self.transport = transport; self.streamTransport = streamTransport
+    }
+    private func client(for connection: PairedConnection) -> APIClient {
+        APIClient(endpoint: connection.endpoint, token: connection.pairing.token,
+                  transport: transport, streamTransport: streamTransport)
+    }
     public var isOnline: Bool { connectionState == .online }
     public var selectedConversation: Conversation? { state.conversations.first { $0.id == selectedID } }
+    public var effectiveModel: String? { selectedConversation?.model ?? modelCatalog?.defaultModel ?? health?.model }
+    public var selectedModelName: String {
+        guard let id = effectiveModel else { return "默认模型" }
+        return modelCatalog?.models.first(where: { $0.id == id })?.name ?? id
+    }
     public var messages: [Message] { selectedID.map { state.messages(in: $0) } ?? [] }
     public var partialReplies: [PartialReply] {
         state.partialReplies.filter { $0.conversationID == selectedID }.sorted { $0.createdAt < $1.createdAt }
@@ -48,14 +66,20 @@ public final class ChatModel: ObservableObject {
         guard !started else { return }
         defer { started = true }
         do {
-            connection = try repository.connection()
-            if let connection {
+            let repository = repository
+            let restored = try await Task.detached(priority: .userInitiated) {
+                let connection = try repository.connection()
+                let state = try connection.map { try repository.state(for: $0) }
+                return (connection, state)
+            }.value
+            connection = restored.0
+            if let connection, let restoredState = restored.1 {
                 guard connection.pairing.apiVersion == 1, connection.pairing.device.revokedAt == nil else {
                     connectionState = .authorizationRequired; return
                 }
-                state = try repository.state(for: connection)
+                state = restoredState
                 selectedID = state.conversations.first(where: { !$0.archived })?.id
-                startPolling()
+                startSynchronizing()
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -66,7 +90,7 @@ public final class ChatModel: ObservableObject {
         let attempt = generation
         do {
             let endpoint = try ServiceEndpoint(address, allowInsecureLocalHTTP: allowHTTP)
-            let client = APIClient(endpoint: endpoint)
+            let client = APIClient(endpoint: endpoint, transport: transport, streamTransport: streamTransport)
             let health = try await client.health()
             guard health.apiVersion == 1 else { throw ClientError.incompatibleServer }
             let response = try await client.pair(code: code.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -77,13 +101,14 @@ public final class ChatModel: ObservableObject {
             let connection = PairedConnection(endpoint: endpoint, pairing: response)
             try repository.saveState(ClientState(), for: connection)
             try repository.saveConnection(connection)
-            polling?.cancel(); polling = nil
+            synchronizationTask?.cancel(); synchronizationTask = nil
             generation = UUID()
             self.connection = connection; self.health = health
+            modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
             state = ClientState(); selectedID = nil
             connectionState = .disconnected
             errorMessage = nil
-            startPolling()
+            startSynchronizing()
             return true
         } catch {
             if generation == attempt { errorMessage = error.localizedDescription }
@@ -92,26 +117,26 @@ public final class ChatModel: ObservableObject {
     }
     public func setActive(_ value: Bool) {
         active = value
-        if value { startPolling() } else {
-            polling?.cancel(); polling = nil
+        if value { startSynchronizing() } else {
+            synchronizationTask?.cancel(); synchronizationTask = nil
             if connectionState == .online || connectionState == .connecting { connectionState = .disconnected }
         }
     }
     public func reconnect() {
         guard connectionState != .authorizationRequired else { return }
-        polling?.cancel(); polling = nil
+        synchronizationTask?.cancel(); synchronizationTask = nil
         // Invalidate every in-flight operation before making a replacement connection.
         generation = UUID()
         var next = state
         next.prepareForLaunch()
         do { try commit(next) } catch { errorMessage = error.localizedDescription }
-        startPolling()
+        startSynchronizing()
     }
-    private func startPolling() {
-        guard active, connection != nil, polling == nil, connectionState != .authorizationRequired else { return }
+    private func startSynchronizing() {
+        guard active, connection != nil, synchronizationTask == nil, connectionState != .authorizationRequired else { return }
         connectionState = .connecting
         let attempt = generation
-        polling = Task { [weak self] in
+        synchronizationTask = Task { [weak self] in
             var needsSnapshot = true
             var retrySeconds: UInt64 = 2
             while !Task.isCancelled {
@@ -120,13 +145,31 @@ public final class ChatModel: ObservableObject {
                     try await self.synchronize(refresh: needsSnapshot, attempt: attempt)
                     try Task.checkCancellation()
                     guard self.generation == attempt else { return }
+                    guard let connection = self.connection else { return }
+                    let stream = try await self.client(for: connection).eventStream(after: self.state.cursor)
+                    defer { stream.cancel() }
+                    try self.check(attempt)
                     self.connectionState = .online
                     needsSnapshot = false; retrySeconds = 2
+                    let openedAt = ContinuousClock.now
+                    var receivedEvent = false
+                    for try await event in stream {
+                        try self.check(attempt)
+                        try self.commit(self.state.applying(event))
+                        receivedEvent = true
+                    }
+                    try self.check(attempt)
+                    // Normal server rotation reconnects immediately. An endpoint that
+                    // closes without events must not cause an unbounded request loop.
+                    if !receivedEvent && openedAt.duration(to: .now) < .seconds(1) {
+                        throw URLError(.networkConnectionLost)
+                    }
+                    continue
                 } catch {
                     guard !Task.isCancelled, self.generation == attempt else { return }
                     if let error = error as? ClientError, error.requiresPairing {
                         self.connectionState = .authorizationRequired
-                        self.polling = nil
+                        self.synchronizationTask = nil
                         return
                     }
                     self.connectionState = .offline(error.localizedDescription)
@@ -140,7 +183,7 @@ public final class ChatModel: ObservableObject {
     }
     private func synchronize(refresh: Bool, attempt: UUID) async throws {
         guard let connection else { return }
-        let api = APIClient(endpoint: connection.endpoint, token: connection.pairing.token)
+        let api = client(for: connection)
         if refresh {
             let health = try await api.health()
             try check(attempt)
@@ -148,6 +191,8 @@ public final class ChatModel: ObservableObject {
                 throw ClientError.incompatibleServer
             }
             self.health = health
+            await refreshModels()
+            try check(attempt)
             let conversations = try await api.conversations(includeArchived: true)
             try check(attempt)
             var next = state
@@ -183,7 +228,7 @@ public final class ChatModel: ObservableObject {
         guard let id = selectedID, let connection, isOnline else { return }
         let attempt = generation
         do {
-            let messages = try await APIClient(endpoint: connection.endpoint, token: connection.pairing.token)
+            let messages = try await client(for: connection)
                 .messages(conversationID: id)
             try check(attempt)
             var next = state
@@ -197,7 +242,7 @@ public final class ChatModel: ObservableObject {
         defer { busy = false }
         let attempt = generation
         do {
-            let conversation = try await APIClient(endpoint: connection.endpoint, token: connection.pairing.token)
+            let conversation = try await client(for: connection)
                 .createConversation(title: "新会话")
             try check(attempt)
             var next = state; next.upsertConversation(conversation)
@@ -205,11 +250,43 @@ public final class ChatModel: ObservableObject {
             selectedID = conversation.id
         } catch { handle(error, attempt: attempt) }
     }
+    public func refreshModels() async {
+        guard let connection, !modelCatalogLoading else { return }
+        let attempt = generation
+        modelCatalogLoading = true
+        defer { if generation == attempt { modelCatalogLoading = false } }
+        do {
+            let catalog = try await client(for: connection).models()
+            try check(attempt)
+            modelCatalog = catalog
+            modelCatalogError = catalog.error?.message
+        } catch {
+            guard generation == attempt, !Task.isCancelled else { return }
+            modelCatalogError = error.localizedDescription
+        }
+    }
+    public func changeModel(_ selection: ConversationModelSelection) async {
+        guard isOnline, !busy, let connection, let conversation = selectedConversation, !conversation.archived else { return }
+        busy = true
+        defer { busy = false }
+        let attempt = generation
+        do {
+            let updated = try await client(for: connection).updateConversation(conversation.id, model: selection)
+            try check(attempt)
+            var next = state; next.upsertConversation(updated); try commit(next)
+        } catch {
+            guard generation == attempt, !(error is CancellationError) else { return }
+            // Catalog selection is not proof of provider entitlement. Preserve the
+            // current model and show the actual server error when selection fails.
+            errorMessage = error.localizedDescription
+            if case ClientError.http(let status, _, _) = error, status == 401 { handle(error, attempt: attempt) }
+        }
+    }
     public func updateConversation(_ conversation: Conversation, title: String? = nil, archived: Bool? = nil) async {
         guard isOnline, let connection else { return }
         let attempt = generation
         do {
-            let updated = try await APIClient(endpoint: connection.endpoint, token: connection.pairing.token)
+            let updated = try await client(for: connection)
                 .updateConversation(conversation.id, title: title, archived: archived)
             try check(attempt)
             var next = state; next.upsertConversation(updated); try commit(next)
@@ -246,7 +323,7 @@ public final class ChatModel: ObservableObject {
         defer { busy = false }
         let attempt = generation
         do {
-            let response = try await APIClient(endpoint: connection.endpoint, token: connection.pairing.token)
+            let response = try await client(for: connection)
                 .sendMessage(conversationID: outgoing.conversationID, clientMessageID: id, content: outgoing.content)
             try check(attempt)
             var next = state; try next.accept(response, clientMessageID: id); try commit(next)
@@ -261,17 +338,18 @@ public final class ChatModel: ObservableObject {
         guard generation == attempt, !(error is CancellationError) else { return }
         errorMessage = error.localizedDescription
         if let error = error as? ClientError, error.requiresPairing {
-            polling?.cancel(); polling = nil
+            synchronizationTask?.cancel(); synchronizationTask = nil
             connectionState = .authorizationRequired
         }
     }
     public func disconnect() {
-        polling?.cancel(); polling = nil; generation = UUID()
+        synchronizationTask?.cancel(); synchronizationTask = nil; generation = UUID()
         if let connection {
             do { try repository.forget(connection) }
             catch { errorMessage = error.localizedDescription }
         }
         connection = nil; state = ClientState(); selectedID = nil; health = nil
+        modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
         connectionState = .disconnected
     }
 }

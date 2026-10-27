@@ -17,5 +17,9 @@ let package = Package(
                 .product(name: "YoloAgentsSDK", package: "sdk-swift"),
             ]
         ),
+        .testTarget(name: "YoloAgentsUITests", dependencies: [
+            .target(name: "YoloAgentsUI"),
+            .product(name: "YoloAgentsSDK", package: "sdk-swift"),
+        ]),
     ]
 )
