@@ -125,6 +125,9 @@ public struct ClientState: Codable, Equatable, Sendable {
         next.cursor = lastSeq
         return next
     }
+    public func applying(_ event: ServerEvent) throws -> ClientState {
+        try applying(EventsPage(events: [event], nextCursor: max(cursor, event.seq), hasMore: false))
+    }
     private mutating func apply(_ event: ServerEvent) throws {
         switch event.type {
         case "conversation.updated":

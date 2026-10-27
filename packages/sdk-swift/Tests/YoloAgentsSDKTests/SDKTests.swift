@@ -131,12 +131,14 @@ func invalidServiceAddressesFail(_ value: String) {
     let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"), token: "fixture-token", transport: transport)
     for _ in 0..<2 { _ = try await api.sendMessage(conversationID: conversationID, clientMessageID: clientID, content: "你好") }
     let requests = await transport.requests
-    #expect(requests[0].httpBody == requests[1].httpBody)
+    let firstData = try #require(requests[0].httpBody)
+    let secondData = try #require(requests[1].httpBody)
+    let firstBody = try #require(JSONSerialization.jsonObject(with: firstData) as? [String: String])
+    let secondBody = try #require(JSONSerialization.jsonObject(with: secondData) as? [String: String])
+    #expect(firstBody == secondBody)
     #expect(requests[0].httpMethod == "POST")
-    let bodyData = try #require(requests[0].httpBody)
-    let body = try #require(JSONSerialization.jsonObject(with: bodyData) as? [String: String])
-    #expect(body["client_message_id"] == clientID.uuidString)
-    #expect(body["content"] == "你好")
+    #expect(firstBody["client_message_id"] == clientID.uuidString)
+    #expect(firstBody["content"] == "你好")
 }
 
 @Test func missingTokenDoesNotReachTransport() async throws {

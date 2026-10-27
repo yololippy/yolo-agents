@@ -48,12 +48,14 @@ public struct Conversation: Codable, Equatable, Sendable, Identifiable {
     public let createdAt: Date
     public var updatedAt: Date
     public var archived: Bool
-    public init(id: UUID, title: String, createdAt: Date, updatedAt: Date, archived: Bool = false) {
+    public var model: String?
+    public init(id: UUID, title: String, createdAt: Date, updatedAt: Date, archived: Bool = false, model: String? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.updatedAt = updatedAt; self.archived = archived
+        self.model = model
     }
     enum CodingKeys: String, CodingKey {
-        case id, title, archived
+        case id, title, archived, model
         case createdAt = "created_at", updatedAt = "updated_at"
     }
 }

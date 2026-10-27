@@ -9,6 +9,8 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
     case incompatibleServer
     case invalidEventPage
     case invalidEvent(String)
+    case streamOverflow
+    case untrustedAuthorizationURL
     public var errorDescription: String? {
         switch self {
         case .invalidEndpoint: "服务地址无效，请填写完整地址，且不要包含用户名、密码、参数或片段。"
@@ -19,6 +21,8 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
         case .incompatibleServer: "服务身份或协议版本不匹配，请核对地址并重新配对。"
         case .invalidEventPage: "同步数据的顺序或游标无效，已停止推进游标。"
         case .invalidEvent(let type): "同步事件缺少必要字段：\(type)"
+        case .streamOverflow: "实时数据暂时积压，将从已保存的位置重新同步。"
+        case .untrustedAuthorizationURL: "服务返回的登录地址不是受信任的官方授权地址，已停止打开浏览器。"
         }
     }
     public var requiresPairing: Bool {
@@ -84,7 +88,7 @@ public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> HTTPResult
 }
 
-private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
@@ -121,12 +125,27 @@ public struct APIClient: Sendable {
     public let endpoint: ServiceEndpoint
     private let token: String?
     private let transport: any HTTPTransport
+    let streamTransport: any SSETransport
     public init(endpoint: ServiceEndpoint, token: String? = nil,
-                transport: any HTTPTransport = URLSessionTransport()) {
+                transport: any HTTPTransport = URLSessionTransport(),
+                streamTransport: any SSETransport = URLSessionSSETransport()) {
         self.endpoint = endpoint; self.token = token; self.transport = transport
+        self.streamTransport = streamTransport
     }
     public func health() async throws -> Health {
         try await request("GET", path: "health", authenticated: false)
+    }
+    public func models() async throws -> ModelCatalog {
+        try await request("GET", path: "models")
+    }
+    public func account() async throws -> CodexAccountStatus {
+        try await request("GET", path: "codex/account")
+    }
+    public func startAccountLogin() async throws -> CodexLoginResponse {
+        try await request("POST", path: "codex/account/login", body: Data("{}".utf8))
+    }
+    public func logoutAccount() async throws -> CodexAccountStatus {
+        try await request("POST", path: "codex/account/logout", body: Data("{}".utf8))
     }
     public func pair(code: String, name: String, platform: DevicePlatform) async throws -> PairingResponse {
         struct Body: Encodable {
@@ -150,18 +169,35 @@ public struct APIClient: Sendable {
         let response: Response = try await request("GET", path: "conversations", query: queryItems)
         return response.conversations
     }
-    public func createConversation(title: String) async throws -> Conversation {
-        struct Body: Encodable { let title: String }
+    public func createConversation(title: String, model: String? = nil) async throws -> Conversation {
+        struct Body: Encodable { let title: String; let model: String? }
         struct Response: Decodable { let conversation: Conversation }
         let response: Response = try await request("POST", path: "conversations",
-            body: WireJSON.encoder().encode(Body(title: title)))
+            body: WireJSON.encoder().encode(Body(title: title, model: model)))
         return response.conversation
     }
-    public func updateConversation(_ id: UUID, title: String? = nil, archived: Bool? = nil) async throws -> Conversation {
-        struct Body: Encodable { let title: String?; let archived: Bool? }
+    public func updateConversation(_ id: UUID, title: String? = nil, archived: Bool? = nil,
+                                   model: ConversationModelSelection? = nil) async throws -> Conversation {
+        struct Body: Encodable {
+            let title: String?
+            let archived: Bool?
+            let model: ConversationModelSelection?
+            enum CodingKeys: String, CodingKey { case title, archived, model }
+            func encode(to encoder: Encoder) throws {
+                var values = encoder.container(keyedBy: CodingKeys.self)
+                try values.encodeIfPresent(title, forKey: .title)
+                try values.encodeIfPresent(archived, forKey: .archived)
+                if let model {
+                    switch model {
+                    case .serverDefault: try values.encodeNil(forKey: .model)
+                    case .model(let id): try values.encode(id, forKey: .model)
+                    }
+                }
+            }
+        }
         struct Response: Decodable { let conversation: Conversation }
         let response: Response = try await request("PATCH", path: "conversations/\(id.uuidString)",
-            body: WireJSON.encoder().encode(Body(title: title, archived: archived)))
+            body: WireJSON.encoder().encode(Body(title: title, archived: archived, model: model)))
         return response.conversation
     }
     public func messages(conversationID: UUID) async throws -> [Message] {
@@ -180,7 +216,7 @@ public struct APIClient: Sendable {
         let body = try WireJSON.encoder().encode(MessageSubmission(client_message_id: UUID(), content: content))
         guard content.unicodeScalars.count <= 16_000, body.count <= 65_536 else { throw ClientError.messageTooLong }
     }
-    /// Global polling is the v1 compatibility transport. Always drain has_more before waiting.
+    /// REST catch-up before reconnecting eventStream. Always drain has_more before opening SSE.
     public func events(after cursor: Int64, limit: Int = 200, conversationID: UUID? = nil) async throws -> EventsPage {
         var query = [URLQueryItem(name: "after", value: String(cursor)),
                      URLQueryItem(name: "limit", value: String(min(200, max(1, limit))))]
@@ -189,6 +225,15 @@ public struct APIClient: Sendable {
     }
     private func request<Response: Decodable>(_ method: String, path: String,
         query: [URLQueryItem] = [], body: Data? = nil, authenticated: Bool = true) async throws -> Response {
+        let request = try makeRequest(method, path: path, query: query, body: body, authenticated: authenticated)
+        let result = try await transport.send(request)
+        guard (200...299).contains(result.status) else {
+            throw Self.responseError(status: result.status, data: result.data)
+        }
+        return try WireJSON.decoder().decode(Response.self, from: result.data)
+    }
+    func makeRequest(_ method: String, path: String, query: [URLQueryItem] = [],
+                     body: Data? = nil, authenticated: Bool = true) throws -> URLRequest {
         var components = URLComponents(url: endpoint.url.appendingPathComponent("v1").appendingPathComponent(path),
                                        resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
@@ -203,12 +248,11 @@ public struct APIClient: Sendable {
             }
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        let result = try await transport.send(request)
-        guard (200...299).contains(result.status) else {
-            let envelope = try? WireJSON.decoder().decode(ErrorEnvelope.self, from: result.data)
-            throw ClientError.http(status: result.status, code: envelope?.error?.code,
-                message: envelope?.error?.message ?? envelope?.detail ?? "请求未完成，请稍后重试。")
-        }
-        return try WireJSON.decoder().decode(Response.self, from: result.data)
+        return request
+    }
+    static func responseError(status: Int, data: Data) -> ClientError {
+        let envelope = try? WireJSON.decoder().decode(ErrorEnvelope.self, from: data)
+        return .http(status: status, code: envelope?.error?.code,
+                     message: envelope?.error?.message ?? envelope?.detail ?? "请求未完成，请稍后重试。")
     }
 }
