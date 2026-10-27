@@ -4,9 +4,9 @@ Swift 6、Foundation、Security 和 SwiftUI；没有外部 Swift 包依赖。最
 
 ## 已实现
 
-- `YoloAgentsSDK`：协议 v1 的 snake_case / UUID / 带时区 ISO8601 模型，设备配对、健康、会话列表/搜索/创建/改名/归档、消息、全局事件分页及自身设备令牌撤销。
+- `YoloAgentsSDK`：协议 v1 的 snake_case / UUID / 带时区 ISO8601 模型，设备配对、健康、会话列表/搜索/创建/改名/归档、会话模型选择、模型目录、消息、SSE 与全局事件分页及自身设备令牌撤销。
 - `YoloAgentsUI`：iPhone / iPad / Mac 自适应聊天界面、连接设置、会话切换、标题搜索、归档、流式文本、失败状态与手动重试。
-- 全局游标增量轮询：正常每 2 秒一次，失败后最多退避到 30 秒；立即排空 `has_more`，处理并保存一页后才推进游标，按 seq 和消息 ID 去重。后台暂停、回前台恢复，撤销/失效令牌停止同步并提示重新配对。
+- 实时回复直接消费 SSE 字节流；启动或断线后从已保存的全局游标排空 REST `has_more`，再接回 SSE。处理并保存后推进游标，按 seq 和消息 ID 去重；错误退避最多 30 秒。iOS 非活动阶段取消连接、恢复后补齐，撤销/失效令牌停止同步并提示重新配对。
 - 发送前保存原始请求 UUID；网络结果不明时保留该 ID、原文和会话，手动重试取得原结果，不自动重放。202 只显示已送达，最终完成/失败由服务端消息和事件决定。
 - 设备 token、服务地址、配对信息和离线工作集均保存在设备专属 Keychain，不使用 UserDefaults 保存聊天或凭据，不写日志。缓存最多 50 个最近会话、每会话 300 条消息，并有约 1.5 MB 的消息文本预算；未确认发送请求额外保留。完整历史仍以 Mac 服务数据库为准。
 - iPhone 和 Mac 客户端当前均只有聊天与查看入口。没有订单确认、提交或可执行计划授权 UI；协议不包含模型框架内部对象。
@@ -37,9 +37,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 早期只有 CLT 时，SwiftPM 的 TestingMacros 插件发现不稳定，曾通过显式加载其自带官方插件完成相同单元测试；该环境的旧构建系统还缺少 Testing framework 搜索路径。此记录保留为历史，当前使用上面的完整 Xcode 正常命令。代码中的 `ViewState` 是经典 SwiftUI `State` 属性包装器的类型别名，用于避开早期 CLT 未附带的同名宏插件；没有修改系统 SDK 或使用私有 API。
 
-正式 App 工程为 `YoloAgents.xcodeproj`，共享 `YoloAgentsIOS` / `YoloAgentsMac` schemes，通过本地 Swift Package 引用通信和界面库。main 已统一准备 Simulator runtime 并完成下述 SDK / Keychain / 网络测试；正常启动后的 UI 交互仍需单独记录。真机运行前选择自己的签名 Team、唯一 Bundle Identifier 和已信任的设备。
+正式 App 工程为 `YoloAgents.xcodeproj`，共享 `YoloAgentsIOS` / `YoloAgentsMac` schemes，通过本地 Swift Package 引用通信和界面库。main 已统一准备 Simulator runtime 并完成下述 SDK / Keychain / 网络测试；Mac 正常启动后的真实 UI 交互也已记录。真机运行前选择自己的签名 Team、唯一 Bundle Identifier 和已信任的设备。
 
-`YoloAgentsMac` scheme 已用以下本地 ad-hoc 命令构建成功；产物在同一 DerivedData 的 `Build/Products/Debug/YoloAgentsMac.app`，本次未启动 Mac UI 或验收其真实 Keychain：
+`YoloAgentsMac` scheme 可用以下本地 ad-hoc 命令做纯编译检查；正式 UI 验收使用稳定的 Apple Development 签名，避免每次改变签名哈希都重新申请钥匙串访问：
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
@@ -49,6 +49,15 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 ```
 
 macOS 命令行原型与签名 App 的 Keychain 身份可能不同；调试重签名可能需要系统重新授权访问。纯 SDK 单元测试使用内存 SecureStore；iOS 专用测试仅操作唯一临时 service/account 并通过 defer 清理，不读取或删除应用已有 Keychain 条目。
+
+稳定签名的本地构建可在 Xcode 已登录开发账号后使用：
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project YoloAgents.xcodeproj -scheme YoloAgentsMac -configuration Debug \
+  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-macos-devsigned \
+  DEVELOPMENT_TEAM='<你的 Team ID>' CODE_SIGN_STYLE=Automatic build
+```
 
 ## 连接服务
 
@@ -140,6 +149,56 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test-without
 
 2026-10-25，Apple Silicon 上的完整 Xcode 27.1（27A9275）已验证共享 SDK 的正常单元测试、macOS SwiftUI / probe 编译、iOS Simulator SDK 的通用 Debug 构建，以及 iPhone 17 Pro / iOS 27.0 Simulator 上 27 项全部通过的 SDK / 真实 Keychain / 临时 demo 网络测试。工程和产物配置经 plist/XML 语法检查。
 
-后续仍需单独验收：正常 Simulator App 的 UI 交互、iPhone 真机和开发签名、云端模型真实调用、外网与远程 HTTPS / ATS / 本地网络权限、应用缓存的完整保存/恢复/清理、推送以及弱网长时运行。模拟器和 Mac 的本地签名构建不代表真机或分发归档通过；Mac UI 和真实 Keychain 仍未实测。
+后续仍需单独验收：正常 Simulator/iPhone 的真实键盘 UI 交互、iPhone 真机开发签名、外网与远程 HTTPS / ATS / 本地网络权限、应用缓存的完整保存/恢复/清理、推送以及弱网长时运行。模拟器和 Mac 的本地签名构建不代表真机或分发归档通过；Mac UI、真实 Keychain 和真实 Codex 调用已完成本机验收。
 
-通知推送、结构化交易结果卡片、完整聊天正文搜索和生产分发不在当前协议/交付中；消息里的结果文本按服务端内容展示。实时更新当前采用协议允许的增量轮询，没有另接 SSE，也没有让 iOS 后台持续轮询。
+通知推送、结构化交易结果卡片、完整聊天正文搜索和生产分发不在当前协议/交付中；消息里的结果文本按服务端内容展示。实时回复使用 SSE，iOS 后台不持续维持该连接。
+
+## 2026-10-27：流式回复、模型选择与输入区
+
+聊天页左上角的新会话按钮使用 `square.and.pencil`，Mac 支持 ⌘N；会话模型菜单位于聊天页上方，可选目录模型或恢复服务默认模型。目录只用于选择，服务端返回的认证、模型不可用及实际生成失败会展示给用户，不会静默当作成功。
+
+原多行 TextField 同时受连接状态禁用、并与消息滚动和外层安全区共同布局；这使输入焦点依赖连接与布局刷新。iOS 改为独立原生 TextEditor，Mac 改为 NSTextView，使用单一底部安全区和按会话稳定的控件身份。重连或发送期间保留编辑能力；发送按钮按连接/发送状态控制，发送后保持焦点。各会话草稿独立，发送期间继续修改的内容不会被迟到响应清空。此改动尚不能代替 main 的 iPhone 真机键盘验证。
+
+SSE 通过认证的 `URLSession.bytes(for:)` 消费，而不是两秒轮询。截断尾帧不交付，重连后补齐；错误 MIME、非法 UTF-8、id/seq 不一致和缓冲区积压会明确报错并从已保存游标恢复。服务端失败消息保持失败状态。客户端不接收 Codex 登录 token，也不提供交易执行入口。
+
+本批验证在包目录执行（临时 scratch path 用于隔离仓库迁移前的旧构建缓存）：
+
+```sh
+# packages/sdk-swift/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-sdk-streaming-build
+# packages/ui-swift/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-ui-streaming-build
+# apps/trading-agent/xcode/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project YoloAgents.xcodeproj -scheme YoloAgentsMac -configuration Debug \
+  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-apple-streaming \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
+```
+
+结果：SDK 37 项通过、1 项真实服务测试未配置环境而跳过；UI 状态 7 项通过；macOS App 本地签名和稳定 Apple Development 签名构建均通过。新测试覆盖 SSE 首事件在连接关闭前交付、UTF-8/CRLF 分片、取消、鉴权失败、坏帧、游标恢复去重、模型可空兼容/显式重置、目录错误、模型变更拒绝、非活动启动和草稿保护。
+
+main 进一步启动真实 `--mode codex` 服务和稳定签名 Mac App，验证 Keychain 恢复连接、左上角新会话、8 个模型的选择菜单、切换到 `gpt-6-luna`、原生多行输入和发送后清空。一次五点中文回复产生 120 个 `assistant.delta`，最终 completed 文本在 UI 正常显示。后端还独立验证了真实受管登录、模型切换后的新 thread 及服务重启 resume。iPhone 真机键盘仍需最终实测。
+
+## 2026-10-27：Mac 输入排版与 Codex 账号
+
+Mac 输入区改用原生 NSTextView，统一正文、placeholder 和插入点的排版参数。Enter 发送，Shift+Enter 换行；中文组字期间 Enter 先交给输入法确认。旧 Cmd+Return 快捷键已移除，避免与编辑器重复处理。iOS 保持 TextEditor，不改变屏幕键盘的换行行为。
+
+“Codex 账号”入口位于侧边栏和聊天工具栏。Mac 管理设备通过 `/v1/codex/account` 查看状态、邮箱和套餐，通过 `/v1/codex/account/login` 发起浏览器登录后轮询。客户端只打开通过 `chatgpt.com` / `auth.openai.com` 官方 host 检查的 HTTPS 授权地址。停止等待或关闭页面仅取消客户端轮询；退出需先确认会影响本机 Codex 受管登录，再调用 `/v1/codex/account/logout`。服务端拒绝退出时，保留先前状态并显示错误。
+
+iOS 和无管理权限设备仅从模型目录读取脱敏登录状态，并引导在 Mac 操作，不调用私有账号接口。邮箱和套餐只在内存展示，不复制 Codex token。
+
+本批验证（在对应目录执行）：
+
+```sh
+# packages/sdk-swift/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-sdk-account-build
+# packages/ui-swift/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-ui-account-build
+# apps/trading-agent/xcode/
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project YoloAgents.xcodeproj -scheme YoloAgentsMac -configuration Debug \
+  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-apple-account \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
+```
+
+SDK 42 项通过、1 项真实服务测试默认跳过；UI 17 项通过；Mac 构建成功。账号测试使用 HTTP fixtures，不打开浏览器、不执行真实 Codex 登录或退出；原生按键测试验证 Enter 单次提交及 Shift+Enter 换行。main 已实测浏览器账号状态界面、Mac 排版、Enter 单次发送及 Shift+Enter 换行；iPhone 真机键盘仍需验收。
