@@ -11,6 +11,14 @@ import threading
 from typing import Any, Iterator
 from uuid import uuid4
 
+UNSET = object()
+
+
+def validate_model_id(model: str | None) -> None:
+    if model is not None and (not isinstance(model, str) or not model.strip()
+                              or len(model) > 200 or any(ord(c) < 32 for c in model)):
+        raise ValueError("model must be null or a non-empty model identifier of at most 200 characters")
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -58,7 +66,7 @@ class Store:
     def _initialize(self) -> None:
         with self._transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError("Unsupported product database schema; do not downgrade it")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -67,6 +75,9 @@ class Store:
                     archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))
                 )
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
+            if "model" not in columns:
+                db.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
@@ -97,7 +108,7 @@ class Store:
                 AND status IN ('completed', 'failed')
             """)
             db.execute("CREATE INDEX IF NOT EXISTS events_conversation ON events(conversation_id, seq)")
-            db.execute("PRAGMA user_version = 1")
+            db.execute("PRAGMA user_version = 2")
 
     def _check_open(self) -> None:
         if self._closed:
@@ -151,14 +162,15 @@ class Store:
             "payload": json.loads(encoded), "created_at": timestamp,
         }
 
-    def create_conversation(self, title: str = "新会话") -> dict:
+    def create_conversation(self, title: str = "新会话", model: str | None = None) -> dict:
         _text(title, "title")
+        validate_model_id(model)
         timestamp = _now()
         with self._transaction() as db:
             conversation_id = str(uuid4())
             db.execute(
-                "INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (conversation_id, title, timestamp, timestamp),
+                "INSERT INTO conversations(id, title, created_at, updated_at, model) VALUES (?, ?, ?, ?, ?)",
+                (conversation_id, title, timestamp, timestamp, model),
             )
             result = self._conversation(self._require_conversation(db, conversation_id))
             self._insert_event(db, "conversation.updated", conversation_id, {"conversation": result})
@@ -186,20 +198,24 @@ class Store:
             row = self._db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
             return self._conversation(row) if row is not None else None
 
-    def update_conversation(self, conversation_id: str, title: str | None = None, archived: bool | None = None) -> dict:
+    def update_conversation(self, conversation_id: str, title: str | None = None,
+                            archived: bool | None = None, model=UNSET) -> dict:
         if title is not None:
             _text(title, "title")
         if archived is not None and not isinstance(archived, bool):
             raise ValueError("archived must be a boolean")
+        if model is not UNSET:
+            validate_model_id(model)
         with self._transaction() as db:
             old = self._conversation(self._require_conversation(db, conversation_id))
             new_title = old["title"] if title is None else title
             new_archived = old["archived"] if archived is None else archived
-            if (new_title, new_archived) == (old["title"], old["archived"]):
+            new_model = old["model"] if model is UNSET else model
+            if (new_title, new_archived, new_model) == (old["title"], old["archived"], old["model"]):
                 return old
             db.execute(
-                "UPDATE conversations SET title = ?, archived = ?, updated_at = ? WHERE id = ?",
-                (new_title, int(new_archived), _now(), conversation_id),
+                "UPDATE conversations SET title = ?, archived = ?, model = ?, updated_at = ? WHERE id = ?",
+                (new_title, int(new_archived), new_model, _now(), conversation_id),
             )
             result = self._conversation(self._require_conversation(db, conversation_id))
             self._insert_event(db, "conversation.updated", conversation_id, {"conversation": result})

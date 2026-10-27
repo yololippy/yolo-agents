@@ -1,4 +1,4 @@
-"""Run the generic Yolo Agents host in demo or PydanticAI mode."""
+"""Run the generic Yolo Agents host in demo, PydanticAI or Codex mode."""
 
 import sys
 

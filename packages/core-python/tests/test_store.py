@@ -147,7 +147,7 @@ class StoreTests(unittest.TestCase):
     def test_output_shapes_are_json_serializable_and_timestamps_are_utc(self):
         message = self.store.append_message(self.cid, "assistant", "response", status="completed", run_id="run-1")
         self.assertEqual(set(message), {"id", "conversation_id", "role", "content", "created_at", "status", "client_message_id", "run_id"})
-        self.assertEqual(set(self.conversation), {"id", "title", "created_at", "updated_at", "archived"})
+        self.assertEqual(set(self.conversation), {"id", "title", "created_at", "updated_at", "archived", "model"})
         self.assertTrue(message["created_at"].endswith("Z"))
         self.assertEqual(datetime.fromisoformat(message["created_at"]).utcoffset().total_seconds(), 0)
         json.dumps([self.conversation, message, self.store.list_events()], allow_nan=False)

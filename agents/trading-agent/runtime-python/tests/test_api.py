@@ -97,6 +97,40 @@ class HTTPTests(unittest.TestCase):
         self.assertFalse(body["broker"]["execution_enabled"])
         self.assertNotIn("token", json.dumps(body))
 
+    def test_model_catalog_requires_device_auth_and_does_not_claim_entitlement(self):
+        self.assertEqual(self.request("GET", "/v1/models")[0], 401)
+        status, body = self.request("GET", "/v1/models", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["default_model"], "demo-local")
+        self.assertTrue(body["catalog_only"])
+        self.assertEqual(body["auth"]["status"], "not_required")
+        self.assertEqual(body["models"][0]["id"], "demo-local")
+
+    def test_conversation_model_create_patch_and_null_default_persist(self):
+        status, body = self.request("POST", "/v1/conversations", {"title": "model choice", "model": "demo-local"}, self.token)
+        self.assertEqual(status, 201)
+        conversation = body["conversation"]
+        self.assertEqual(conversation["model"], "demo-local")
+        path = "/v1/conversations/" + conversation["id"]
+        status, body = self.request("PATCH", path, {"title": "renamed"}, self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["conversation"]["model"], "demo-local")
+        status, body = self.request("PATCH", path, {"model": None}, self.token)
+        self.assertEqual(status, 200)
+        self.assertIsNone(body["conversation"]["model"])
+        self.assertIsNone(self.store.get_conversation(conversation["id"])["model"])
+        self.assertEqual(self.request("PATCH", path, {"model": "unavailable-model"}, self.token)[0], 409)
+        self.assertIsNone(self.store.get_conversation(conversation["id"])["model"])
+
+    def test_client_cannot_use_model_selection_to_inject_provider_or_codex_permissions(self):
+        status, _ = self.request("POST", "/v1/conversations", {
+            "title": "injection", "model": "demo-local", "sandbox": "danger-full-access"}, self.token)
+        self.assertEqual(status, 400)
+        cid = self.conversation()
+        status, _ = self.request("PATCH", "/v1/conversations/" + cid, {
+            "model": "demo-local", "modelProvider": "custom"}, self.token)
+        self.assertEqual(status, 400)
+
     def test_broker_health_is_authenticated_and_does_not_expose_account(self):
         self.assertEqual(self.request("GET", "/v1/broker/health")[0], 401)
         status, body = self.request("GET", "/v1/broker/health", token=self.token)

@@ -20,7 +20,7 @@ def create_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path,
                         default=Path.home() / "Library/Application Support/YoloAgents")
-    parser.add_argument("--mode", choices=["demo", "pydantic"], default="demo")
+    parser.add_argument("--mode", choices=["demo", "pydantic", "codex"], default="demo")
     parser.add_argument("--model", default=os.environ.get("YOLO_AGENTS_MODEL"))
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)

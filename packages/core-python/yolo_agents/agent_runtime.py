@@ -32,6 +32,10 @@ class RuntimeExecutionError(RuntimeError):
     """A real model run failed; no demo fallback or automatic replay occurred."""
 
 
+class LoginRequiredError(RuntimeConfigurationError):
+    """Managed ChatGPT login must be completed locally in Codex."""
+
+
 def _encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
@@ -130,6 +134,23 @@ class _Runtime:
             if any(lock.locked() for lock in self._locks.values()):
                 raise RuntimeStateError("请先停止并等待 Agent worker，再关闭 runtime。")
             self._closed = True
+
+    def list_models(self) -> dict:
+        self._check_open()
+        return {
+            "models": [{"id": self.model_name, "display_name": self.model_name,
+                        "description": "演示模式" if self.mode == "demo" else "服务端已配置的模型",
+                        "is_default": True}],
+            "default_model": self.model_name, "catalog_only": True,
+            "auth": {"status": "not_required" if self.mode == "demo" else "configured",
+                     "method": None if self.mode == "demo" else "api_key"},
+        }
+
+    def validate_model(self, model: str | None) -> None:
+        from .store import validate_model_id
+        validate_model_id(model)
+        if model is not None and model != self.model_name:
+            raise ValueError("Model is not available in this runtime")
 
 
 class DemoRuntime(_Runtime):
@@ -400,9 +421,12 @@ class PydanticRuntime(_Runtime):
             }))
 
 
-def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store) -> DemoRuntime | PydanticRuntime:
+def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store):
     if mode == "demo":
         return DemoRuntime(store)
     if mode == "pydantic":
         return PydanticRuntime(model, data_dir, store)
-    raise RuntimeConfigurationError("运行模式必须明确为 demo 或 pydantic。")
+    if mode == "codex":
+        from .codex_runtime import CodexRuntime
+        return CodexRuntime(model, data_dir, store)
+    raise RuntimeConfigurationError("运行模式必须明确为 demo、pydantic 或 codex。")

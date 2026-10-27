@@ -5,7 +5,8 @@ from collections import deque
 import threading
 from uuid import uuid4
 
-from .agent_runtime import RuntimeConfigurationError, RuntimeStateError
+from .agent_runtime import LoginRequiredError, RuntimeConfigurationError, RuntimeStateError
+from .codex_runtime import CodexBusyError
 
 
 class ChatService:
@@ -36,15 +37,36 @@ class ChatService:
                         raise ValueError("client_message_id already used with different content")
                     return {"message": message, "run_id": message["run_id"], "status": "duplicate"}
             run_id = str(uuid4())
-            message = self.store.append_message(conversation_id, "user", content,
-                                                client_message_id=client_message_id, run_id=run_id)
             with self.lock:
+                # Account mutations hold this lock while idle. Persisting acceptance
+                # and marking the queue active must be one admission boundary.
+                message = self.store.append_message(conversation_id, "user", content,
+                                                    client_message_id=client_message_id, run_id=run_id)
                 self.queues.setdefault(conversation_id, deque()).append(run_id)
                 start = conversation_id not in self.active
                 self.active.add(conversation_id)
             if start:
                 self.pool.submit(self.drain, conversation_id)
             return {"message": message, "run_id": run_id, "status": "accepted"}
+
+    def codex_account(self, action):
+        operation = {"read": self.runtime.account_status, "login": self.runtime.start_login,
+                     "logout": self.runtime.logout}[action]
+        if action == "read":
+            return operation()
+        with self.lock:
+            if self.active or self.closing.is_set():
+                raise CodexBusyError("请等待全部已接受或排队的回复完成后再更改 Codex 登录。")
+            return operation()
+
+    def update_conversation(self, conversation_id, **fields):
+        with self.conversation_lock(self.accept_locks, conversation_id):
+            if "model" in fields:
+                with self.lock:
+                    if conversation_id in self.active:
+                        raise ValueError("Cannot switch model while a conversation has accepted runs")
+                self.runtime.validate_model(fields["model"])
+            return self.store.update_conversation(conversation_id, **fields)
 
     def drain(self, conversation_id):
         while True:
@@ -87,6 +109,8 @@ class ChatService:
             if not content.strip():
                 raise ValueError("runtime returned an empty reply")
             self.store.finish_run(conversation_id, run_id, content)
+        except LoginRequiredError:
+            self.fail(conversation_id, run_id, "login_required", "请先在 Mac 的 Codex 中完成 ChatGPT 登录，再发送新消息。")
         except RuntimeStateError:
             self.fail(conversation_id, run_id, "conversation_state_invalid", "当前会话状态无法继续，请新建会话；原记录已保留，不会自动重建或批准工具。")
         except RuntimeConfigurationError:

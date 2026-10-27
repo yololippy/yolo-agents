@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 from .auth import AuthError
+from .agent_runtime import RuntimeConfigurationError, RuntimeExecutionError
+from .codex_runtime import CodexBusyError
 
 
 class APIError(Exception):
@@ -136,7 +138,34 @@ class Handler(BaseHTTPRequestHandler):
             return
         caller = auth.authenticate(self.headers.get("Authorization"))
         auth.require(caller, "chat:read" if method == "GET" else "chat:write")
+        account_routes = {("GET", "/v1/codex/account"): "read",
+                          ("POST", "/v1/codex/account/login"): "login",
+                          ("POST", "/v1/codex/account/logout"): "logout"}
+        if (method, path) in account_routes:
+            auth.require(caller, "devices:manage")
+            if caller["platform"] != "macos":
+                raise APIError(403, "forbidden", "仅 Mac 管理设备可管理 Codex 账号。")
+            if app.runtime.mode != "codex":
+                raise APIError(409, "codex_not_enabled", "当前服务未启用 Codex 模式。")
+            if method == "POST":
+                if self.read_json():
+                    raise APIError(400, "invalid_input", "账号操作仅接受空 JSON 对象。")
+                caller = self.reauthorize("devices:manage")
+                if caller["platform"] != "macos":
+                    raise APIError(403, "forbidden", "仅 Mac 管理设备可管理 Codex 账号。")
+            action = account_routes[method, path]
+            try:
+                result = app.codex_account(action)
+            except CodexBusyError:
+                raise APIError(409, "codex_busy", "请等待回复或当前登录操作完成后重试。") from None
+            except (RuntimeConfigurationError, RuntimeExecutionError):
+                raise APIError(503, "codex_unavailable", "Codex 账号操作未能确认完成，请在 Mac 检查状态。") from None
+            self.send_json(200, result if action == "login" else {"account": result})
+            return
         if self.server.extension is not None and self.server.extension.route(self, method, path, query, caller):
+            return
+        if path == "/v1/models" and method == "GET":
+            self.send_json(200, app.runtime.list_models())
             return
         if path == "/v1/devices" and method == "GET":
             self.send_json(200, {"devices": auth.devices(caller)})
@@ -156,9 +185,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"conversations": app.store.list_conversations(search, archived == "true")})
                 return
             if method == "POST":
-                title = text_field(self.read_json(), "title")
+                data = self.read_json()
+                if set(data) - {"title", "model"}:
+                    raise APIError(400, "invalid_input", "只能提供 title 和 model。")
+                title = text_field(data, "title")
+                model = data.get("model")
+                app.runtime.validate_model(model)
                 self.reauthorize()
-                conversation = app.store.create_conversation(title)
+                conversation = app.store.create_conversation(title, model=model)
                 self.send_json(201, {"conversation": conversation})
                 return
         parts = path.split("/")
@@ -169,14 +203,17 @@ class Handler(BaseHTTPRequestHandler):
                 raise LookupError()
             if len(parts) == 4 and method == "PATCH":
                 data = self.read_json()
-                if not data or set(data) - {"title", "archived"}:
-                    raise APIError(400, "invalid_input", "请提供 title 或 archived。")
+                if not data or set(data) - {"title", "archived", "model"}:
+                    raise APIError(400, "invalid_input", "请提供 title、archived 或 model。")
                 title = text_field(data, "title") if "title" in data else None
                 archived = data.get("archived")
                 if "archived" in data and not isinstance(archived, bool):
                     raise APIError(400, "invalid_input", "archived 必须为布尔值。")
                 self.reauthorize()
-                self.send_json(200, {"conversation": app.store.update_conversation(conversation_id, title, archived)})
+                fields = {"title": title, "archived": archived}
+                if "model" in data:
+                    fields["model"] = data["model"]
+                self.send_json(200, {"conversation": app.update_conversation(conversation_id, **fields)})
                 return
             if len(parts) == 5 and parts[4] == "messages":
                 if method == "GET":
