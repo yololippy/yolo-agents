@@ -9,6 +9,7 @@ from yolo_agents.host import create_parser, run_host, validate_host_arguments
 from .api_extension import TradingAPIExtension
 from .ibkr import IBKRAdapter
 from .ibkr_config import ENV_PREFIX, IBKRConfigurationError, load_ibkr_config
+from .ibkr_lifecycle import IBKRBrokerLifecycle
 
 
 def add_trading_arguments(parser) -> None:
@@ -48,6 +49,18 @@ def load_broker(args, parser):
         parser.error(f"IBKR 配置无效：{exc}")
 
 
+def run_trading_host(args, broker) -> int:
+    """Keep the broker private to this Agent and close it on every Host exit."""
+    lifecycle = IBKRBrokerLifecycle(broker) if broker is not None else None
+    try:
+        if lifecycle is not None:
+            lifecycle.start()
+        return run_host(args, extension=TradingAPIExtension(lifecycle), agent_name="trading-agent")
+    finally:
+        if lifecycle is not None and not lifecycle.close():
+            print("IBKR background shutdown could not be confirmed; check Gateway and Host process.", file=sys.stderr)
+
+
 def main() -> int:
     parser = create_parser(__doc__)
     add_trading_arguments(parser)
@@ -55,7 +68,7 @@ def main() -> int:
     validate_host_arguments(args, parser)
     broker = load_broker(args, parser)
     try:
-        return run_host(args, extension=TradingAPIExtension(broker), agent_name="trading-agent")
+        return run_trading_host(args, broker)
     except RuntimeError as exc:
         parser.error(str(exc))
 

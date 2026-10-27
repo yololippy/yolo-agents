@@ -1,14 +1,15 @@
 # IBKR 第一阶段：配置、只读连接与健康状态
 
-更新日期：2026-10-25。
+更新日期：2026-10-27。
 
-本阶段提供独立模块，供交易 Agent 接入共享聊天 Host。没有下单/撤单接口，也没有运行账户连接、安装 IB Gateway 或保存登录凭据。需求依据见 [项目大纲](../../docs/PROJECT_OUTLINE.md) 和 [任务清单](../../docs/TODO.md)。
+本阶段提供交易 Agent 私有的配置、只读适配层与后台连接生命周期。Host 启动时，仅在显式配置 paper 和目标账户后自动尝试只读连接；缺依赖、Gateway 连接失败不会阻止聊天启动。本轮验证使用模拟客户端，尚未完成真实账户连接；没有下单/撤单接口、Gateway 安装或登录凭据保存。需求依据见 [项目大纲](../../docs/PROJECT_OUTLINE.md) 和 [任务清单](../../docs/TODO.md)。
 
 ## 模块与调用
 
 - `yolo_trading.ibkr_config.IBKRConfig`：不可变配置，校验类型、环境、本机地址、端口、client ID 和只读限制。
 - `load_ibkr_config(base=None, environ=None, overrides=None)`：配置合并，优先级为默认值 < 基础字典/JSON < 环境变量 < 显式覆盖。
-- `yolo_trading.ibkr.IBKRAdapter(config)`：构造和 `health()` 不导入 SDK、不探测端口、不建立连接。由未来集成方显式调用异步 `connect()`、`disconnect()`、`reconfigure(config)`。
+- `yolo_trading.ibkr.IBKRAdapter(config)`：构造和 `health()` 不导入 SDK、不探测端口、不建立连接；异步方法负责连接、断开和重配。
+- `yolo_trading.ibkr_lifecycle.IBKRBrokerLifecycle`：由交易 Agent 启动入口管理，SDK 创建、连接、事件接收与断开均在同一个常驻 asyncio 线程中进行。HTTP 线程只读取深拷贝健康快照，默认最多约 0.1 秒同步一次。
 
 `reconfigure` 在生命周期锁下先关闭旧连接再应用配置，返回新健康状态而不自动连接。不能确认原连接关闭时返回 `disconnect_failed`，保留旧配置，阻止切换。健康输出包含配置摘要、字段来源、配置指纹、修订号及最近一次切换的前后指纹；集成方负责将这些信息写入已有审计存储，本模块不提供持久审计账本。账户 ID 不出现在健康输出或配置 repr 中。
 
@@ -44,7 +45,33 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 
 退出码：0 表示配置完整且依赖可发现（不代表 Gateway 可用）；1 表示缺依赖或目标账户等配置未补齐；2 表示配置不合法/文件无法解析。结果为 JSON，含固定错误代码及可解释提示。
 
-可选依赖位于 [python/requirements.txt](python/requirements.txt)，完整锁定版本在 [python/requirements.lock](python/requirements.lock)。其他聊天/演示模式不依赖它；只有显式配置 IBKR 环境时才会构造适配层。
+可选依赖位于 [runtime-python/requirements.txt](runtime-python/requirements.txt)，完整锁定版本在 [runtime-python/requirements.lock](runtime-python/requirements.lock)。其他聊天/演示模式不依赖它；只有显式配置 IBKR 环境时才会构造适配层。
+
+## 随 Host 启动 Paper 只读连接
+
+先在本机安装并登录 IB Gateway 的 Paper Trading，完成二次认证，开启 Read-Only API、仅本机连接，并确认实际端口和目标 Paper 账户。不要将用户名、密码或验证码填入程序配置。
+
+在终端自行设置 `YOLO_AGENTS_TRADING_IBKR_ACCOUNT` 为实际 Paper 账户号，再从仓库根目录运行：
+
+```sh
+PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading \
+  --mode demo \
+  --ibkr-environment paper \
+  --ibkr-host 127.0.0.1 \
+  --ibkr-port 4002 \
+  --ibkr-client-id 20 \
+  --ibkr-account "${YOLO_AGENTS_TRADING_IBKR_ACCOUNT:?请先设置实际 Paper 账户号}"
+```
+
+端口 4002 只是 Gateway 模拟盘默认值；自定义端口时按实际修改，程序不依靠端口猜测环境。client ID 20 必须未被其他 API 程序占用。也可使用 `--ibkr-config /path/to/local-paper-config.json`；配置覆盖规则与离线检查相同。
+
+- 未配置券商时聊天照常运行；缺少目标账户时只显示配置未完成，不连接。
+- `live` 可供离线检查配置，但 Host 自动连接返回 `automatic_connection_blocked`，不启动券商连接线程。所有路径始终关闭执行。
+- Paper 连接只尝试一次，不切换端口、账户或环境，也不自动重试。Gateway 启动/登录就绪后，若此前连接失败，需要重启 Host 再尝试。
+- 连接完成后事件循环继续运行，处理 SDK 后续网络事件；`connected_read_only` 不代表对账完成或可以交易。
+- 正常退出、Ctrl-C、SIGTERM，以及 Host 初始化/运行异常，均通过交易入口的 `finally` 取消未完成连接，在原线程断开 SDK，再等待线程停止。默认最多等待 5 秒；无法确认清理时报告生命周期错误，不假装已成功关闭。
+
+公开 `/v1/health` 中的 `broker`，以及设备认证后的 `/v1/broker/health`，均读取真实适配状态的线程安全快照，不暴露目标账户号。`lifecycle` 显示后台线程状态和脱敏错误；循环故障时 `health_stale=true` 提示快照可能过期。单独运行 `python -m yolo_trading.ibkr` 仍是纯离线检查，不建立连接。
 
 ## 健康状态语义
 
@@ -57,6 +84,7 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 - `reconciliation_required`：连接恢复，仍需重新核对状态和订阅。
 - `account_mismatch`：未返回目标账户，已断开，不自动改用其他账户。
 - `disconnect_failed`：旧连接关闭无法确认，配置切换被阻止。
+- `automatic_connection_blocked`：Host 自动连接的环境不是 paper；未发起连接。
 
 第一阶段所有健康结果固定 `execution_enabled=false`、`environment_verified=false`、`data_complete=false`。没有账户数据快照、完整订单对账或自动重连调度；这些由下一阶段实现，不能把 `connected_read_only` 解释为可交易。
 
@@ -66,8 +94,8 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s agents/trading-agent/runtime-python/tests -p 'test_ibkr*.py' -v
 ```
 
-测试仅使用模拟客户端，覆盖配置优先级/审计、环境切换重置、live 和 paper 执行禁用、无 SDK/账户、精确连接参数、无 Gateway 故障、账户不匹配、超时/取消、并发连接、旧连接关闭失败及券商连接恢复状态。测试通过不代表真实 SDK 或账户已联调。
+测试仅使用模拟客户端及本机 HTTP，覆盖配置优先级/审计、环境切换、执行禁用、缺 SDK/账户、连接参数、Gateway 故障、账户不匹配、超时/取消、并发、关闭失败与恢复状态；另验证持续运行的事件循环、同线程 SDK 访问、Host 退出清理、HTTP 健康同步及券商失败后聊天仍可用。测试通过不代表真实 SDK 或账户已联调。
 
-用户后续需在 Mac 安装/登录 IB Gateway，选择环境，开启 Read-Only API 并核对仅本机连接、实际端口、可用 client ID、目标账户及行情订阅。程序不接收登录密码；首次登录/每周认证仍在 Gateway 与 IB Key 中完成。main 已将配置摘要接入聊天服务的健康状态；真实只读连接与对账仍须单独验收。
+用户后续需在 Mac 安装/登录 IB Gateway，选择环境，开启 Read-Only API 并核对仅本机连接、实际端口、可用 client ID、目标账户及行情订阅。程序不接收登录密码；首次登录/每周认证仍在 Gateway 与 IB Key 中完成。Paper 自动连接与健康接口已接入，真实账户读取、对账及跨周运行仍须单独验收。
 
 接口依据：[ib_async API 文档](https://ib-api-reloaded.github.io/ib_async/api.html)、[IBKR 连接握手说明](https://www.interactivebrokers.com/docs/tws-api/doc/connectivity/verify-api-connection)。
