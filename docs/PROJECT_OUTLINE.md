@@ -23,6 +23,8 @@
 
 ## 2. 服务分层与数据归属
 
+新增已确认方向：各 Agent 使用自己的 ChatGPT Provider 授权。Trading Agent 与 B Agent 分别管理登录、聊天、记忆、Skills 和客户端缓存；共享框架只复用实现。同一 Agent 的 Mac/iOS 共用后端。设计与迁移边界见 [Provider 方案](CHATGPT_PROVIDER_PLAN.md)，当前实施进度见 TODO 的 P 系列任务。
+
 ```mermaid
 flowchart LR
     Mac[macOS 聊天 App] --> App[聊天应用服务]

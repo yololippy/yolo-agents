@@ -10,7 +10,7 @@
 
 按用户最新安排，当前先做 **M1 的 Agent/产品存储与聊天 → M5 的客户端/通信基础**。Agent 已选 PydanticAI Core＋官方 Harness；不再重新选型。IBKR 只读与对账仍独立推进，不把研究/记忆运行时作为其前置条件。
 
-本轮已交付：Mac 后台聊天 API、持久会话、演示/PydanticAI/Codex 三种明确模式、Apple 通信 SDK/客户端、SSE 流式输出、模型选择与增量同步，以及 Paper 订单独立账本、What-if/确认/提交/单笔撤单接口和 Apple 界面。下一步先关闭 Gateway 的 Read-Only API，完成真实 Paper 启动对账和用户指定订单验收；不会自动选择标的或未经确认提交。
+本轮已交付：Mac 后台聊天 API、持久会话、演示/PydanticAI/Codex/独立 ChatGPT Provider 四种明确模式、Apple 通信 SDK/客户端、SSE 流式输出、模型选择与增量同步，以及 Paper 订单独立账本、What-if/确认/提交/单笔撤单接口和 Apple 界面。下一步先关闭 Gateway 的 Read-Only API，完成真实 Paper 启动对账和用户指定订单验收；不会自动选择标的或未经确认提交。
 
 | 阶段 | 交付与依赖 |
 | --- | --- |
@@ -23,11 +23,32 @@
 | M6 部署与实盘门槛 | 运维、备份和故障验收；相关场景通过后明确实盘开放范围。 |
 | M7 后续扩展 | 单腿/高级期权、可选研究工具，按需求单独验收。 |
 
+## 本轮：按 Agent 独立的 ChatGPT Provider
+
+方案见 [CHATGPT_PROVIDER_PLAN.md](CHATGPT_PROVIDER_PLAN.md)。现有 Codex/Paper 交付保留；以下记录独立 Provider 的实现与验收状态。真实授权已在独立验收配置中完成，生产服务尚未迁移。
+
+- [x] **P-01 方案落盘**：明确 Trading Agent/B Agent 独立授权、数据、Skills 与双端关系。
+- [x] **P-02 后端 Provider**：`packages/core-python/` 已接入官方 SIWC、凭据持久化/串行刷新/撤销、模型目录与增量适配，保留显式 Codex 回退。官方 SDK 流式和刷新通过模拟 HTTP 传输验证，真实供应商验收见 P-06。
+- [x] **P-03 实例隔离**：Trading/B 独立入口、归属标记、数据目录、记忆/Skills 已实现；同用户不同应用注册 ID、目录串用、令牌串用与历史保留通过测试。迁移限制见方案，生产旧目录未搬动。
+- [x] **P-04 双端客户端**：通用账号页、按 App 隔离 Keychain/缓存、连接身份校验，B Agent 最小可运行双端。SDK 47 项、UI 23 项、Trading 私有客户端 22 项通过；1 项真实服务测试跳过；两个 Agent 的 Mac/iOS Simulator 四目标构建通过。已补做 B Mac 的真实连接、账号页和聊天发送验收；iPhone 真机仍待验收。
+- [x] **P-05 自动化验证**：Core 103、Trading 112、B Agent 4 项 Python 测试通过；`bin/test-agent-isolation.py` 双 Host 真实 HTTP 联调通过。覆盖隔离、权限、取消/迟到回调、刷新失败、保存失败、撤销不确定、模型切换与增量转发；Swift 与四目标构建结果见 P-04。
+- [x] **P-06 Mac 真实验收**（2026-10-28）：Trading/B 分别完成真实浏览器授权。真实模型流式、模型切换、跨会话/重启后的记忆召回、Skills 隔离、B 退出后 Trading 授权保持有效通过；B Mac 连接、账号页和 Enter 单次发送通过。下列证据仅针对独立验收配置，未切换生产服务。
+
+### Provider 真实验收证据（2026-10-28）
+
+- 配置：`~/Library/Application Support/YoloAgentsValidation/{trading-agent,b-agent}/`，回环端口分别为 `18765`、`18766`。授权与测试数据分别保存；原 8765 服务、生产聊天和 IBKR 配置保持原状。
+- 授权：两实例状态为 `authenticated`；Trading 取得 8 个真实可用模型。B 退出调用成功且无撤销未确认错误，Trading 随后仍可读取 8 个模型；B 再次登录成功。两实例重启后授权仍有效。
+- 真实流式：`gpt-6-luna` 完成记忆写入、跨会话召回和重启召回；同会话切换 `gpt-6.1-sol` 成功。对应回复记录 3、4、4、6 个增量事件，累计增量与完成文本一致。
+- 隔离：B 空记忆时明确回答不存在，没有读到 Trading 的合成验收标记。两实例同名 `acceptance-guide` 技能分别返回其私有标签，均产生真实增量回复。
+- Mac GUI：B 显示自身名称、已登录和已连接；新会话中按 Enter 提交仅产生一条用户消息，完整回复与界面一致，共 13 个增量事件。新版 Trading Mac 构建通过，但本轮未替换正在运行的生产 Trading App。
+- 本轮发现并修复：空记忆工具反馈因零纠错预算被直接终止；共享健康响应误将交易字段设为必填；B 首次连接页标题硬编码 Trading。修复后 Core 103、SDK 47（另 1 项跳过）、UI 23 项通过，B/Trading Mac 重建并复测。
+- 边界：真实令牌到期轮换、iPhone 真机和生产迁移不在上述通过项中；刷新故障与竞态仍依据离线回归验证。验收未调用 IBKR 或发送交易指令。
+
 ## 2. M0：环境与 IBKR 接入准备
 
 - [x] **M0-01 首版范围**：首批固定为 Paper、美股 `STK/SMART/USD`、普通 BUY/SELL、正整数数量、`LMT/DAY`、不含盘前盘后；Live、卖空标记、零股、其他类型均拒绝。
 - [ ] **M0-02 风险参数**：确定金额、敞口/集中度、当日限额、报价偏离及数据有效期，区分拒绝与补充信息；未定参数阻止提交，不阻塞只读。
-- [ ] **M0-03 开发环境**：本机已安装 Xcode 27.1（27A9275）；共享 Swift SDK 共 43 项（42 通过、1 跳过），共享 SwiftUI 17 项、Trading Agent 客户端 21 项通过，Mac arm64 与 iOS Simulator 构建成功；`.venv` 固定 `ib_async==2.1.0`。Gateway 已安装并登录 Paper；Gateway 可写权限、真实订单与 iPhone 真机交互仍待验收。
+- [ ] **M0-03 开发环境**：本机已安装 Xcode 27.1（27A9275）；共享 Swift SDK 共 48 项（47 通过、1 跳过），共享 SwiftUI 23 项、Trading Agent 客户端 22 项通过，Mac arm64 与 iOS Simulator 构建成功；`.venv` 固定 `ib_async==2.1.0`。Gateway 已安装并登录 Paper；Gateway 可写权限、真实订单与 iPhone 真机交互仍待验收。
 - [ ] **M0-04 模拟环境**：Paper 账户、目标账户、回环 API、4002 端口和固定非零 client ID 已准备，实盘执行由代码强制关闭且凭据未进入仓库。尚需取消 Gateway 的 Read-Only API，并核对行情/交易权限。
 - [ ] **M0-05 接入验证**：已完成 `ib_async` 生命周期、启动读取、Paper 执行边界及故障模拟；真实 Gateway 只读连接曾成功。可写预检因 Gateway Read-Only API 被拒绝；取消该设置后继续验证账户、What-if、订单事件和对账。
 - [ ] **M0-06 会话与外部订单**：实测 Mobile/TWS/Client Portal、同/不同用户名及 client ID/Master Client 的会话冲突、行情影响与订单可见性；区分读取/绑定/修改权限和历史窗口。
