@@ -715,6 +715,47 @@ class PaperOrderAPITests(unittest.TestCase):
         latest = self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]["order"]
         self.assertEqual((latest["state"], latest["filled_quantity"], latest["average_fill_price"]), ("filled", 2, "10"))
 
+    def test_persisted_terminals_only_upgrade_on_trusted_full_fill(self):
+        working = self.action(self.confirmed(), "submit")[1]["order"]
+        cancelled = self.action(working, "cancel")[1]["order"]
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.extension._orders.apply_broker_update(cancelled["id"], {
+            "order_ref": cancelled["id"], "status": "working", "broker_order_id": "123",
+            "filled_quantity": 0})
+        persisted = self.request("GET", "/v1/orders/" + cancelled["id"], token=self.token)[1]["order"]
+        self.assertEqual(persisted["state"], "cancelled")
+        self.extension._orders.apply_broker_update(cancelled["id"], {
+            "order_ref": cancelled["id"], "status": "filled", "broker_order_id": "123",
+            "filled_quantity": 2, "average_fill_price": "10"})
+        persisted = self.request("GET", "/v1/orders/" + cancelled["id"], token=self.ios["token"])[1]["order"]
+        self.assertEqual(persisted["state"], "filled")
+
+        self.broker.submit_result.update(status="rejected", filled_quantity=0, average_fill_price=None)
+        rejected = self.action(self.confirmed(), "submit")[1]["order"]
+        self.assertEqual(rejected["state"], "rejected")
+        self.extension._orders.apply_broker_update(rejected["id"], {
+            "order_ref": rejected["id"], "status": "working", "broker_order_id": "123",
+            "filled_quantity": 0})
+        persisted = self.request("GET", "/v1/orders/" + rejected["id"], token=self.token)[1]["order"]
+        self.assertEqual((persisted["state"], persisted["filled_quantity"]), ("rejected", 0))
+        self.extension._orders.apply_broker_update(rejected["id"], {
+            "order_ref": rejected["id"], "status": "filled", "broker_order_id": "123",
+            "filled_quantity": 2, "average_fill_price": "10"})
+        persisted = self.request("GET", "/v1/orders/" + rejected["id"], token=self.ios["token"])[1]["order"]
+        self.assertEqual((persisted["state"], persisted["filled_quantity"]), ("filled", 2))
+
+    def test_repeated_broker_update_is_persisted_once(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        result = {"order_ref": order["id"], "status": "partial", "broker_order_id": "123",
+                  "filled_quantity": 1, "average_fill_price": "9.5"}
+        first = self.extension._orders.apply_broker_update(order["id"], result)
+        detail = self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]
+        count = len(detail["events"])
+        second = self.extension._orders.apply_broker_update(order["id"], result)
+        again = self.request("GET", "/v1/orders/" + order["id"], token=self.ios["token"])[1]
+        self.assertEqual((first, second), (again["order"], again["order"]))
+        self.assertEqual(len(again["events"]), count)
+
     def test_partial_fill_and_broker_rejection_are_persisted(self):
         self.broker.submit_result.update(status="partial", filled_quantity=1, average_fill_price="9.5")
         order = self.action(self.confirmed(), "submit")[1]["order"]

@@ -20,6 +20,16 @@ from uuid import uuid4
 from .ibkr_config import IBKRConfig, IBKRConfigurationError, load_ibkr_config
 
 
+ORDER_TERMINAL_STATES = frozenset(("filled", "cancelled", "rejected"))
+BROKER_ORDER_STATES = {
+    "PreSubmitted": "accepted",
+    "Submitted": "working",
+    "PendingCancel": "cancel_pending",
+    "Cancelled": "cancelled",
+    "ApiCancelled": "cancelled",
+}
+
+
 class IBKROperationError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
@@ -249,6 +259,7 @@ class IBKRAdapter:
         # Retire the active session before touching the SDK.  A disconnect can
         # raise while the socket still looks connected; that uncertainty must
         # never preserve a previously ready/executable generation.
+        self._mark_orders_unknown("connection_lost")
         self._invalidate_reconciliation("disconnecting")
         if client is not None:
             self._disconnecting_client = client
@@ -396,6 +407,8 @@ class IBKRAdapter:
                                             message="Gateway 在启动对账完成前断开。")
             self._fail("gateway_unavailable", "connection_lost", "Gateway 在启动对账完成前断开。")
             return False
+        values = {name: value for name, _, value, _ in results}
+        self._reconcile_tracked_orders(values["open_orders"], values["executions"])
         positions = next(value for name, _, value, _ in results if name == "positions")
         self._positions = [row for row in positions if getattr(row, "account", None) == self._config.account]
         self._ready_generation = reconciliation_generation
@@ -675,9 +688,11 @@ class IBKRAdapter:
     def _status(self, record, status):
         if record["_integrity_failed"]:
             return
+        if record["status"] == "filled":
+            return
         if record["filled_quantity"] >= record["request"]["quantity"]:
             status = "filled"
-        elif record["status"] in ("filled", "cancelled", "rejected"):
+        elif record["status"] in ("cancelled", "rejected"):
             return
         elif record["status"] == "cancel_pending" and status in ("accepted", "working", "partial"):
             return
@@ -694,7 +709,10 @@ class IBKRAdapter:
     def _unknown(self, record, reason, *, integrity=False):
         if integrity:
             record["_integrity_failed"] = True
-        if integrity or record["status"] not in ("filled", "cancelled", "rejected"):
+        if record["status"] in ORDER_TERMINAL_STATES:
+            if integrity:
+                record["unknown_reason"] = reason
+        elif integrity or record["status"] not in ORDER_TERMINAL_STATES:
             record["status"], record["unknown_reason"] = "unknown", reason
         record["_ack"].set()
 
@@ -743,10 +761,8 @@ class IBKRAdapter:
         if amount is not None and amount >= record["filled_quantity"] and average is not None and average > 0:
             record["average_fill_price"] = format(average, "f")
         raw = getattr(status, "status", "")
-        mapping = {"Submitted": "working", "PreSubmitted": "accepted", "PendingCancel": "cancel_pending",
-                   "Cancelled": "cancelled", "ApiCancelled": "cancelled"}
-        if raw in mapping:
-            self._status(record, mapping[raw])
+        if raw in BROKER_ORDER_STATES:
+            self._status(record, BROKER_ORDER_STATES[raw])
             record["_ack"].set()
         elif raw == "Filled":
             if record["filled_quantity"] == record["request"]["quantity"]:
@@ -754,7 +770,7 @@ class IBKRAdapter:
             else:
                 self._unknown(record, "incomplete_fill_details")
             record["_ack"].set()
-        elif kind == "open_order" and raw in ("PendingSubmit", "ApiPending"):
+        elif raw in ("PendingSubmit", "ApiPending") and kind in ("open_order", "reconcile_open_order"):
             self._status(record, "accepted")
             record["_ack"].set()
         elif raw == "Inactive":
@@ -770,14 +786,28 @@ class IBKRAdapter:
     def _on_execution(self, trade, fill):
         self._assert_owner()
         record = self._owned_trade(trade)
+        if record is None:
+            return
+        matched = self._record_for_execution(fill)
+        if matched is not record:
+            return
+        self._apply_execution(record, fill, "execution")
+
+    def _record_for_execution(self, fill):
         execution = getattr(fill, "execution", None)
+        record = self._orders.get(self._order_ids.get(
+            (getattr(execution, "clientId", None), getattr(execution, "orderId", None))))
         if (record is None or getattr(execution, "acctNumber", None) != record["_account"]
                 or getattr(execution, "clientId", None) != record["client_id"]
                 or getattr(execution, "orderId", None) != record["order_id"]
                 or getattr(getattr(fill, "contract", None), "conId", None) != record["qualified_contract"]["con_id"]):
-            return
+            return None
         if not self._bind_perm_id(record, getattr(execution, "permId", 0)):
-            return
+            return None
+        return record
+
+    def _apply_execution(self, record, fill, kind):
+        execution = getattr(fill, "execution", None)
         exec_id = getattr(execution, "execId", None)
         shares, price = _number(getattr(execution, "shares", None)), _number(getattr(execution, "price", None))
         if (not isinstance(exec_id, str) or not 1 <= len(exec_id) <= 128 or any(ord(c) < 33 or ord(c) > 126 for c in exec_id)
@@ -795,6 +825,11 @@ class IBKRAdapter:
             if any(previous[key] != item[key] for key in ("quantity", "price")):
                 self._unknown(record, "execution_conflict", integrity=True)
                 self._record_event(record, "execution_conflict")
+            else:
+                report = getattr(fill, "commissionReport", None)
+                if report is not None:
+                    self._apply_commission(record, fill, report,
+                        "reconcile_commission" if kind == "reconcile_execution" else "commission")
             return
         self._exec_ids[exec_id] = record["order_ref"]
         record["executions"][exec_id] = item
@@ -808,14 +843,22 @@ class IBKRAdapter:
                 record["average_fill_price"] = format(value, "f")
             self._status(record, "partial")
         record["_ack"].set()
-        self._record_event(record, "execution")
+        self._record_event(record, kind)
+        report = getattr(fill, "commissionReport", None)
+        if report is not None:
+            self._apply_commission(record, fill, report, "reconcile_commission" if kind == "reconcile_execution" else "commission")
 
     def _on_commission(self, trade, fill, report):
         self._on_execution(trade, fill)
         record = self._owned_trade(trade)
+        if record is None or self._record_for_execution(fill) is not record:
+            return
+        self._apply_commission(record, fill, report, "commission")
+
+    def _apply_commission(self, record, fill, report, kind):
         exec_id = getattr(report, "execId", None)
         execution = getattr(fill, "execution", None)
-        if (record is None or exec_id not in record["executions"]
+        if (exec_id not in record["executions"]
                 or getattr(execution, "execId", None) != exec_id
                 or getattr(execution, "acctNumber", None) != record["_account"]
                 or getattr(execution, "clientId", None) != record["client_id"]
@@ -826,7 +869,16 @@ class IBKRAdapter:
         currency = getattr(report, "currency", None)
         if commission is not None and currency == "USD":
             record["executions"][exec_id]["commission"] = format(commission, "f")
-            self._record_event(record, "commission")
+            self._record_event(record, kind)
+
+    def _reconcile_tracked_orders(self, open_orders, executions):
+        """Normalize active-query facts through the same order state machine as events."""
+        for trade in open_orders:
+            self._observe_trade(trade, "reconcile_open_order")
+        for fill in executions:
+            record = self._record_for_execution(fill)
+            if record is not None:
+                self._apply_execution(record, fill, "reconcile_execution")
 
 
 def main(argv=None):

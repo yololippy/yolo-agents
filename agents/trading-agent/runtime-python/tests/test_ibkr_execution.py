@@ -52,6 +52,7 @@ class ExecutionClient(Client):
                         commissionCurrency="USD", warningText="", status="PreSubmitted")
         self.read_failure = None
         self.place_mode = "ack"
+        self.open_orders, self.execution_rows = [], []
         self.placed, self.cancelled, self.whatifs, self.qualifications = [], [], [], []
 
     def touch(self):
@@ -77,6 +78,7 @@ class ExecutionClient(Client):
 
     async def rows(self, name, result):
         self.touch()
+        self.read_calls.append(name)
         if self.read_failure == name:
             raise OSError("DU123456 secret broker text")
         return result
@@ -85,10 +87,10 @@ class ExecutionClient(Client):
         return await self.rows("positions", [])
 
     async def reqAllOpenOrdersAsync(self):
-        return await self.rows("open_orders", [])
+        return await self.rows("open_orders", self.open_orders)
 
     async def reqExecutionsAsync(self):
-        return await self.rows("executions", [])
+        return await self.rows("executions", self.execution_rows)
 
     async def accountSummaryAsync(self, account):
         return await self.rows("account_summary", [NS(account=account, tag="BuyingPower", value="100000", currency="USD")])
@@ -225,6 +227,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         result = await self.submit()
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["error_code"], 201)
+        trade = self.client.placed[0]
+        trade.orderStatus.status = "Submitted"
+        self.client.orderStatusEvent.emit(trade)
+        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "rejected")
         self.assertNotIn("secret", json.dumps(self.broker.events_snapshot()))
 
     async def test_duplicate_and_out_of_order_status_execution_and_commission(self):
@@ -251,7 +257,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(row["executions"]), 2)
         self.assertEqual(self.broker.events_snapshot(after=events[-1]["seq"])[-1]["order"]["status"], "filled")
 
-    async def test_cancel_is_owned_once_and_late_full_fill_wins(self):
+    async def test_late_full_fill_upgrades_cancelled_without_ordinary_regression(self):
         await self.submit()
         with self.assertRaises(IBKROperationError):
             await self.broker.cancel_paper_order(order_ref="foreign", broker_order_id="100", context=self.ctx)
@@ -269,8 +275,12 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.orders_snapshot()[0]["status"], "cancel_pending")
         trade.orderStatus.status = "Cancelled"
         self.client.orderStatusEvent.emit(trade)
+        trade.orderStatus.status = "Submitted"
+        self.client.orderStatusEvent.emit(trade)
+        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "cancelled")
         self.client.execDetailsEvent.emit(trade, self.client.fill(trade, "late-fill", "6"))
-        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "filled")
+        row = self.broker.orders_snapshot()[0]
+        self.assertEqual((row["status"], row["filled_quantity"]), ("filled", 10))
 
     async def test_foreign_account_client_contract_and_execution_are_ignored(self):
         await self.submit()
@@ -305,14 +315,70 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.broker.orders_snapshot()[0]["status"], "unknown")
         self.assertEqual(self.broker.orders_snapshot()[0]["filled_quantity"], 0)
 
-    async def test_execution_conflict_after_full_fill_stays_unknown(self):
+    async def test_execution_conflict_after_full_fill_keeps_terminal_state(self):
         await self.submit()
         trade = self.client.placed[0]
         self.client.execDetailsEvent.emit(trade, self.client.fill(trade, "exec-1", "10"))
         self.client.execDetailsEvent.emit(trade, self.client.fill(trade, "exec-1", "10", "101"))
         self.client.orderStatusEvent.emit(trade)
         row = self.broker.orders_snapshot()[0]
-        self.assertEqual((row["status"], row["unknown_reason"]), ("unknown", "execution_conflict"))
+        self.assertEqual((row["status"], row["unknown_reason"]), ("filled", "execution_conflict"))
+
+    async def test_reconnect_queries_recover_tracked_order_and_ignore_old_or_foreign_facts(self):
+        await self.submit()
+        trade = self.client.placed[0]
+        old_status_handler = self.client.orderStatusEvent.handlers[0]
+        old_session = self.broker.orders_snapshot()[0]["session_id"]
+        fill1 = self.client.fill(trade, "recover-1", "4", "100")
+        fill1.commissionReport = NS(execId="recover-1", commission=Decimal("0.4"), currency="USD")
+        fill2 = self.client.fill(trade, "recover-2", "6", "102")
+        fill2.commissionReport = NS(execId="recover-2", commission=Decimal("0.6"), currency="USD")
+        foreign = self.client.fill(trade, "foreign-account", "10", "1")
+        foreign.execution.acctNumber = "DU654321"
+
+        await self.broker.disconnect()
+        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "unknown")
+        recovered_trade = deepcopy(trade)
+        recovered_trade.orderStatus = NS(status="Submitted", filled=0, avgFillPrice=0,
+                                         permId=trade.order.permId)
+        self.client.open_orders = [recovered_trade]
+        self.client.execution_rows = [fill2, foreign, fill1, fill1]
+        before_reads = len(self.client.read_calls)
+        await self.broker.connect()
+
+        row = self.broker.orders_snapshot()[0]
+        self.assertEqual(self.client.read_calls[before_reads:],
+                         ["positions", "open_orders", "executions", "account_summary"])
+        self.assertEqual((row["status"], row["filled_quantity"], row["average_fill_price"]),
+                         ("filled", 10, "101.2"))
+        self.assertEqual(row["executions"]["recover-1"]["commission"], "0.4")
+        self.assertEqual(row["executions"]["recover-2"]["commission"], "0.6")
+        self.assertNotIn("foreign-account", row["executions"])
+        self.assertEqual(row["session_id"], old_session)
+        self.assertNotEqual(self.broker.paper_order_snapshot()["session_id"], old_session)
+        self.assertEqual(len(self.client.placed), 1)
+
+        stale = deepcopy(trade)
+        stale.order.permId = 999999
+        old_status_handler(stale)
+        after_late = self.broker.orders_snapshot()[0]
+        self.assertEqual(after_late, row)
+        self.assertNotIn("DU123456", json.dumps(self.broker.events_snapshot()))
+
+    async def test_reconnect_without_order_facts_keeps_unknown_and_never_resends(self):
+        await self.submit()
+        await self.broker.disconnect()
+        self.client.open_orders = []
+        self.client.execution_rows = []
+        await self.broker.connect()
+        self.ctx = context(self.broker)
+        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "unknown")
+        preview = await self.preview("new-after-reconnect")
+        with self.assertRaises(IBKROperationError) as failure:
+            await self.broker.submit_paper_order(self.request, order_ref="new-after-reconnect",
+                                                 preview=preview, context=self.ctx)
+        self.assertEqual(failure.exception.code, "unresolved_order")
+        self.assertEqual(len(self.client.placed), 1)
 
     async def test_contract_details_must_be_unique_and_exact(self):
         for details in ([], self.client.details * 2, [NS(contract=NS(**{**vars(self.client.contract), "conId": 0}))],
@@ -574,6 +640,56 @@ class ExecutionLifecycleTests(unittest.TestCase):
             self.assertEqual(result["order"]["filled_quantity"], 10)
             self.assertNotIn("DU123456", json.dumps(result))
             self.assertEqual(result["events"][-1]["state"], "filled")
+
+    def test_reconnect_reconciliation_persists_to_ios_read_model_without_resend(self):
+        from yolo_trading.paper_order_store import PaperOrderStore
+        from yolo_trading.paper_orders import PaperOrderService
+
+        clients = []
+        def factory():
+            client = ExecutionClient()
+            if clients:
+                trade = deepcopy(clients[0].placed[0])
+                trade.orderStatus = NS(status="Submitted", filled=0, avgFillPrice=0,
+                                       permId=trade.order.permId)
+                fill = client.fill(trade, "recovered-fill", "10", "101")
+                fill.commissionReport = NS(execId="recovered-fill", commission=Decimal("1"), currency="USD")
+                client.open_orders = [trade]
+                client.execution_rows = [fill]
+            clients.append(client)
+            return client
+
+        config = paper_config()
+        broker = IBKRBrokerLifecycle(IBKRAdapter(config, client_factory=factory,
+            contract_factory=NS, order_factory=NS), poll_interval=0.005, reconnect_interval=0.01)
+        self.addCleanup(broker.close)
+        self.assertTrue(broker.start())
+        self.wait(lambda: broker.paper_order_snapshot()["execution_enabled"])
+        caller = {"id": "mac-device", "platform": "macos", "permissions": ["devices:manage"]}
+        with tempfile.TemporaryDirectory() as folder:
+            service = PaperOrderService(PaperOrderStore(Path(folder) / "paper.sqlite3"), broker)
+            _, body = service.operate("create", {"client_request_id": str(uuid4()), **intent(config)}, caller, "user")
+            row = body["order"]
+            for action in ("preview", "confirm", "submit"):
+                data = {"client_request_id": str(uuid4()), "version": row["version"],
+                        "content_hash": row["content_hash"]}
+                if action == "confirm":
+                    data.update(preview_id=row["preview"]["id"], expires_at=row["preview"]["expires_at"],
+                                user_action="confirm_paper_order")
+                elif action == "submit":
+                    data.update(confirmation_id=row["confirmation"]["id"], user_action="submit_paper_order")
+                status, body = service.operate(action, data, caller, "user", order_id=row["id"])
+                self.assertEqual(status, 200, body)
+                row = body["order"]
+            self.assertEqual(row["state"], "working")
+
+            clients[0].loop.call_soon_threadsafe(clients[0].disconnect)
+            self.wait(lambda: len(clients) == 2 and broker.orders_snapshot()[0]["status"] == "filled")
+            result = service.get(row["id"], "user")
+            self.assertEqual((result["order"]["state"], result["order"]["filled_quantity"],
+                              result["order"]["average_fill_price"]), ("filled", 10, "101"))
+            self.assertEqual((len(clients[0].placed), len(clients[1].placed)), (1, 0))
+            self.assertNotIn("DU123456", json.dumps(result))
 
 
 if __name__ == "__main__":

@@ -418,9 +418,11 @@ class PaperOrderService:
         if filled < row["filled_quantity"] or row["state"] == "filled":
             average = row["average_fill_price"]
         filled = max(filled, row["filled_quantity"])
-        if filled == quantity and state != "unknown":
+        if row["state"] == "filled":
             state = "filled"
-        elif row["state"] in TERMINAL:
+        elif filled == quantity and state != "unknown":
+            state = "filled"
+        elif row["state"] in ("cancelled", "rejected"):
             state = row["state"]
         elif row["state"] == "cancel_pending" and state in ("accepted", "working", "partial"):
             state = "cancel_pending"
@@ -443,7 +445,11 @@ class PaperOrderService:
             row = dict(saved)
             if row["state"] not in ACTIVE + ("filled", "cancelled", "rejected"):
                 raise OrderError("order_state_conflict")
+            keys = ("state", "filled_quantity", "average_fill_price", "broker_order_id", "error_code")
+            before = tuple(row[key] for key in keys)
             self._merge_result(row, result)
+            if tuple(row[key] for key in keys) == before:
+                return public_order(dict(saved))
             self.store.save(db, row)
             self.store.event(db, row, "order." + row["state"], self.now(), error_code=row["error_code"])
             return public_order(row)
