@@ -8,11 +8,15 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 `APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。Trading Agent 的 Paper 客户端位于 [client-swift](../../apps/trading-agent/client-swift/README.md)。
 
-## Codex 账号
+## ChatGPT 账号与 App 身份
 
-`account()`、`startAccountLogin()`、`logoutAccount()` 使用 `/v1/codex/account`、`/v1/codex/account/login`、`/v1/codex/account/logout`，携带设备 Bearer 凭据；POST 仅发送空 JSON 对象。账号状态支持后端 `{account:{status,email,plan_type}}` 包装，登录响应为 `{login_id,auth_url}`。
+`account()`、`startAccountLogin()`、`cancelAccountLogin()`、`logoutAccount()` 默认使用 `/v1/account` 及 `/login`、`/login/cancel`、`/logout`，携带设备 Bearer 凭据；所有 POST 只发送空 JSON。账号状态读取 `{account:{status,email?,plan_type?,method,can_manage,app_name,agent_id,error?}}`，登录为 `{login_id,auth_url,status?}`，取消和退出也返回账号包装。`AccountRoute.codexLegacy` 显式选择旧路由；SDK 不自动重放或回退 POST。保留旧 Codex 类型别名以兼容调用方。
 
-私有账号接口仅供具有 `devices:manage` 的 macOS 设备使用。iOS 的脱敏状态来自 `models().auth`。`CodexLoginResponse.authorizationURL()` 与后端一致，只接受 `https://chatgpt.com` / `https://auth.openai.com` 的授权地址，拒绝其他 host、用户凭据、非标准端口、fragment、控制字符及令牌查询参数。SDK 不读取或缓存 Codex 受管 token。
+`ChatGPTLoginResponse.authorizationURL()` 只允许 HTTPS 的 `chatgpt.com` / `auth.openai.com`，拒绝其他 host、用户凭据、非标准端口、fragment、控制字符和令牌参数。OAuth 凭据留在后端；Mac 只在内存展示邮箱和套餐，iOS 只使用模型目录的脱敏状态，不调用账号管理接口。
+
+私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service、默认地址及旧服务策略。健康响应兼容可空 `agent_id` / `app_name`；配对前和恢复同步前校验服务身份。`ClientRepository(identity:)` 独立保存配对和缓存：Trading 沿用 `com.tradingagent.apple.v1` 和旧键保留数据；B 使用 `com.yoloagents.b-agent.apple.v1` 与 `agent.b-agent.` 键前缀，绝不回读 Trading。只有 Trading 允许缺少身份的旧服务；明确身份不匹配始终拒绝。
+
+2026-10-28：SDK 47 项通过，1 项真实服务测试默认跳过。身份与存储测试使用内存 fixtures，不访问生产 Keychain。
 
 ## 模型与流式事件
 
@@ -32,3 +36,5 @@ for try await event in stream {
     state = next
 }
 ```
+
+B Agent 健康响应不包含交易专属 `trade_execution_enabled`；共享 Health 解码在缺失或 null 时按 false 处理，类型错误仍拒绝，服务身份等必要字段保持严格校验。新增回归测试覆盖此响应及完整配对流程。

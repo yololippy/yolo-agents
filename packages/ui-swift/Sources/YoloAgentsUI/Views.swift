@@ -6,10 +6,13 @@ import YoloAgentsSDK
 private typealias ViewState<Value> = SwiftUI.State<Value>
 
 public struct YoloAgentsRootView: View {
-    @StateObject private var model = ChatModel()
+    @StateObject private var model: ChatModel
     @Environment(\.scenePhase) private var scenePhase
     private let features: [ChatFeature]
-    public init(features: [ChatFeature] = []) { self.features = features }
+    public init(identity: AgentAppIdentity, features: [ChatFeature] = []) {
+        self.features = features
+        _model = StateObject(wrappedValue: ChatModel(identity: identity))
+    }
     public var body: some View {
         Group {
             if !model.started {
@@ -56,7 +59,7 @@ private struct PairingView: View {
         NavigationStack {
             Form {
                 Section {
-                    Label("连接你的 Mac 助手", systemImage: "desktopcomputer.and.iphone")
+                    Label("连接 \(model.appName)", systemImage: "desktopcomputer.and.iphone")
                         .font(.title2.bold()).padding(.vertical, 8)
                     Text("在 Mac 服务端获取配对码，将聊天与历史同步到这台设备。")
                         .foregroundStyle(.secondary)
@@ -66,11 +69,17 @@ private struct PairingView: View {
                         LabeledContent("服务", value: connection.endpoint.url.absoluteString)
                         LabeledContent("设备", value: connection.pairing.device.name)
                         LabeledContent("状态", value: model.connectionState.label)
-                        Text("此客户端用于聊天与查看结果。交易权限由服务端管理。")
+                        LabeledContent("所属应用", value: model.appName)
+                        if let notice = model.legacyIdentityNotice { Text(notice).foregroundStyle(.orange) }
+                        Text("此客户端的配对和历史仅属于当前 Agent。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 Section(isSettings ? "重新配对" : "服务地址") {
+                    if let port = URL(string: model.defaultServiceAddress)?.port {
+                        Text("\(model.appName) 服务默认端口 \(port)。手机请填写 Mac 可访问的地址。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     TextField("https://你的服务地址", text: $address)
                         .textContentType(.URL)
                         #if os(iOS)
@@ -119,7 +128,7 @@ private struct PairingView: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle(isSettings ? "连接设置" : "Trading Agent")
+            .navigationTitle(isSettings ? "连接设置" : model.appName)
             .toolbar {
                 if isSettings { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
             }
@@ -138,7 +147,7 @@ private struct PairingView: View {
     }
     private var defaultAddress: String {
         #if os(macOS)
-        "http://127.0.0.1:8765"
+        model.defaultServiceAddress
         #else
         ""
         #endif
@@ -204,7 +213,7 @@ private struct ChatShell: View {
                     }.buttonStyle(.plain).padding(.horizontal).accessibilityIdentifier(feature.id)
                 }
                 Button { showAccount = true } label: {
-                    Label("Codex 账号", systemImage: "person.crop.circle")
+                    Label("ChatGPT 账号", systemImage: "person.crop.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }.buttonStyle(.plain).padding(.horizontal).padding(.top, 8)
                 Button { showSettings = true } label: {
@@ -224,7 +233,7 @@ private struct ChatShell: View {
         }
         .sheet(isPresented: $showAccount) {
             if let connection = model.connection {
-                CodexAccountView(connection: connection) { Task { await model.refreshModels() } }
+                ChatGPTAccountView(connection: connection, identity: model.identity) { Task { await model.refreshModels() } }
             }
         }
         .alert("重命名会话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -296,7 +305,7 @@ private struct ChatDetail: View {
                 .task(id: model.selectedID) { await model.loadSelectedMessages() }
             }
         }
-        .navigationTitle(model.selectedConversation?.title ?? "Trading Agent")
+        .navigationTitle(model.selectedConversation?.title ?? model.appName)
         .toolbar {
             #if os(iOS)
             ToolbarItem(placement: .topBarLeading) { newConversationButton }
@@ -308,7 +317,7 @@ private struct ChatDetail: View {
                     Button { openFeature(feature) } label: { Label(feature.title, systemImage: feature.systemImage) }
                         .accessibilityIdentifier(feature.id + ".toolbar")
                 }
-                Button(action: openAccount) { Label("Codex 账号", systemImage: "person.crop.circle") }
+                Button(action: openAccount) { Label("ChatGPT 账号", systemImage: "person.crop.circle") }
                 Button(action: openSettings) { Label("连接设置", systemImage: "gearshape") }
             }
         }
@@ -374,7 +383,7 @@ private struct ChatDetail: View {
                 Spacer()
                 if model.modelCatalogLoading { ProgressView().controlSize(.small) }
                 if model.modelCatalog?.auth?.needsLogin == true {
-                    Text("请在 Mac 上完成 Codex 登录").font(.caption).foregroundStyle(.orange)
+                    Text("请在此 Agent 的 Mac 客户端完成 ChatGPT 登录").font(.caption).foregroundStyle(.orange)
                 }
             }
             if let error = model.modelCatalogError {

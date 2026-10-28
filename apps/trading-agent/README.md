@@ -212,3 +212,11 @@ SDK 42 项通过、1 项真实服务测试默认跳过；UI 17 项通过；Mac �
 iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Writer、写请求类型或 UI 写方法。打开页面、恢复和刷新都只读取数据。超时或无效写响应显示待核对状态，无自动重试；提交/撤单在途及 unknown 不显示为成功，完整成交不会被迟到撤单覆盖。状态通过“刷新订单”更新。
 
 本轮验证：共享 SDK 共 43 项（42 项通过、1 项真实服务测试按默认条件跳过），共享 UI 17 项通过，Trading Agent 客户端 21 项通过；`YoloAgentsMac` arm64 与 `YoloAgentsIOS` Simulator 通用 Debug 目标构建成功。订单测试使用纯内存假服务，没有发出真实 Paper 订单；真实 Paper What-if/提交、签名真机与界面点击验收仍需单独执行。
+
+## 独立 App 身份与 ChatGPT 账号（2026-10-28）
+
+`TradingAgentRootView` 注入 trading-agent 身份、Trading Agent 名称、默认端口 8765，沿用原有 `com.tradingagent.apple.v1` Keychain service 和缓存键，不迁移或清除已有配对。B 使用完全独立的 service、键空间和端口 8766。新服务须匹配 Agent ID；只有 Trading 显式允许缺少身份的旧服务，并在连接设置中说明。账号和 Paper 页面都会在发送设备凭据前阻断明确属于其他 Agent 的健康响应。
+
+“ChatGPT 账号”默认使用 `/v1/account`、`/login`、`/login/cancel`、`/logout`。取消或超时会调用后端取消接口，失败保持未确认提示；Provider 退出只针对当前 Agent，旧 Codex 模式保留真实影响说明。访问令牌需刷新及未授予套餐权限两种状态仍可明确退出，远程撤销未确认不会显示成已撤销。iOS 仅查看模型目录中的脱敏状态，所有 OAuth 凭据留在后端。
+
+最终验证：SDK 47 项通过、1 项真实服务测试默认跳过；共享 UI 23 项通过；Trading 私有客户端 22 项通过；两 Agent 的 Mac / iOS Simulator 四个通用目标构建成功。Mac 产物为 `/tmp/yolo-provider-trading/Build/Products/Debug/YoloAgentsMac.app`，scheme 仍为 `YoloAgentsMac`；iOS 为同一根目录的 `Debug-iphonesimulator/YoloAgentsIOS.app`，scheme 为 `YoloAgentsIOS`。后续已在独立 Trading 验收后端完成真实 OAuth、流式、模型切换及记忆/Skills 验证，并在 B Mac 验证共享账号和聊天界面。未替换生产 Trading App、访问其 Keychain 或执行真实 IBKR 联调；边界与证据见 [TODO](../../docs/TODO.md)。

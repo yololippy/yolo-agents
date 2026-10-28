@@ -25,7 +25,7 @@ private actor AccountHTTP: HTTPTransport {
     #expect(pending.status == "login_pending")
 }
 
-@Test func accountEndpointsUseActualCodexPathsBearerAndEmptyJSON() async throws {
+@Test func accountEndpointsDefaultToAgentPathsBearerAndEmptyJSON() async throws {
     let transport = AccountHTTP([
         "{\"account\":{\"status\":\"login_required\",\"email\":null,\"plan_type\":null}}",
         "{\"login_id\":\"fixture-id\",\"auth_url\":\"https://chatgpt.com/oauth/authorize?state=fixture\"}",
@@ -38,7 +38,7 @@ private actor AccountHTTP: HTTPTransport {
     #expect(try login.authorizationURL()?.host == "chatgpt.com")
     let requests = await transport.requests
     #expect(requests.map(\.httpMethod) == ["GET", "POST", "POST"])
-    #expect(requests.map { $0.url?.path } == ["/v1/codex/account", "/v1/codex/account/login", "/v1/codex/account/logout"])
+    #expect(requests.map { $0.url?.path } == ["/v1/account", "/v1/account/login", "/v1/account/logout"])
     #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-device-token" })
     #expect(requests[1].httpBody == Data("{}".utf8) && requests[2].httpBody == Data("{}".utf8))
 }
@@ -67,4 +67,17 @@ func unsafeAuthorizationURLIsRejected(_ address: String) throws {
     #expect(throws: (any Error).self) {
         try WireJSON.decoder().decode(CodexAccountStatus.self, from: Data("{\"email\":null}".utf8))
     }
+}
+
+@Test func accountCancellationUsesEmptyJSONAndLegacyRouteIsExplicit() async throws {
+    let transport = AccountHTTP([
+        "{\"account\":{\"status\":\"login_required\",\"method\":\"chatgpt\",\"can_manage\":true}}",
+        "{\"account\":{\"status\":\"login_required\"}}",
+    ])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.test"), token: "fixture", transport: transport)
+    #expect(try await api.cancelAccountLogin().isCancelled)
+    _ = try await api.account(route: .codexLegacy)
+    let requests = await transport.requests
+    #expect(requests.map { $0.url?.path } == ["/v1/account/login/cancel", "/v1/codex/account"])
+    #expect(requests[0].httpBody == Data("{}".utf8))
 }

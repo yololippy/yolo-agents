@@ -49,32 +49,47 @@ public struct KeychainStore: SecureStore {
 public struct PairedConnection: Codable, Equatable, Sendable {
     public let endpoint: ServiceEndpoint
     public let pairing: PairingResponse
-    public init(endpoint: ServiceEndpoint, pairing: PairingResponse) {
-        self.endpoint = endpoint; self.pairing = pairing
+    public let agentID: String?
+    public init(endpoint: ServiceEndpoint, pairing: PairingResponse, agentID: String? = nil) {
+        self.endpoint = endpoint; self.pairing = pairing; self.agentID = agentID
     }
     public var cacheKey: String { "cache.\(pairing.serverID.uuidString).\(pairing.device.id.uuidString)" }
 }
 
 public struct ClientRepository: Sendable {
     private let store: any SecureStore
-    public init(store: any SecureStore = KeychainStore()) { self.store = store }
+    private let identity: AgentAppIdentity?
+    private let prefix: String
+    public init(store: any SecureStore = KeychainStore()) { self.store = store; identity = nil; prefix = "" }
+    public init(identity: AgentAppIdentity, store: (any SecureStore)? = nil) {
+        self.identity = identity
+        self.store = store ?? KeychainStore(service: identity.keychainService)
+        // Only the app explicitly opting into legacy compatibility can reuse old keys.
+        prefix = identity.allowsLegacyServer ? "" : "agent.\(identity.agentID)."
+    }
     public func connection() throws -> PairedConnection? {
-        try store.read("connection").map { try WireJSON.decoder().decode(PairedConnection.self, from: $0) }
+        let connection = try store.read(prefix + "connection").map { try WireJSON.decoder().decode(PairedConnection.self, from: $0) }
+        if let connection { try identity?.validate(connection) }
+        return connection
     }
     public func saveConnection(_ connection: PairedConnection) throws {
-        try store.write(WireJSON.encoder().encode(connection), for: "connection")
+        try identity?.validate(connection)
+        try store.write(WireJSON.encoder().encode(connection), for: prefix + "connection")
     }
     public func state(for connection: PairedConnection) throws -> ClientState {
-        guard let data = try store.read(connection.cacheKey) else { return ClientState() }
+        try identity?.validate(connection)
+        guard let data = try store.read(prefix + connection.cacheKey) else { return ClientState() }
         var state = try WireJSON.decoder().decode(ClientState.self, from: data)
         state.prepareForLaunch()
         return state
     }
     public func saveState(_ state: ClientState, for connection: PairedConnection) throws {
-        try store.write(WireJSON.encoder().encode(state.cacheSnapshot()), for: connection.cacheKey)
+        try identity?.validate(connection)
+        try store.write(WireJSON.encoder().encode(state.cacheSnapshot()), for: prefix + connection.cacheKey)
     }
     public func forget(_ connection: PairedConnection) throws {
-        try store.remove("connection")
-        try store.remove(connection.cacheKey)
+        try identity?.validate(connection)
+        try store.remove(prefix + "connection")
+        try store.remove(prefix + connection.cacheKey)
     }
 }

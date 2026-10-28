@@ -8,11 +8,13 @@ public struct PaperHealth: Codable, Equatable, Sendable {
     public let agentMode: String
     public let model: String?
     public let tradeExecutionEnabled: Bool
+    public let agentID: String?
     public let broker: PaperBrokerHealth?
     enum CodingKeys: String, CodingKey {
         case status, model, broker
         case apiVersion = "api_version", serverID = "server_id"
         case agentMode = "agent_mode", tradeExecutionEnabled = "trade_execution_enabled"
+        case agentID = "agent_id"
     }
 }
 

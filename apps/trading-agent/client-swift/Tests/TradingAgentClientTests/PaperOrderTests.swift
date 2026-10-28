@@ -189,6 +189,9 @@ func paperDraftRejectsInvalidPrices(_ price: String) throws {
     for connection in [try paperConnection(platform: .ios), try paperConnection(permissions: ["chat:read"]), try paperConnection(revoked: true)] {
         #expect(throws: PaperOrderValidationError.permissionDenied) { try PaperOrderWriter(connection: connection) }
     }
+    let connection = try paperConnection()
+    let b = PairedConnection(endpoint: connection.endpoint, pairing: connection.pairing, agentID: "b-agent")
+    #expect(throws: ClientError.agentIdentityMismatch) { try PaperOrderWriter(connection: b) }
 }
 
 @Test func paperExplicitReplayRetainsRequestIdentityAndTransportNeverRetries() async throws {

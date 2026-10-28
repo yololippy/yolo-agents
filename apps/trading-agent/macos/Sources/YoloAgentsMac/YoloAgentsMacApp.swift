@@ -17,6 +17,6 @@ struct YoloAgentsMacApp: App {
         #endif
     }
     var body: some Scene {
-        Window("Yolo Agents", id: "main") { content }
+        Window("Trading Agent", id: "main") { content }
     }
 }

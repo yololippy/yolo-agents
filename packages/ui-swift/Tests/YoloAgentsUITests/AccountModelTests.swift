@@ -3,38 +3,87 @@ import Testing
 import YoloAgentsSDK
 @testable import YoloAgentsUI
 
+private let accountServerID = "40000000-0000-4000-8000-000000000004"
+private let accountIdentity = AgentAppIdentity(agentID: "b-agent", appName: "B Agent", keychainService: "fixture.b", defaultServiceAddress: "http://127.0.0.1:8766")
+private let legacyIdentity = AgentAppIdentity(agentID: "trading-agent", appName: "Trading Agent", keychainService: "fixture.trading", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
 private actor AccountStateHTTP: HTTPTransport {
-    private var responses: [HTTPResult]
     private(set) var requests: [URLRequest] = []
-    init(_ bodies: [String], lastStatus: Int = 200) {
-        responses = bodies.enumerated().map { HTTPResult(data: Data($0.element.utf8), status: $0.offset == bodies.count - 1 ? lastStatus : 200) }
+    private var status: String
+    private var authenticatedAfter: Int?
+    private var pendingReads = 0
+    private var accountAgent = "b-agent"
+    private var healthAgent: String? = "b-agent"
+    private var failure: (String, Int)?
+    private var officialURL = "https://auth.openai.com/oauth/authorize?state=fixture"
+    private var legacy = false
+    init(status: String = "login_required", authenticatedAfter: Int? = nil) {
+        self.status = status; self.authenticatedAfter = authenticatedAfter
     }
+    func legacyOnly() { legacy = true; healthAgent = nil; accountAgent = "trading-agent" }
+    func setHealthAgent(_ value: String?) { healthAgent = value }
+    func setAccountAgent(_ value: String) { accountAgent = value }
+    func fail(_ path: String, status: Int) { failure = (path, status) }
+    func clearFailure() { failure = nil }
+    func unsafeURL() { officialURL = "https://evil.example/login" }
     func send(_ request: URLRequest) async throws -> HTTPResult {
         requests.append(request)
-        guard !responses.isEmpty else { throw URLError(.badServerResponse) }
-        if responses.count == 1 { return responses[0] }
-        return responses.removeFirst()
+        let path = request.url!.path
+        if let (target, status) = failure, target == path {
+            return try response(["error": ["code": "fixture_error", "message": "Fixture rejected"]], status: status)
+        }
+        if path == "/v1/health" {
+            var body: [String: Any] = ["status": "ok", "api_version": 1, "server_id": accountServerID, "agent_mode": "chatgpt", "trade_execution_enabled": false]
+            body["agent_id"] = healthAgent
+            return try response(body)
+        }
+        if path == "/v1/models" {
+            return try response(["models": [], "auth": ["status": status, "email": "must-not-copy@example.test", "plan_type": "secret"]])
+        }
+        if legacy && path == "/v1/account" { return try response(["error": ["code": "not_found", "message": "Legacy"]], status: 404) }
+        if path.hasSuffix("/login/cancel") {
+            status = "login_required"
+            return try response(["account": account()])
+        }
+        if path.hasSuffix("/login") {
+            status = "login_pending"
+            return try response(["login_id": "fixture-login", "auth_url": officialURL])
+        }
+        if path.hasSuffix("/logout") {
+            status = "login_required"
+            var result = account(); result["error"] = ["code": "remote_revocation_unconfirmed"]
+            return try response(["account": result])
+        }
+        if status == "login_pending" {
+            pendingReads += 1
+            if let authenticatedAfter, pendingReads >= authenticatedAfter { status = "authenticated" }
+        }
+        return try response(["account": account()])
+    }
+    private func account() -> [String: Any] {
+        var value: [String: Any] = ["status": status, "method": legacy ? "codex" : "chatgpt", "can_manage": true]
+        if !legacy { value["agent_id"] = accountAgent; value["app_name"] = "B Agent" }
+        if status == "authenticated" { value["email"] = "fixture@example.test"; value["plan_type"] = "plus" }
+        return value
+    }
+    private func response(_ value: [String: Any], status: Int = 200) throws -> HTTPResult {
+        HTTPResult(data: try JSONSerialization.data(withJSONObject: value), status: status)
     }
 }
-private let signedIn = "{\"account\":{\"status\":\"authenticated\",\"email\":\"fixture@example.test\",\"plan_type\":\"plus\"}}"
-private let signedOut = "{\"account\":{\"status\":\"login_required\",\"email\":null,\"plan_type\":null}}"
-private let pendingAccount = "{\"account\":{\"status\":\"login_pending\",\"email\":null,\"plan_type\":null}}"
-private let loginStarted = "{\"login_id\":\"fixture-login\",\"auth_url\":\"https://chatgpt.com/oauth/authorize?state=fixture\"}"
-private func accountConnection(platform: DevicePlatform = .macos) throws -> PairedConnection {
-    let permissions = platform == .macos ? ["chat:read", "chat:write", "devices:manage"] : ["chat:read", "chat:write"]
+private func accountConnection(platform: DevicePlatform, identity: AgentAppIdentity) throws -> PairedConnection {
     let body: [String: Any] = [
         "device": ["id": UUID().uuidString, "name": "Fixture", "platform": platform.rawValue,
-                   "permissions": permissions, "created_at": "2026-10-27T00:00:00Z", "revoked_at": NSNull()],
-        "token": "fixture-device-token", "server_id": UUID().uuidString, "api_version": 1,
+                   "permissions": platform == .macos ? ["chat:read", "chat:write", "devices:manage"] : ["chat:read", "chat:write"],
+                   "created_at": "2026-10-28T00:00:00Z"], "token": "fixture-device-token", "server_id": accountServerID, "api_version": 1,
     ]
     let pairing = try WireJSON.decoder().decode(PairingResponse.self, from: JSONSerialization.data(withJSONObject: body))
-    return PairedConnection(endpoint: try ServiceEndpoint("https://example.com"), pairing: pairing)
+    return PairedConnection(endpoint: try ServiceEndpoint("https://example.test"), pairing: pairing,
+                            agentID: identity.allowsLegacyServer ? nil : identity.agentID)
 }
-@MainActor private func accountModel(_ transport: AccountStateHTTP, platform: DevicePlatform = .macos,
-                                     timeout: Duration = .seconds(2)) throws -> CodexAccountModel {
-    let connection = try accountConnection(platform: platform)
-    return CodexAccountModel(connection: connection,
-        client: APIClient(endpoint: connection.endpoint, token: connection.pairing.token, transport: transport),
+@MainActor private func accountModel(_ http: AccountStateHTTP, platform: DevicePlatform = .macos,
+    identity: AgentAppIdentity = accountIdentity, timeout: Duration = .seconds(2)) throws -> ChatGPTAccountModel {
+    let connection = try accountConnection(platform: platform, identity: identity)
+    return ChatGPTAccountModel(connection: connection, identity: identity,
+        client: APIClient(endpoint: connection.endpoint, token: connection.pairing.token, transport: http),
         platform: platform, pollInterval: .milliseconds(10), loginTimeout: timeout)
 }
 @MainActor private func accountWait(_ condition: () async -> Bool) async throws {
@@ -45,91 +94,139 @@ private func accountConnection(platform: DevicePlatform = .macos) throws -> Pair
     }
 }
 
-@Test @MainActor func macAccountDisplaysManagedEmailAndPlan() async throws {
-    let http = AccountStateHTTP([signedIn])
+@Test @MainActor func providerAccountDisplaysOwningAppAndIndependentLogout() async throws {
+    let http = AccountStateHTTP(status: "authenticated")
     let model = try accountModel(http)
-    defer { model.stopWaiting() }
     await model.refresh()
-    #expect(model.statusLabel == "已登录" && model.account?.email == "fixture@example.test")
-    #expect(model.account?.planType == "plus" && model.canManage)
-    #expect(await http.requests.first?.url?.path == "/v1/codex/account")
+    #expect(model.appName == "B Agent" && model.canManage && !model.usesCodex)
+    #expect(model.account?.email == "fixture@example.test" && model.account?.planType == "plus")
+    #expect(model.logoutExplanation.contains("仅退出 B Agent") && !model.logoutExplanation.contains("Codex"))
+    await model.logout()
+    #expect(model.statusLabel == "未登录" && model.noticeMessage?.contains("远程授权撤销尚未确认") == true)
+    #expect(model.errorMessage?.contains("远程授权撤销尚未确认") == true)
+    #expect(await http.requests.last?.url?.path == "/v1/account/logout")
 }
 
-@Test @MainActor func iosUsesRedactedCatalogAndNeverCallsAccountManagement() async throws {
-    let http = AccountStateHTTP(["{\"models\":[],\"default_model\":null,\"auth\":{\"status\":\"authenticated\",\"method\":\"chatgpt\"}}"])
+@Test @MainActor func iosUsesOnlyRedactedCatalogAndNeverCallsAccountManagement() async throws {
+    let http = AccountStateHTTP(status: "authenticated")
     let model = try accountModel(http, platform: .ios)
     await model.refresh()
-    #expect(model.statusLabel == "已登录" && !model.canManage)
-    #expect(model.account?.email == nil && model.account?.planType == nil)
+    #expect(model.statusLabel == "已登录" && !model.canManage && model.account?.email == nil && model.account?.planType == nil)
     #expect(await model.beginLogin() == nil)
-    await model.logout()
-    let requests = await http.requests
-    #expect(requests.count == 1 && requests[0].url?.path == "/v1/models")
+    await model.logout(); await model.cancelLogin()
+    #expect(await http.requests.map { $0.url?.path } == ["/v1/health", "/v1/models"])
 }
 
 @Test @MainActor func browserLoginPollsUntilAuthenticatedWithoutOpeningAnyBrowserInTest() async throws {
-    let http = AccountStateHTTP([loginStarted, pendingAccount, signedIn])
+    let http = AccountStateHTTP(authenticatedAfter: 2)
     let model = try accountModel(http)
     defer { model.stopWaiting() }
     let url = await model.beginLogin()
-    #expect(url?.host == "chatgpt.com" && model.isWaitingForLogin)
+    #expect(url?.host == "auth.openai.com" && model.isWaitingForLogin)
     model.browserOpened(true)
     try await accountWait { !model.isWaitingForLogin }
     #expect(model.account?.isAuthenticated == true && model.errorMessage == nil)
-    let paths = await http.requests.map { $0.url?.path }
-    #expect(paths == ["/v1/codex/account/login", "/v1/codex/account", "/v1/codex/account"])
+    #expect(await http.requests.filter { $0.httpMethod == "POST" }.map { $0.url?.path } == ["/v1/account/login"])
 }
 
-@Test @MainActor func stoppingBrowserWaitCancelsPollingAndDoesNotLogOut() async throws {
-    let http = AccountStateHTTP([loginStarted, pendingAccount])
+@Test @MainActor func cancellingLoginCancelsBackendAndStopsPolling() async throws {
+    let http = AccountStateHTTP()
+    let model = try accountModel(http)
+    _ = await model.beginLogin(); model.browserOpened(true)
+    try await accountWait { await http.requests.count >= 5 }
+    await model.cancelLogin()
+    #expect(!model.isWaitingForLogin && model.noticeMessage?.contains("已取消") == true)
+    let count = await http.requests.count
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(await http.requests.count == count)
+    #expect(await http.requests.last?.url?.path == "/v1/account/login/cancel")
+    #expect(await http.requests.last?.httpBody == Data("{}".utf8))
+}
+
+@Test @MainActor func cancellationFailureDoesNotPretendLoginWasCancelled() async throws {
+    let http = AccountStateHTTP()
     let model = try accountModel(http)
     _ = await model.beginLogin()
-    model.browserOpened(true)
-    try await accountWait { await http.requests.count >= 2 }
-    model.stopWaiting()
-    let count = await http.requests.count
-    try await Task.sleep(for: .milliseconds(35))
-    let remainingCount = await http.requests.count
-    #expect(!model.isWaitingForLogin && remainingCount == count)
-    #expect(await http.requests.allSatisfy { $0.url?.path != "/v1/codex/account/logout" })
-}
-
-@Test @MainActor func invalidOrRejectedBrowserDoesNotStartAccountPolling() async throws {
-    let http = AccountStateHTTP(["{\"auth_url\":\"https://evil.example/login\"}"])
-    let model = try accountModel(http)
+    await http.fail("/v1/account/login/cancel", status: 503)
+    await model.cancelLogin()
+    #expect(model.isWaitingForLogin && model.errorMessage?.contains("尚未确认") == true)
     #expect(await model.beginLogin() == nil)
-    #expect(!model.isWaitingForLogin && model.errorMessage != nil)
-    #expect(await http.requests.count == 1)
-    let goodHTTP = AccountStateHTTP([loginStarted])
-    let other = try accountModel(goodHTTP)
-    _ = await other.beginLogin()
-    other.browserOpened(false)
-    #expect(!other.isWaitingForLogin && other.errorMessage?.contains("无法打开浏览器") == true)
-    #expect(await goodHTTP.requests.count == 1)
+    await http.clearFailure()
+    await model.cancelLogin()
+    #expect(!model.isWaitingForLogin)
 }
 
-@Test @MainActor func logoutRequiresManagementAndPreservesAccountWhenServerRejects() async throws {
-    let http = AccountStateHTTP([signedIn, "{\"error\":{\"code\":\"codex_busy\",\"message\":\"请等待当前回复完成\"}}"], lastStatus: 409)
+@Test @MainActor func rejectedBrowserAndUnsafeURLCancelBackendLogin() async throws {
+    let http = AccountStateHTTP()
     let model = try accountModel(http)
-    await model.refresh()
+    _ = await model.beginLogin(); model.browserOpened(false)
+    try await accountWait { !model.isWaitingForLogin }
+    #expect(model.errorMessage?.contains("无法打开浏览器") == true)
+    #expect(await http.requests.last?.url?.path == "/v1/account/login/cancel")
+    let unsafe = AccountStateHTTP()
+    await unsafe.unsafeURL()
+    let other = try accountModel(unsafe)
+    #expect(await other.beginLogin() == nil)
+    #expect(!other.isWaitingForLogin && other.errorMessage != nil)
+    #expect(await unsafe.requests.last?.url?.path == "/v1/account/login/cancel")
+}
+
+@Test @MainActor func logoutFailurePreservesAccountAndLoginTimeoutCancelsBackend() async throws {
+    let http = AccountStateHTTP(status: "authenticated")
+    let model = try accountModel(http)
+    await model.refresh(); await http.fail("/v1/account/logout", status: 409)
     await model.logout()
-    #expect(model.account?.isAuthenticated == true)
-    #expect(model.errorMessage?.contains("请等待当前回复完成") == true)
-    #expect(await http.requests.last?.url?.path == "/v1/codex/account/logout")
-    let connection = try accountConnection()
-    #expect(!AccountAccess.canManage(platform: .ios, device: connection.pairing.device, serverAllows: true))
-    #expect(!AccountAccess.canManage(platform: .macos, device: connection.pairing.device, serverAllows: false))
-}
-
-@Test @MainActor func successfulLogoutShowsLoggedOutAndWaitingHasBoundedTimeout() async throws {
-    let http = AccountStateHTTP([signedIn, signedOut])
-    let model = try accountModel(http)
-    await model.refresh(); await model.logout()
-    #expect(model.statusLabel == "未登录" && model.account?.email == nil)
-    let pendingHTTP = AccountStateHTTP([loginStarted, pendingAccount])
+    #expect(model.account?.isAuthenticated == true && model.errorMessage != nil)
+    let pendingHTTP = AccountStateHTTP()
     let pending = try accountModel(pendingHTTP, timeout: .milliseconds(25))
     defer { pending.stopWaiting() }
     _ = await pending.beginLogin(); pending.browserOpened(true)
     try await accountWait { !pending.isWaitingForLogin }
     #expect(pending.errorMessage?.contains("超时") == true)
+    #expect(await pendingHTTP.requests.last?.url?.path == "/v1/account/login/cancel")
+}
+
+@Test @MainActor func legacyTradingFallbackIsReadDiscoveryOnlyAndShowsRealCodexImpact() async throws {
+    let http = AccountStateHTTP(status: "authenticated")
+    await http.legacyOnly()
+    let model = try accountModel(http, identity: legacyIdentity)
+    await model.refresh()
+    #expect(model.canManage && model.usesCodex && model.logoutExplanation.contains("Codex"))
+    #expect(await http.requests.map { $0.url?.path } == ["/v1/health", "/v1/account", "/v1/codex/account"])
+    await model.logout()
+    #expect(await http.requests.last?.url?.path == "/v1/codex/account/logout")
+    let failed = AccountStateHTTP()
+    await failed.fail("/v1/account/login", status: 503)
+    let other = try accountModel(failed)
+    #expect(await other.beginLogin() == nil)
+    #expect(await failed.requests.allSatisfy { $0.url?.path.contains("/codex/") == false })
+}
+
+@Test @MainActor func wrongAgentAndUnidentifiedHealthBlockPrivateAccountCalls() async throws {
+    for id in ["trading-agent", nil] {
+        let http = AccountStateHTTP()
+        await http.setHealthAgent(id)
+        let model = try accountModel(http)
+        await model.refresh()
+        #expect(model.errorMessage != nil && !model.canManage)
+        #expect(await model.beginLogin() == nil)
+        #expect(await http.requests.allSatisfy { $0.url?.path == "/v1/health" && $0.value(forHTTPHeaderField: "Authorization") == nil })
+    }
+    let mismatched = AccountStateHTTP()
+    await mismatched.setAccountAgent("trading-agent")
+    let other = try accountModel(mismatched)
+    await other.refresh()
+    #expect(other.account == nil && !other.canManage && other.errorMessage != nil)
+}
+
+@Test(arguments: ["expired", "permission_required"]) @MainActor
+func credentialsCanBeClearedWhenRefreshOrPlanConsentIsNeeded(_ status: String) async throws {
+    let http = AccountStateHTTP(status: status)
+    let model = try accountModel(http)
+    await model.refresh()
+    #expect(model.canLogout && model.appName == "B Agent" && model.account?.method == "chatgpt")
+    if status == "expired" { #expect(model.statusLabel == "登录状态需要刷新") }
+    await model.logout()
+    #expect(model.statusLabel == "未登录" && !model.canLogout)
+    #expect(await http.requests.last?.url?.path == "/v1/account/logout")
 }

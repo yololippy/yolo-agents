@@ -2,6 +2,8 @@
 
 此模块属于 Trading Agent，由 macOS 和 iOS 入口共同使用，不是跨 Agent 共享包。`TradingAgentRootView` 向共享聊天壳注入订单入口；`PaperAPIClient`、`PaperHealth`、订单模型、Writer 与界面均在这里。公共聊天与传输继续依赖 `packages/ui-swift` 和 `packages/sdk-swift`。
 
+根视图注入 `trading-agent` 身份、Trading Agent 名称、端口 8765 及原有 `com.tradingagent.apple.v1` Keychain service，保留配对和历史。仅此 App 显式允许缺少身份的旧服务，并在连接设置中说明兼容边界；明确返回其他 Agent 时拒绝。订单健康检查和 Writer 也拒绝其他 Agent。
+
 订单协议见 [Paper 订单 v1](../../../agents/trading-agent/PAPER_ORDERS.md)。
 
 从仓库根目录执行测试：
@@ -28,4 +30,4 @@ macOS 编译才提供 `PaperOrderWriter` 和五种严格类型请求，分别创
 
 请求发出后的超时或无效响应显示待核对状态，不自动重发。`unknown`、`submitting`、`cancel_pending` 明确展示为尚未确定；撤单处理中不显示为已撤销。成交数量不回退，完整成交不会被迟到撤单覆盖。状态更新需要用户刷新；没有后台发单或自动续提交流程。
 
-新增订单状态测试使用纯内存模拟服务，覆盖独立动作、重复点击、取消核对、超时、恢复、iOS/非管理设备只读、版本和会话变化、预览过期/不完整、无效响应及完整成交优先。订单界面 11 项测试通过；这些测试不代替真实 Paper 环境和真机交互验收。
+新增订单状态测试使用纯内存模拟服务，覆盖独立动作、重复点击、取消核对、超时、恢复、iOS/非管理设备只读、版本和会话变化、预览过期/不完整、无效响应及完整成交优先。私有客户端合计 22 项测试通过；这些测试不代替真实 Paper 环境和真机交互验收。

@@ -12,14 +12,18 @@
 
 测试：`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`。状态测试覆盖 SSE 增量、断线补齐/去重、后台取消、非活动启动、模型错误与草稿行为；它们不替代 iPhone 系统键盘的真机验收。
 
-## Mac 输入与 Codex 账号
+## Mac 输入与 ChatGPT 账号
 
-Mac 编辑器将 `textContainerInset` 设为 `(12,10)`、`lineFragmentPadding` 设为 `0`；正文和 placeholder 使用相同 AppKit 字体、段落和文字容器布局。组字期间不以外部更新覆盖 marked text。点击发送按钮后通过原生 first responder 恢复焦点。
+Mac 编辑器保留原生 NSTextView、中文组字与 Enter / Shift+Enter 行为。
 
-侧边栏和聊天工具栏提供“Codex 账号”。Mac 管理设备读取邮箱、套餐和登录状态，发起浏览器登录后轮询账号状态，退出必须先确认影响本机 Codex 受管登录。iOS 及非管理设备只使用模型目录中的脱敏认证状态，不调用私有账号接口。邮箱和套餐只在内存展示，不加入聊天缓存。
+侧边栏和工具栏提供“ChatGPT 账号”。`ChatGPTAccountModel` 展示所属 App，默认使用通用账号接口；只有允许旧服务的 Trading 在 GET 404 后发现旧 Codex 读接口。POST 不回退。Mac 发起官方浏览器授权、轮询状态；取消和超时真正调用后端取消接口，取消失败保持未确认提示，旧 Codex 模式不支持取消时显示实际错误。
 
-账号单测使用隔离 HTTP fixtures，不打开浏览器、不修改本机 Codex 登录。UI 包 17 项测试通过，包括 MacReturnAction、原生 Enter 单次提交、Shift+Enter 换行、排版参数、账号权限、登录轮询/取消/超时及退出失败保留状态。
+Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex 受管登录对其他使用者的影响说明。`expired` 显示“登录状态需要刷新”，`permission_required` 显示待授予套餐权限，两者仍能退出清理。远程撤销未确认会明确显示。iOS 和非管理设备只读健康身份与模型目录中的脱敏认证状态，邮箱和套餐不进入其状态或聊天缓存。
+
+2026-10-28：共享 UI 23 项测试通过，覆盖输入、聊天、浏览器登录轮询、实际取消/超时、退出、旧路由、状态清理与认证前阻断错误 Agent。测试使用内存 fixtures，不打开浏览器或访问生产 Keychain。
 
 ## App 功能入口
 
-`YoloAgentsRootView(features:)` 接收 App 注入的 `ChatFeature`，在侧边栏和工具栏展示入口，并将当前配对连接传给弹出页面。默认列表为空，其他 Agent 不会自动获得 Trading Agent 的订单入口。共享 UI 不持有 Paper 模型或交易动作；实现与测试见 [Trading Agent 客户端](../../apps/trading-agent/client-swift/README.md)。
+`YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，B 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [Trading 私有客户端](../../apps/trading-agent/client-swift/README.md)。
+
+首次连接页的标题取当前 App 身份，B 显示 B Agent。配对回归测试使用不含交易能力字段的 B 健康响应，验证完成配对并保存正确 Agent ID。

@@ -89,6 +89,7 @@ public struct PaperOrderCancelRequest: Encodable, Equatable, Sendable {
 public struct PaperOrderWriter: Sendable {
     private let client: APIClient
     public init(connection: PairedConnection, transport: any HTTPTransport = URLSessionTransport()) throws {
+        guard connection.agentID == nil || connection.agentID == "trading-agent" else { throw ClientError.agentIdentityMismatch }
         guard connection.pairing.device.platform == .macos, connection.pairing.device.revokedAt == nil,
               connection.pairing.device.permissions.contains("devices:manage") else { throw PaperOrderValidationError.permissionDenied }
         client = APIClient(endpoint: connection.endpoint, token: connection.pairing.token, transport: transport)

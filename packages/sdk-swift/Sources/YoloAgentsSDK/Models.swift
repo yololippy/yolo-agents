@@ -35,10 +35,25 @@ public struct Health: Codable, Equatable, Sendable {
     public let agentMode: String
     public let model: String?
     public let tradeExecutionEnabled: Bool
+    public let agentID: String?
+    public let appName: String?
     enum CodingKeys: String, CodingKey {
         case status, model
         case apiVersion = "api_version", serverID = "server_id"
         case agentMode = "agent_mode", tradeExecutionEnabled = "trade_execution_enabled"
+        case agentID = "agent_id", appName = "app_name"
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        status = try values.decode(String.self, forKey: .status)
+        apiVersion = try values.decode(Int.self, forKey: .apiVersion)
+        serverID = try values.decode(UUID.self, forKey: .serverID)
+        agentMode = try values.decode(String.self, forKey: .agentMode)
+        model = try values.decodeIfPresent(String.self, forKey: .model)
+        // Non-trading Agents do not advertise this capability. Absence grants no execution.
+        tradeExecutionEnabled = try values.decodeIfPresent(Bool.self, forKey: .tradeExecutionEnabled) ?? false
+        agentID = try values.decodeIfPresent(String.self, forKey: .agentID)
+        appName = try values.decodeIfPresent(String.self, forKey: .appName)
     }
 }
 

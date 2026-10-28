@@ -7,6 +7,8 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
     case nonHTTPResponse
     case http(status: Int, code: String?, message: String)
     case incompatibleServer
+    case agentIdentityMismatch
+    case agentIdentityUnavailable
     case invalidEventPage
     case invalidEvent(String)
     case streamOverflow
@@ -19,6 +21,8 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
         case .nonHTTPResponse: "服务未返回有效的 HTTP 响应。"
         case .http(let status, _, let message): "服务请求失败（\(status)）：\(message)"
         case .incompatibleServer: "服务身份或协议版本不匹配，请核对地址并重新配对。"
+        case .agentIdentityMismatch: "服务属于另一个 Agent，已停止连接。请核对当前 App 的服务地址。"
+        case .agentIdentityUnavailable: "此服务未提供 Agent 身份，当前 App 无法安全连接。请更新服务端。"
         case .invalidEventPage: "同步数据的顺序或游标无效，已停止推进游标。"
         case .invalidEvent(let type): "同步事件缺少必要字段：\(type)"
         case .streamOverflow: "实时数据暂时积压，将从已保存的位置重新同步。"
@@ -26,6 +30,7 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
         }
     }
     public var requiresPairing: Bool {
+        if self == .agentIdentityMismatch || self == .agentIdentityUnavailable { return true }
         if case .http(let status, _, _) = self { return status == 401 || status == 403 }
         return false
     }
@@ -138,14 +143,17 @@ public struct APIClient: Sendable {
     public func models() async throws -> ModelCatalog {
         try await request("GET", path: "models")
     }
-    public func account() async throws -> CodexAccountStatus {
-        try await request("GET", path: "codex/account")
+    public func account(route: AccountRoute = .agent) async throws -> ChatGPTAccountStatus {
+        try await request("GET", path: route.path)
     }
-    public func startAccountLogin() async throws -> CodexLoginResponse {
-        try await request("POST", path: "codex/account/login", body: Data("{}".utf8))
+    public func startAccountLogin(route: AccountRoute = .agent) async throws -> ChatGPTLoginResponse {
+        try await request("POST", path: route.path + "/login", body: Data("{}".utf8))
     }
-    public func logoutAccount() async throws -> CodexAccountStatus {
-        try await request("POST", path: "codex/account/logout", body: Data("{}".utf8))
+    public func logoutAccount(route: AccountRoute = .agent) async throws -> ChatGPTAccountStatus {
+        try await request("POST", path: route.path + "/logout", body: Data("{}".utf8))
+    }
+    public func cancelAccountLogin(route: AccountRoute = .agent) async throws -> AccountLoginCancellation {
+        try await request("POST", path: route.path + "/login/cancel", body: Data("{}".utf8))
     }
     public func pair(code: String, name: String, platform: DevicePlatform) async throws -> PairingResponse {
         struct Body: Encodable {

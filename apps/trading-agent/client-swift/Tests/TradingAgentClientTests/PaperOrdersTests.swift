@@ -60,11 +60,13 @@ private actor OrdersHTTP: HTTPTransport {
     private var timeoutAction: String?
     private var corruptAction: String?
     private var protectedSession: String?
+    private var healthAgent: String?
     private(set) var requests: [URLRequest] = []
     init(state: String? = nil) { order = state.map { ordersFixture(state: $0) } }
     func failAfter(_ action: String) { timeoutAction = action }
     func corruptResponse(_ action: String) { corruptAction = action }
     func changeProtectedSession() { protectedSession = "different-session" }
+    func changeHealthAgent(_ value: String) { healthAgent = value }
     func removeGate(_ key: String) { broker.removeValue(forKey: key) }
     func removeTarget() { broker["configuration"] = ["environment": "paper", "account_configured": true] }
     func setLive() { broker["configuration"] = ["config_id": ordersConfig, "environment": "live", "account_configured": true, "read_only": false, "execution_enabled": true] }
@@ -88,8 +90,10 @@ private actor OrdersHTTP: HTTPTransport {
         let path = request.url!.path
         if request.httpMethod == "GET" {
             if path == "/v1/health" {
-                return try response(["status": "ok", "api_version": 1, "server_id": ordersServerID,
-                    "agent_mode": "mock", "trade_execution_enabled": true, "broker": broker])
+                var value: [String: Any] = ["status": "ok", "api_version": 1, "server_id": ordersServerID,
+                    "agent_mode": "mock", "trade_execution_enabled": true, "broker": broker]
+                value["agent_id"] = healthAgent
+                return try response(value)
             }
             if path == "/v1/broker/health" {
                 var protected = broker
@@ -148,6 +152,16 @@ private actor OrdersHTTP: HTTPTransport {
     #expect(await http.requests.filter { $0.url?.path != "/v1/health" }.allSatisfy {
         $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-paper-token"
     })
+}
+
+@Test @MainActor func paperRejectsAnotherAgentBeforeSendingDeviceCredentials() async throws {
+    let http = OrdersHTTP(state: "draft")
+    await http.changeHealthAgent("b-agent")
+    let model = try ordersModel(http)
+    await model.refresh()
+    #expect(model.readError != nil && model.orders.isEmpty)
+    #expect(await http.requests.count == 1)
+    #expect(await http.requests.first?.value(forHTTPHeaderField: "Authorization") == nil)
 }
 
 @Test @MainActor func paperIOSAndUnprivilegedDevicesOnlyReadHistory() async throws {
