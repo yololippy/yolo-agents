@@ -1,8 +1,8 @@
 # IBKR AI 助手：需求与架构
 
-更新日期：2026-10-27
+更新日期：2026-10-28
 
-状态：Agent/产品存储、聊天通信 API 与 Apple 客户端首版已完成本机验收；Codex 受管 ChatGPT 登录、真实流式生成、模型切换、服务重启续聊和 Mac UI 已实测。IBKR 已完成 paper/live 只读配置、适配层及 Paper Host 生命周期的模拟验证；PydanticAI 供应商、iOS 真机、外网连接及真实 IBKR 账户仍待分别验收。
+状态：Agent/产品存储、聊天通信 API 与 Apple 客户端首版已完成本机验收；Codex 真实聊天和 Mac UI 已实测。IBKR Paper 股票限价单的后端状态机、Mac 明确确认和 iOS 只读界面已实现，Live 强制关闭。本机 Gateway 已安装并登录 Paper；真实可写连接仍被 Gateway 的 Read-Only API 阻止，尚未发出任何模拟订单。
 
 本文是当前需求与设计的唯一依据；开发任务、进度和验收统一见 [TODO.md](TODO.md)。`../archive/` 中的旧调研仅保留证据，不作为当前选型或开发要求。下文区分已确认需求、设计方向、官方规则和待实测边界。
 
@@ -37,7 +37,7 @@ flowchart LR
 ```
 
 - **聊天应用服务**负责会话、模型调用、AI 审核和受控工具接口；主 Agent 已选 PydanticAI Core＋官方 Harness，记忆/检索/压缩方案见 [Agent 方案](RESEARCH_PYDANTICAI.md)。当前同时提供本地演示、PydanticAI 和 Codex app-server 模式；Codex 复用 Mac 上受管 ChatGPT 登录且已完成真实模型验收，PydanticAI 供应商仍需单独配置与验证。
-- **独立交易服务**统一持有 IBKR 连接，负责账户事实、程序风控、授权校验、订单、定时任务、行情监控和恢复。当前已实现独立只读适配层：环境必须显式选择 paper/live，切换不会继承旧账户或连接配置，且两种环境的执行均强制关闭。App 关闭或聊天服务重启不应终止这些任务；需要 AI 审核但审核不可用时暂停执行。
+- **独立交易服务**统一持有 IBKR 连接，负责账户事实、程序风控、授权校验、订单、定时任务、行情监控和恢复。当前已实现显式环境配置、Paper 启动读取、What-if、订单状态/事件、独立账本及 Mac 管理设备确认；Live 强制关闭。当前 Host 与聊天仍同进程，独立守护、自动重连和跨重启主动对账属于后续工作。 Paper 专用双端模型、请求和界面归属 `apps/trading-agent/client-swift/`，共享 SDK/UI 只提供通用传输和功能入口。
 - **IB Gateway**是官方程序，管理券商登录和连接。第一版均在同一台 Mac 上运行，交易服务内部先按模块划分。
 - **数据库**保存会话、消息、工具调用、订单意图及版本、授权、审核、券商订单/成交、自动化任务和审计。券商实际状态是对账依据；模型摘要不作为交易账本。
 - Agent 只能调用受控业务入口，不直接连接券商或修改风控配置。立即订单、定时任务和其他入口共用同一执行规则。
@@ -61,17 +61,17 @@ flowchart LR
 
 Client Portal Gateway 需要浏览器认证，官方要求每日重新认证且不支持自动化该认证过程，因此暂不作为常驻服务首选。这项限制不能泛化到所有 Web API/OAuth 接入方式。[官方 FAQ](https://www.interactivebrokers.com/docs/web-api/authentication/cpgw/client-portal-gateway-faq)
 
-### 3.2 初次连接（模拟盘只读）
+### 3.2 初次连接与 Paper 执行门槛
 
 | 项目 | 接入约定 |
 | --- | --- |
 | 环境与账户 | 登录 Paper Trading，显式配置目标账户并校验返回账户；不取默认第一个账户。 |
 | 地址与端口 | 本机 `127.0.0.1`；Gateway 默认模拟盘 `4002`、实盘 `4001`，TWS 默认模拟盘 `7497`、实盘 `7496`，以实际配置为准。端口不作为环境的唯一判断依据。 |
-| API 权限 | 首轮保持 `Read-Only API`，仅允许本机连接；Gateway 某些版本默认启用 API，无需寻找 TWS 同名启用选项。 |
+| API 权限 | 只读联调时保持 `Read-Only API`；验证 Paper What-if/订单前必须确认登录为 Paper，再取消该勾选。服务端仍以显式 Paper 配置、目标账户、启动读取和 Mac 权限逐层阻断。 |
 | Client ID | 固定、不冲突的非零编号起步；Master Client 范围另测，不为读取人工订单自动启用 client ID 0 绑定。 |
 | 行情 | 核对股票/期权订阅，明确实时、延迟、冻结状态，及 bid/ask/last/mid 口径和时间。 |
 
-首次登录由用户完成，凭据不进入文档、仓库或日志。上述端口及只读配置来自 [官方配置说明](https://www.interactivebrokers.com/campus/trading-lessons/installing-configuring-tws-for-the-api/)，不表示当前机器已配置完成。
+首次登录由用户完成，凭据不进入文档、仓库或日志。本机已安装并登录 Paper Gateway，4002 端口可达；现有 Read-Only API 会拒绝可写客户端的开放/已完成订单启动读取，因此在取消该设置前执行门槛保持关闭。上述端口和设置依据见 [官方配置说明](https://www.interactivebrokers.com/campus/trading-lessons/installing-configuring-tws-for-the-api/)。
 
 ### 3.3 登录态、保活和重新认证（官方规则核查：2026-10-24）
 
@@ -108,7 +108,7 @@ Client Portal Gateway 需要浏览器认证，官方要求每日重新认证且�
 - 提交超时或进程退出后，券商可能已接单甚至成交；先核对再决定后续状态，未知时阻止相关重复提交。
 - 运行状态至少区分连接异常、重连、人工认证、对账中和数据就绪。数据就绪仍须通过权限、授权和订单规则才能下单。
 
-以上路线尚未通过账户联调；模拟盘准备、版本相容性、外部订单范围、行情权限和跨周认证验证见 [TODO.md](TODO.md) 的 M0/M2。
+以上路线已完成真实 Paper Gateway 的安装、登录、端口和只读连接检查，但尚未通过可写启动对账、真实 What-if 或订单验收；外部订单范围、行情权限、恢复和跨周认证见 [TODO.md](TODO.md) 的 M0/M2/M3。
 
 ## 4. 订单审核与执行规则
 
@@ -137,7 +137,7 @@ Client Portal Gateway 需要浏览器认证，官方要求每日重新认证且�
 
 乘机前检查待执行任务、窗口是否跨每日重启/周末认证、电源/休眠、网络、服务、账户/行情和通知。提前登录不保证跨周末有效；认证失效且无人响应时暂停任务。
 
-**按用户最新安排，本轮已交付 Agent、Apple 聊天客户端与通信闭环。** 演示模式用于确定性验证会话、配对、消息与同步；Codex 模式已完成真实受管登录、模型目录、流式推理、模型切换、服务重启续聊及 Mac UI 验收。iPhone 真机键盘、外网弱网和 PydanticAI 供应商另行验收。随后继续独立 IBKR 服务连接模拟账户的只读同步、官方端操作核验和断线重连对账，再推进审核、模拟盘执行和定时订单。具体任务与验收集中在 [TODO.md](TODO.md)。
+**当前已交付 Agent、Apple 聊天客户端、通信闭环和受控 Paper 订单首版。** Mac 将草稿、What-if、确认、提交和单笔撤单分开，iOS 只读；订单账本和 HTTP 幂等独立于聊天，Live 没有执行路径。下一步先取消 Gateway 的 Read-Only API，完成真实 Paper 启动对账，再用用户明确指定并确认的订单做 What-if/提交/成交/撤单验收；AI 审核、完整风控、主动恢复和定时订单仍在后续阶段。具体任务见 [TODO.md](TODO.md)。
 
 ## 7. 历史资料
 

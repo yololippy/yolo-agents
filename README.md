@@ -9,9 +9,10 @@ packages/                       跨 Agent/App 的可复用包
   sdk-swift/                    Swift 通信 SDK 与联调 probe
   ui-swift/                     可复用 SwiftUI 聊天界面
 agents/                         各 Agent 的领域运行时
-  trading-agent/runtime-python/ 第一个 Agent：只读 IBKR 集成
+  trading-agent/runtime-python/ 第一个 Agent：IBKR Paper 交易集成
   b-agent/runtime-python/       第二个 Agent 的扩展骨架
 apps/                           各 Agent 的用户客户端
+  trading-agent/client-swift/    Trading Agent 私有的双端客户端模块
   trading-agent/{ios,macos,xcode}/
   b-agent/{ios,macos,xcode}/
 ```
@@ -21,7 +22,7 @@ apps/                           各 Agent 的用户客户端
 - Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE。
 - Agent：明确演示模式、PydanticAI Core / Harness 适配，以及复用 Codex 受管 ChatGPT 登录的真实聊天模式。Codex 模式已实测模型目录、流式生成、模型切换和服务重启续聊；PydanticAI 的真实云供应商仍需另行配置与验收。
 - Apple：共享 Swift 通信 SDK、Keychain 与离线同步状态、SwiftUI macOS / iOS 客户端及 Xcode 工程。本机已用完整 Xcode 27.1 完成 iOS Simulator arm64 构建；Mac 客户端已实测新会话、模型选择、输入和真实 Codex 流式回复。
-- IBKR 已有显式 paper/live 的本机只读配置与适配层，Paper Host 启停生命周期已通过模拟客户端验证，支持安全切换并在健康接口中显示脱敏状态；当前未安装/登录 Gateway，尚无真实账户连接、账户数据或订单执行。
+- IBKR 已安装并登录 Paper Gateway；交易 Agent 已实现 Paper 专用的启动对账、What-if、Mac 明确确认后单次提交/单笔撤单、独立订单账本及 iOS 只读订单界面。Live 始终拒绝执行。本地模拟覆盖已完成；真实 Gateway 当前仍启用 Read-Only API，因此尚未进行真实 What-if 或模拟订单验收。
 
 ## 先运行后端演示
 
@@ -43,7 +44,7 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 
 - [共享 Host、存储与真实模型适配边界](packages/core-python/HOST.md)
 - [共享 Agent 运行时说明](packages/core-python/README.md)
-- [交易 Agent 与只读 IBKR 配置](agents/trading-agent/README.md)
+- [交易 Agent 与 IBKR Paper 配置](agents/trading-agent/README.md)
 - [交易 Agent 的 Apple 客户端](apps/trading-agent/README.md)
 - [通信协议 v1](packages/protocol/COMMUNICATION_V1.md)
 - [需求与架构](docs/PROJECT_OUTLINE.md)
@@ -59,6 +60,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bin/tests -v
 python3 bin/test-chat-integration.py --probe
 swift test --package-path packages/sdk-swift
 swift test --package-path packages/ui-swift
+swift test --package-path apps/trading-agent/client-swift
 ```
 
-当前实现的两套 Python 测试共 141 项通过，Swift SDK 42 项通过/1 项真实服务测试按默认条件跳过，SwiftUI 17 项通过。新的 Mac 和 iOS Xcode targets 均构建成功；Mac App 已完成真实 Codex 模型目录、模型切换、新会话和 120 个增量事件的流式回复验收。此前的 iOS Simulator 验证还覆盖真实 Keychain、中文消息、幂等重试、事件补齐与设备撤销。PydanticAI 云供应商、外网弱网、IBKR Gateway 与 iPhone 真机键盘仍须单独验收。
+当前两套 Python 测试共 190 项通过（共享 Core 79、交易 Agent 111）；共享 Swift SDK 共 43 项（42 通过、1 项真实服务测试默认跳过），共享 SwiftUI 17 项、Trading Agent 客户端 21 项通过。Mac arm64 与 iOS Simulator Debug 构建成功；Mac App 已完成真实 Codex 模型目录、模型切换、新会话和 120 个增量事件的流式回复验收。Paper 订单目前仅完成内存模拟与构建验证；Gateway 可写权限、真实 What-if、模拟成交/撤单、外网弱网及 iPhone 真机交互仍须分别验收。
