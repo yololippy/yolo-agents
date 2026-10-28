@@ -37,6 +37,13 @@ apps/{trading-agent,b-agent}/{ios,macos,xcode}/
 
 IBKR 集成目前属于 `trading-agent`，应继续放在 `agents/trading-agent/runtime-python/`；只有另一个 Agent 出现真实复用需求时，才考虑抽取为共享 Package。
 
+## 当前开发范围
+
+- 默认只开发 `trading-agent` 及其实际需要的共享 Package、协议和客户端能力。
+- `b-agent` 目前只作为架构兼容对象：设计共享接口、目录边界、身份隔离和数据模型时需要考虑未来能接入其他 Agent，但不得因此提前实现 B Agent 功能。
+- 除非用户明确指定开发 `b-agent`，不得修改或扩展 `agents/b-agent/`、`apps/b-agent/` 的功能，也不得把 B Agent 构建、联调、真实授权或验收作为当前任务的默认范围。
+- 共享代码变更应保持现有多 Agent 边界清晰，但“兼容 B Agent”不等于要求同步为 B Agent 增加产品功能。
+
 ## 重构要求
 
 调整目录时，必须在同一个改动中同步更新导入路径、Package manifest、Xcode 本地 Package 引用、脚本和文档。完成后再执行相关 Python 测试、Swift Package 测试/构建及 Xcode 构建，验证无误后才汇报完成。
