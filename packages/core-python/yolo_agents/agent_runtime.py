@@ -229,7 +229,7 @@ class PydanticRuntime(_Runtime):
         self.model_name = model
         self._backend = _load_pydantic_backend()
         self._data_dir = Path(data_dir).expanduser()
-        self._agents: dict[tuple[str, int], Any] = {}
+        self._agents: dict[tuple[str, int, str], Any] = {}
         self._prepared_namespaces: set[str] = set()
         self._owned_loops: set[asyncio.AbstractEventLoop] = set()
 
@@ -247,9 +247,10 @@ class PydanticRuntime(_Runtime):
             raise RuntimeConfigurationError("同步 Agent 必须在不运行 asyncio 的 worker 线程中调用。")
         return loop
 
-    def _agent(self, namespace: str) -> Any:
+    def _agent(self, namespace: str, model_name: str | None = None) -> Any:
         # Keep provider clients on one worker's sync-stream event loop.
-        key = (namespace, threading.get_ident())
+        selected = model_name or self.model_name
+        key = (namespace, threading.get_ident(), selected)
         with self._guard:
             if key not in self._agents:
                 backend = self._backend
@@ -268,9 +269,9 @@ class PydanticRuntime(_Runtime):
                 steps = backend.SqliteStepStore(database=str(directory / "agent.sqlite3"))
                 notes = backend.SqliteMemoryStore(database=str(directory / "memory.sqlite3"))
                 self._agents[key] = backend.Agent(
-                    self.model_name, deps_type=_AgentDeps, output_type=str, retries=0,
+                    self._model_instance(selected), deps_type=_AgentDeps, output_type=str, retries=self._retry_policy(),
                     instructions=(
-                        "你是个人 IBKR 助手，当前只开放对话、记忆和历史检索。"
+                        "你是个人 AI 助手，当前只开放对话、记忆和历史检索。"
                         "本服务尚无账户、行情或交易执行工具；不得声称已经查询账户或执行订单。"
                         "记忆只保存用户明确表达的长期偏好与背景，不保存密钥。"
                         "订单授权、风险限额和实时账户状态不能由记忆或历史确认代替。"
@@ -287,9 +288,36 @@ class PydanticRuntime(_Runtime):
                             injection_errors="raise",
                             write_metadata={"writer": "agent"},
                         ),
-                    ],
+                    ] + self._additional_capabilities(),
                 )
             return self._agents[key]
+
+    def _model_instance(self, model_name):
+        return model_name
+
+    def _retry_policy(self):
+        return 0
+
+    def _additional_capabilities(self):
+        return []
+
+    def _select_model(self, conversation_id, state):
+        return self.model_name
+
+    def _state_extra(self):
+        return {}
+
+    def _namespace(self, user_id):
+        return _scope(user_id)
+
+    def _prepare_run(self, history, state, conversation_id, prompt, previous, selected_model):
+        return prompt, previous
+
+    def _before_model_request(self, conversation_id, user_id, message_id):
+        pass
+
+    def _after_model_saved(self, conversation_id, user_id, message_id):
+        pass
 
     def close(self) -> None:
         super().close()
@@ -337,7 +365,7 @@ class PydanticRuntime(_Runtime):
 
     def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user") -> Iterator[str]:
         prompt, message_id = _prompt(history, conversation_id)
-        namespace = _scope(user_id)
+        namespace = self._namespace(user_id)
         with self._lock(conversation_id):
             state = self._load(conversation_id, user_id)
             if state and state.get("last_user_message_id") == message_id:
@@ -354,8 +382,10 @@ class PydanticRuntime(_Runtime):
                 raise RuntimeStateError("此会话已有产品历史但缺少官方 Agent 状态，请新建真实模型会话。")
             try:
                 self._worker_loop()
-                agent = self._agent(namespace)
-            except RuntimeConfigurationError:
+                selected_model = self._select_model(conversation_id, state)
+                prompt, previous = self._prepare_run(history, state, conversation_id, prompt, previous, selected_model)
+                agent = self._agent(namespace, selected_model)
+            except (RuntimeConfigurationError, RuntimeStateError):
                 raise
             except Exception:
                 raise RuntimeConfigurationError("真实模型初始化失败，请检查已安装的供应商依赖、模型名称和服务端密钥配置。") from None
@@ -376,6 +406,7 @@ class PydanticRuntime(_Runtime):
             if history[-1].get("run_id"):
                 kwargs["run_id"] = history[-1]["run_id"]
             pieces: list[str] = []
+            self._before_model_request(conversation_id, user_id, message_id)
             try:
                 with agent.run_stream_sync(prompt, **kwargs) as response:
                     deltas = response.stream_text(delta=True, debounce_by=0.05)
@@ -416,12 +447,13 @@ class PydanticRuntime(_Runtime):
             # Cache the reply to recover the window before the API commits its assistant row.
             self.store.save_agent_state(conversation_id, _encode({
                 "schema_version": 1, "mode": self.mode, "user_id": user_id,
-                "model_name": self.model_name, "conversation": json.loads(encoded),
+                "model_name": selected_model, "conversation": json.loads(encoded), **self._state_extra(),
                 "last_user_message_id": message_id, "last_reply": output, "reply_status": "completed",
             }))
+            self._after_model_saved(conversation_id, user_id, message_id)
 
 
-def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store):
+def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store, *, agent_name="base", app_name=None):
     if mode == "demo":
         return DemoRuntime(store)
     if mode == "pydantic":
@@ -429,4 +461,7 @@ def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: St
     if mode == "codex":
         from .codex_runtime import CodexRuntime
         return CodexRuntime(model, data_dir, store)
-    raise RuntimeConfigurationError("运行模式必须明确为 demo、pydantic 或 codex。")
+    if mode == "chatgpt":
+        from .chatgpt_runtime import ChatGPTRuntime
+        return ChatGPTRuntime(model, data_dir, store, agent_name=agent_name, app_name=app_name or agent_name)
+    raise RuntimeConfigurationError("运行模式必须明确为 demo、pydantic、codex 或 chatgpt。")

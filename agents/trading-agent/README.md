@@ -40,6 +40,14 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading.ibkr --environment live --port 4002
 ```
 
+## 独立 ChatGPT 授权
+
+默认运行模式为 `chatgpt`，以 `Trading Agent` 名称发起本应用授权；默认数据目录为 `~/Library/Application Support/YoloAgents/trading-agent/`，端口 `8765`。Mac 与 iOS 共用本实例后端。`--mode codex` 保留为显式兼容路径，不会把 Codex 凭据复制到 Provider。迁移前保护旧数据并核对原启动参数，见 [Provider 迁移方案](../../docs/CHATGPT_PROVIDER_PLAN.md)。
+
+```sh
+PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading --mode chatgpt
+```
+
 ## 启动
 
 用户名、密码和二次认证只在 IB Gateway 内完成，不能写进仓库或 Agent 配置。只读观察时保留 Gateway 的 `Read-Only API`，并使用默认 `read_only=true` / `execution_enabled=false`。需要验证 Paper 订单时，必须先确认 Gateway 登录的是 Paper，再取消 Gateway 的 `Read-Only API`；否则开放订单/已完成订单读取会被拒绝，启动对账不会就绪。

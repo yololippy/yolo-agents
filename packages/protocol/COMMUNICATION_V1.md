@@ -9,14 +9,18 @@
 - 除健康检查与首次配对外，每个请求携带 `Authorization: Bearer <device_token>`。令牌在客户端 Keychain 保存，后端只存 SHA-256；无浏览器全局 CORS 放行。
 - 服务启动时本机控制台显示两个一次性配对码，分别绑定 `macos` / `ios`，有效十分钟。代码必须与请求平台一致；设备自报平台不能提升配对码授权。
 - 两端都有 `chat:read`、`chat:write`；Mac 配对码另授 `devices:manage`。Paper 订单操作同时要求服务端配对记录为 macos 且具有 devices:manage，iPhone 只读脱敏订单；Live、自动预授权和定时交易接口关闭。
-- 健康响应明确 `agent_mode: demo`、`pydantic` 或 `codex`。演示模式不调用云端模型；Codex 模式复用 Mac 上由 Codex 受管的 ChatGPT 登录，不向设备提供 OpenAI token。
+- 健康响应明确 `agent_mode: demo`、`pydantic`、`codex` 或 `chatgpt`，并包含 `agent_id`、`app_name`。演示模式不调用云端模型；Codex 模式复用 Codex 受管登录，chatgpt 模式使用本 Agent 的独立 SIWC 授权；设备均不获取 OpenAI token。
 
 ## HTTP 接口
 
 | 方法与路径 | 请求 | 响应 |
 | --- | --- | --- |
-| `GET /v1/health` | 无认证 | `{status, api_version, server_id, agent_mode, model, trade_execution_enabled,broker}`；执行标记只在完整 Paper 门面及所有快照门槛通过时为 true |
+| `GET /v1/health` | 无认证 | `{status, api_version, server_id, agent_mode, model, agent_id, app_name, trade_execution_enabled?, broker?}`；交易专属字段仅由 Trading 提供，其他 Agent 可省略；客户端将缺失的执行标记视为 false，只有完整 Paper 门面及所有快照门槛通过时才为 true |
 | `GET /v1/models` | 已配对设备 | `{models:[model],default_model,catalog_only:true,auth:{status,method},error?}` |
+| `GET /v1/account` | Mac 管理凭据 | `{account:{status,email?,plan_type?,method,can_manage,app_name,agent_id,error?}}` |
+| `POST /v1/account/login` | Mac 管理凭据；`{}` | `{login_id,auth_url,status?}`，用户自行打开本机浏览器授权 |
+| `POST /v1/account/login/cancel` | Mac 管理凭据；`{}` | `{account}`；仅 chatgpt 模式支持 |
+| `POST /v1/account/logout` | Mac 管理凭据；`{}` | `{account}`；若远程撤销未确认，`account.error` 明确提示 |
 | `GET /v1/codex/account` | Mac 管理凭据；Codex 模式 | `{account:{status,email,plan_type}}` |
 | `POST /v1/codex/account/login` | Mac 管理凭据；空 JSON `{}` | `{login_id,auth_url}`；启动 Codex 托管浏览器登录 |
 | `POST /v1/codex/account/logout` | Mac 管理凭据；空 JSON `{}` | `{account:{status,email,plan_type}}`；退出后重新读取实际状态 |
@@ -39,6 +43,16 @@
 `model={id,display_name,description,is_default}`，ID 作为不透明字符串使用。`default_model` 可空。模型目录只是 catalog，不证明当前账户具有某个模型的 inference entitlement；只有真实 `turn/completed` 状态为 completed 才证明该次调用成功。
 
 模型目录的 `auth.status` 为 `authenticated`（Codex 检测到受管 ChatGPT 登录）、`login_required`、`unavailable`、`not_required`（demo）或 `configured`（Pydantic 的供应商配置，尚不证明密钥有效）。`auth.method` 为 `chatgpt`、`api_key` 或 null。模型目录响应不含邮箱、账户 ID、OAuth token、API key、登录 URL 或服务器目录。产品 API 不接受或转发 OpenAI token，也不静默回退 demo。
+
+### 本 Agent 的 ChatGPT 授权
+
+四个 `/v1/account` 接口均要求服务端配对记录为 macos 且拥有 `devices:manage`；iOS 与仅聊天权限设备返回 403。状态的 `method` 为 `chatgpt`（本 Agent 的 SIWC 授权）、`codex`（回退模式）或 null；`agent_id` 与 `app_name` 来自 Host 配置，`can_manage` 对允许访问的设备为 true。demo/pydantic 状态为 `not_available`，修改账号返回 409 `account_not_enabled`。
+
+chatgpt 模式 `account.status` 为 `login_required`、`login_pending`、`authenticated`、`expired` 或 `permission_required`；邮箱、套餐允许为 null，均不代表账户模型 entitlement。存在错误时 `error` 始终包含可解码的 `{code,message}`，包括 `login_cancelled`、`login_expired`、`login_denied`、`login_failed`、`plan_usage_not_granted`、`credential_persistence_failed`、`remote_revocation_unconfirmed`。登录 pending 时旧邮箱可仍显示为最后一次登录的信息；以状态为准。模型目录只返回脱敏 `auth`，不会返回邮箱或 token。
+
+登录启动先建立 `127.0.0.1` 回调，再返回官方 HTTPS URL 与本地 login_id；客户端在 Mac 浏览器打开并等待用户同意，通过 GET 轮询状态。取消是 `POST /v1/account/login/cancel`，请求体为 `{}`，迟到的回调不会重新激活授权。退出只针对当前 Agent 的独立授权，尝试官方远程撤销并清除本地 token；`remote_revocation_unconfirmed` 表示本地已清除、远程结果未确认。Codex 模式继续使用其受管账号，通用 cancel 在该模式返回 409 `account_cancel_unsupported`。
+
+存在已接受/排队回复、正在推理或账号目录请求时，账号更改返回 409 `account_busy`；请求后端状态失败返回 503 `account_unavailable`。授权凭据和 host ID 在对应 Agent 数据目录保存，并按主体隔离 Harness 记忆及历史。chatgpt 模式切换模型时保留产品记录，以最多 64000 字符的已完成产品文本作为引用上下文，创建新的 Provider Conversation，不复用旧模型的工具状态。失败或不确定的输入不会被自动重放。
 
 ### Codex 账号管理
 

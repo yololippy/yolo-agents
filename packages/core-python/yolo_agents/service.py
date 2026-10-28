@@ -12,6 +12,7 @@ from .codex_runtime import CodexBusyError
 class ChatService:
     def __init__(self, store, runtime, workers=4):
         self.store, self.runtime = store, runtime
+        self.agent_id, self.app_name = 'base', 'base'
         self.lock = threading.Lock()
         self.accept_locks = {}
         self.queues, self.active = {}, set()
@@ -50,8 +51,10 @@ class ChatService:
             return {"message": message, "run_id": run_id, "status": "accepted"}
 
     def codex_account(self, action):
-        operation = {"read": self.runtime.account_status, "login": self.runtime.start_login,
-                     "logout": self.runtime.logout}[action]
+        name = {"read": "account_status", "login": "start_login", "logout": "logout", "cancel": "cancel_login"}[action]
+        operation = getattr(self.runtime, name, None)
+        if operation is None:
+            raise RuntimeConfigurationError("当前模式不支持此账号操作。")
         if action == "read":
             return operation()
         with self.lock:
@@ -110,7 +113,7 @@ class ChatService:
                 raise ValueError("runtime returned an empty reply")
             self.store.finish_run(conversation_id, run_id, content)
         except LoginRequiredError:
-            self.fail(conversation_id, run_id, "login_required", "请先在 Mac 的 Codex 中完成 ChatGPT 登录，再发送新消息。")
+            self.fail(conversation_id, run_id, "login_required", "请先在 Mac 完成当前 Agent 的 ChatGPT 登录，再发送新消息。")
         except RuntimeStateError:
             self.fail(conversation_id, run_id, "conversation_state_invalid", "当前会话状态无法继续，请新建会话；原记录已保留，不会自动重建或批准工具。")
         except RuntimeConfigurationError:

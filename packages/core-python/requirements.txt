@@ -1,4 +1,4 @@
 # Optional real-model mode only. stdlib demo/store/tests need no pip packages.
 # Exact pair verified in ../../docs/RESEARCH_PYDANTICAI.md.
 pydantic-ai-slim[openai,anthropic]==2.61.0
-pydantic-ai-harness==0.61.0
+pydantic-ai-harness[skills]==0.61.0

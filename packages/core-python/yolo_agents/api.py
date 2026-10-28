@@ -125,7 +125,8 @@ class Handler(BaseHTTPRequestHandler):
         app, auth = self.server.service, self.server.auth
         if method == "GET" and path == "/v1/health":
             health = {"status": "ok", "api_version": 1, "server_id": auth.server_id,
-                      "agent_mode": app.runtime.mode, "model": app.runtime.model_name}
+                      "agent_mode": app.runtime.mode, "model": app.runtime.model_name,
+                      "agent_id": app.agent_id, "app_name": app.app_name}
             if self.server.extension is not None:
                 health.update(self.server.extension.public_health())
             self.send_json(200, health)
@@ -138,28 +139,44 @@ class Handler(BaseHTTPRequestHandler):
             return
         caller = auth.authenticate(self.headers.get("Authorization"))
         auth.require(caller, "chat:read" if method == "GET" else "chat:write")
-        account_routes = {("GET", "/v1/codex/account"): "read",
+        account_routes = {("GET", "/v1/account"): "read",
+                          ("POST", "/v1/account/login"): "login",
+                          ("POST", "/v1/account/login/cancel"): "cancel",
+                          ("POST", "/v1/account/logout"): "logout",
+                          ("GET", "/v1/codex/account"): "read",
                           ("POST", "/v1/codex/account/login"): "login",
                           ("POST", "/v1/codex/account/logout"): "logout"}
         if (method, path) in account_routes:
             auth.require(caller, "devices:manage")
             if caller["platform"] != "macos":
-                raise APIError(403, "forbidden", "仅 Mac 管理设备可管理 Codex 账号。")
-            if app.runtime.mode != "codex":
+                raise APIError(403, "forbidden", "仅 Mac 管理设备可管理账号。")
+            legacy = path.startswith('/v1/codex/')
+            if legacy and app.runtime.mode != "codex":
                 raise APIError(409, "codex_not_enabled", "当前服务未启用 Codex 模式。")
+            if not legacy and app.runtime.mode not in ('codex', 'chatgpt'):
+                if method == 'GET':
+                    self.send_json(200, {'account': {'status': 'not_available', 'method': None, 'can_manage': True,
+                                                     'app_name': app.app_name, 'agent_id': app.agent_id}})
+                    return
+                raise APIError(409, "account_not_enabled", "当前模式不支持账号操作。")
+            if not legacy and account_routes[method, path] == 'cancel' and app.runtime.mode != 'chatgpt':
+                raise APIError(409, 'account_cancel_unsupported', '当前账号模式不支持取消登录。')
             if method == "POST":
                 if self.read_json():
                     raise APIError(400, "invalid_input", "账号操作仅接受空 JSON 对象。")
                 caller = self.reauthorize("devices:manage")
                 if caller["platform"] != "macos":
-                    raise APIError(403, "forbidden", "仅 Mac 管理设备可管理 Codex 账号。")
+                    raise APIError(403, "forbidden", "仅 Mac 管理设备可管理账号。")
             action = account_routes[method, path]
             try:
                 result = app.codex_account(action)
             except CodexBusyError:
-                raise APIError(409, "codex_busy", "请等待回复或当前登录操作完成后重试。") from None
-            except (RuntimeConfigurationError, RuntimeExecutionError):
-                raise APIError(503, "codex_unavailable", "Codex 账号操作未能确认完成，请在 Mac 检查状态。") from None
+                raise APIError(409, "codex_busy" if legacy else "account_busy", "请等待回复或当前登录操作完成后重试。") from None
+            except (RuntimeConfigurationError, RuntimeExecutionError, RuntimeError):
+                raise APIError(503, "codex_unavailable" if legacy else "account_unavailable", "账号操作未能确认完成，请在 Mac 检查状态。") from None
+            if not legacy and action != 'login':
+                result = {**result, 'method': result.get('method') or ('codex' if app.runtime.mode == 'codex' else 'chatgpt'),
+                          'can_manage': True, 'app_name': app.app_name, 'agent_id': app.agent_id}
             self.send_json(200, result if action == "login" else {"account": result})
             return
         if self.server.extension is not None and self.server.extension.route(self, method, path, query, caller):

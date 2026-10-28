@@ -1,4 +1,4 @@
--r ../../../packages/python/requirements.lock
+-r ../../../packages/core-python/requirements.lock
 aeventkit==2.1.0
 ib_async==2.1.0
 nest-asyncio==1.6.0

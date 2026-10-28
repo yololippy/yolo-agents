@@ -8,8 +8,11 @@
 - `DemoRuntime`：无需第三方依赖，所有回复显式带“演示模式／未连接真实模型或 IBKR”，用于验证聊天、持久化和设备同步。
 - `PydanticRuntime`：真实模式适配代码，采用研究文档中的官方 Core/Harness 组合。缺依赖、版本不匹配、密钥/模型配置错误或模型运行失败都会报错，不回退到演示模式。
 - `CodexRuntime`：通过本机 Codex app-server 复用受管 ChatGPT 登录，不需要 API key。仅聊天，关闭工具入口；即时映射 agentMessage 增量，并持久保存会话模型和 Codex thread 映射。使用与验收边界见 [Codex 接入说明](CODEX.md)。
+- `ChatGPTRuntime`：PydanticAI 官方 ChatGPT Provider 与 Harness，使用本 Agent 独立的 SIWC 登录、凭据、记忆和 Skills。登录、隔离、模型切换和验收状态见 [ChatGPT 接入说明](CHATGPT.md)。
 
 **验证状态（2026-10-27）：** main 已将固定版本代码依赖安装到根 `.venv`。已在 Python 3.14.9 上执行标准库存储、演示和适配边界测试，并用真实官方 SDK 的 TestModel／FunctionModel 验证同步流、Conversation 序列化与重建 Runtime 后续聊、官方 SQLite Memory 写读、StepStore 快照、跨会话历史搜索及摘要压缩后原文召回；这部分测试将 `ALLOW_MODEL_REQUESTS=False`，不使用真实 API key。Codex 路径另已使用受管 ChatGPT 登录实测模型目录、流式推理、模型切换和服务重启续聊，全程不读取 token。contract double 测试仍用于故障注入；PydanticAI 供应商行为和中文语义召回质量尚未验证。
+
+**2026-10-28 补充：** 独立 ChatGPT Provider 已完成真实双实例授权、模型流式、模型切换、记忆写入/跨会话与重启召回、Skills 隔离及退出隔离验收；不代表中文检索质量或真实令牌到期刷新已全面验证。具体配置和证据见 [TODO](../../docs/TODO.md)。
 
 ## 存储接口与自动事件
 
@@ -43,7 +46,7 @@ for delta in runtime.stream_reply(history, conversation_id, user_id="local-user"
     ...
 ```
 
-- mode 必须显式为 `demo`、`pydantic` 或 `codex`。Codex JSONL 适配使用标准库，不额外安装 Python 模型 SDK；机器上需要可用的 Codex CLI。
+- mode 必须显式为 `demo`、`pydantic`、`codex` 或 `chatgpt`。Codex JSONL 适配使用标准库，不额外安装 Python 模型 SDK；机器上需要可用的 Codex CLI。ChatGPT 模式的模型供应商及 Skills 需要 requirements 中的官方可选依赖。
 - `history` 只能来自服务端已持久化的消息，末条必须是本次用户消息。不可接收客户端伪造的工具、批准或其他会话历史。
 - `user_id` 是认证后的账户身份，不是设备 ID。当前多设备连接同一位本地用户，使用相同 `local-user`；若以后增加多用户，API 仍须负责会话所有权。
 - 一个本地服务共享一个 Runtime。Runtime 对同会话运行加锁；服务层仍负责消息接收顺序、排队和跨进程防重入，不能把 Python 锁当成多进程租约。

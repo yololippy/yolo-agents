@@ -106,6 +106,21 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(health["connection_attempted"])
         self.assertEqual(clients, [])
 
+    def test_foreign_data_is_rejected_before_ledger_or_broker_start(self):
+        from types import SimpleNamespace
+        from yolo_agents.identity import ensure_agent_identity
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ensure_agent_identity(root, "b-agent")
+            args = SimpleNamespace(data_dir=root, adopt_existing_data=False)
+            before = sorted(path.name for path in root.iterdir())
+            with patch("yolo_trading.__main__.IBKRBrokerLifecycle") as lifecycle:
+                with self.assertRaises(RuntimeError):
+                    run_trading_host(args, object())
+                lifecycle.assert_not_called()
+            self.assertEqual(sorted(path.name for path in root.iterdir()), before)
+            self.assertFalse((root / "paper-orders.sqlite3").exists())
+
     def test_missing_account_and_unconfigured_host_do_not_connect(self):
         _, lifecycle, clients = self.build(account=None)
         self.assertFalse(lifecycle.start())
@@ -190,10 +205,11 @@ class LifecycleTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__):
                 broker, _, clients = self.build()
                 extension_seen = []
-                def host(args, *, extension, agent_name):
+                def host(args, *, extension, agent_name, app_name):
                     extension_seen.append(extension)
                     self.wait(lambda: extension.broker_health()["connected"])
                     self.assertEqual(agent_name, "trading-agent")
+                    self.assertEqual(app_name, "Trading Agent")
                     if failure is not None:
                         raise failure
                     return 7
