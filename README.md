@@ -22,6 +22,7 @@ apps/                           各 Agent 的用户客户端
 
 - Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE。
 - Agent：演示、PydanticAI、Codex 兼容及独立 ChatGPT Provider 四种明确模式。Trading Agent 与 B Agent 分别授权、保存记忆与 Skills；新 Provider 的官方 SDK、授权生命周期和流式适配已接入，真实浏览器授权、模型调用和独立记忆/Skills 已在隔离配置中验收。Codex 模式既有模型目录、流式生成、模型切换和重启续聊验收继续保留。
+- Guardrails：PydanticAI / ChatGPT 模式接入官方输入、工具和输出检查，阻断已知格式凭据，并补充流式发送前检查；适用范围与存储边界见 [运行时说明](packages/core-python/README.md#凭据防护)。
 - Apple：共享 Swift 通信 SDK、Keychain 与离线同步状态、SwiftUI macOS / iOS 客户端及 Xcode 工程。本机已用完整 Xcode 27.1 完成 iOS Simulator arm64 构建；Mac 客户端已实测新会话、模型选择、输入和真实 Codex 流式回复。
 - IBKR 已安装并登录 Paper Gateway；交易 Agent 已实现 Paper 专用的启动对账、What-if、Mac 明确确认后单次提交/单笔撤单、独立订单账本及 iOS 只读订单界面。Live 始终拒绝执行。本地模拟覆盖已完成；真实 Gateway 当前仍启用 Read-Only API，因此尚未进行真实 What-if 或模拟订单验收。
 
@@ -75,6 +76,6 @@ swift test --package-path packages/ui-swift
 swift test --package-path apps/trading-agent/client-swift
 ```
 
-当前 Python 测试共 219 项通过（共享 Core 103、交易 Agent 112、B Agent 4），双 Host 隔离联调通过。共享 Swift SDK 47 项、共享 SwiftUI 23 项、Trading Agent 客户端 22 项通过；1 项真实服务测试默认跳过。Trading/B 的 Mac 与 iOS Simulator 四个构建目标均通过。
+当前 Python 测试共 233 项通过（共享 Core 117、交易 Agent 112、B Agent 4），包含本轮 Guardrails 官方 SDK 离线测试和真实本机 HTTP/SQLite 联调。此前双 Host 隔离联调通过。共享 Swift SDK 47 项、共享 SwiftUI 23 项、Trading Agent 客户端 22 项通过；1 项真实服务测试默认跳过。Trading/B 的 Mac 与 iOS Simulator 四个构建目标此前均通过；本轮未修改 Swift 或重跑 Xcode 构建。
 
 新 ChatGPT Provider 的真实浏览器授权、双实例隔离、流式回复、模型切换、重启后记忆召回和独立 Skills 已通过验收；B Mac 账号页、连接及 Enter 发送通过。验收中修复了空记忆工具纠错、B 健康响应解码与连接页标题问题，详情见 [验收记录](docs/TODO.md)。真实令牌刷新故障仍以离线测试为依据；运行中的旧生产服务未切换。既有 Mac App 的真实 Codex 模型目录、模型切换、新会话和 120 个增量事件验收仍有效。Paper 订单目前仅完成模拟与构建验证；Gateway 可写权限、真实 What-if、模拟成交/撤单、外网弱网及 iPhone 真机交互仍须分别验收。

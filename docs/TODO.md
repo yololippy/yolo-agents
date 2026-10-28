@@ -44,6 +44,14 @@
 - 本轮发现并修复：空记忆工具反馈因零纠错预算被直接终止；共享健康响应误将交易字段设为必填；B 首次连接页标题硬编码 Trading。修复后 Core 103、SDK 47（另 1 项跳过）、UI 23 项通过，B/Trading Mac 重建并复测。
 - 边界：真实令牌到期轮换、iPhone 真机和生产迁移不在上述通过项中；刷新故障与竞态仍依据离线回归验证。验收未调用 IBKR 或发送交易指令。
 
+## 本轮补充：G-01 Guardrails（2026-10-28）
+
+- [x] 共享 PydanticAI/ChatGPT 运行时接入官方 `InputGuardrail`、`ToolGuardrail`、`OutputGuardrail`，按官方已知凭据格式检查；不新增交易工具或改变交易权限。
+- [x] 补充流式跨片段检查、历史/记忆注入、Skills 加载与缓存恢复检查；HTTP 返回固定 `guardrail_blocked` 失败事件，不泄露异常原文或自动重试。
+- [x] 官方 SDK 离线测试及本机 HTTP/SQLite 联调通过：Core 117、Trading 112、B 4，共 233 项。新增覆盖已知凭据流式各切分点、输入阻断时零模型请求、记忆写入前拦截、普通聊天增量及幂等。
+
+范围：仅 `pydantic`/`chatgpt` 模式；不承诺识别任意密码、提示注入或交易风险，不清理已有产品原文/步骤快照。本轮没有切换运行中的生产服务或进行真实模型/真机验收。实现和依赖见 [core-python README](../packages/core-python/README.md#凭据防护)。
+
 ## 2. M0：环境与 IBKR 接入准备
 
 - [x] **M0-01 首版范围**：首批固定为 Paper、美股 `STK/SMART/USD`、普通 BUY/SELL、正整数数量、`LMT/DAY`、不含盘前盘后；Live、卖空标记、零股、其他类型均拒绝。
