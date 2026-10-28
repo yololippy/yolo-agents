@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
@@ -33,6 +34,9 @@ class Client:
         self.failure = None
         self.started, self.release = asyncio.Event(), None
         self.disconnect_failure = False
+        self.read_failure = None
+        self.read_release = {}
+        self.read_calls = []
 
     async def connectAsync(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -55,6 +59,27 @@ class Client:
             raise OSError("sensitive disconnect diagnostic")
         self.connected = False
         self.disconnectedEvent.emit()
+
+    async def _rows(self, name, rows):
+        self.read_calls.append(name)
+        release = self.read_release.get(name)
+        if release is not None:
+            await release.wait()
+        if self.read_failure == name:
+            raise OSError("sensitive reconciliation diagnostic")
+        return rows
+
+    async def reqPositionsAsync(self):
+        return await self._rows("positions", [])
+
+    async def reqAllOpenOrdersAsync(self):
+        return await self._rows("open_orders", [])
+
+    async def reqExecutionsAsync(self):
+        return await self._rows("executions", [])
+
+    async def accountSummaryAsync(self, account):
+        return await self._rows("account_summary", [NS(account=account)])
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -101,7 +126,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["configuration"]["environment"], "live")
         self.assertEqual(health["state"], "connected_read_only")
         self.assertFalse(health["environment_verified"])
-        self.assertFalse(health["data_complete"])
+        self.assertTrue(health["data_complete"])
+        self.assertTrue(health["ready"])
+        self.assertEqual(health["reconciliation_status"]["phase"], "ready")
         self.assertFalse(health["execution_enabled"])
         self.assertTrue(self.client.RaiseRequestErrors)
         self.assertNotIn("DUexample", json.dumps(health))
@@ -128,6 +155,52 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(health["connected"])
         self.assertEqual(self.adapter.config.account, "DUexample")
 
+    async def test_target_account_must_appear_exactly_once(self):
+        self.client.accounts = ["DUexample", "DUexample"]
+        health = await self.adapter.connect()
+        self.assertEqual(health["state"], "account_mismatch")
+        self.assertFalse(health["ready"])
+        status = health["reconciliation_status"]
+        self.assertEqual(status["phase"], "failed")
+        self.assertEqual(status["failure"]["code"], "target_account_not_unique")
+        self.assertEqual(status["failure"]["step"], "account")
+        self.assertNotIn("DUexample", json.dumps(status))
+
+    async def test_required_read_failure_is_named_and_never_ready(self):
+        self.client.read_failure = "executions"
+        health = await self.adapter.connect()
+        self.assertTrue(health["connected"])
+        self.assertFalse(health["ready"])
+        self.assertFalse(health["data_complete"])
+        self.assertEqual(health["state"], "reconciliation_failed")
+        self.assertEqual(health["reconciliation"]["executions"], False)
+        failure = health["reconciliation_status"]["failure"]
+        self.assertEqual((failure["code"], failure["step"], failure["reason"]),
+                         ("reconciliation_read_failed", "executions", "request_failed"))
+        self.assertNotIn("sensitive", json.dumps(health))
+
+    async def test_late_reconciliation_result_cannot_restore_retired_generation(self):
+        release = asyncio.Event()
+        self.client.read_release["positions"] = release
+        task = asyncio.create_task(self.adapter.connect())
+        await self.client.started.wait()
+        await asyncio.sleep(0)
+        connecting = self.adapter.health()["reconciliation_status"]
+        self.client.errorEvent.emit(-1, 1100, "private")
+        self.client.errorEvent.emit(-1, 1102, "restored")
+        retired = self.adapter.health()["reconciliation_status"]
+        self.assertGreater(retired["generation"], connecting["generation"])
+        release.set()
+        health = await task
+        self.assertEqual(health["state"], "reconciliation_required")
+        self.assertFalse(health["ready"])
+        self.assertFalse(health["data_complete"])
+        self.client.read_release.clear()
+        health = await self.adapter.reconcile()
+        self.assertTrue(health["ready"])
+        self.assertEqual(health["reconciliation_status"]["ready_generation"],
+                         health["reconciliation_status"]["generation"])
+
     async def test_timeout_and_cancellation_clean_up_connection(self):
         self.client.release = asyncio.Event()
         await self.adapter.reconfigure(IBKRConfig("paper", account="DUexample", connect_timeout=0.01))
@@ -144,6 +217,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_broker_disconnect_and_recovery_do_not_mark_data_ready(self):
         await self.adapter.connect()
+        first = self.adapter.health()["reconciliation_status"]["generation"]
         self.client.errorEvent.emit(-1, 1100, "DUexample private diagnostic")
         self.assertEqual(self.adapter.health()["state"], "broker_unavailable")
         self.client.errorEvent.emit(-1, 1101, "restored")
@@ -151,6 +225,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["state"], "reconciliation_required")
         self.assertFalse(health["data_complete"])
         self.assertFalse(health["execution_enabled"])
+        self.assertFalse(health["ready"])
+        self.assertGreater(health["reconciliation_status"]["generation"], first)
         self.client.errorEvent.emit(-1, 10197, "private competing username")
         self.assertEqual(self.adapter.health()["state"], "session_conflict")
         self.client.connected = False
@@ -175,10 +251,20 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_disconnect_blocks_environment_switch(self):
         await self.adapter.connect()
+        before = self.adapter.health()
+        self.assertTrue(before["ready"])
+        self.assertIsNotNone(before["session_id"])
         self.client.disconnect_failure = True
         old = self.adapter.config
         health = await self.adapter.reconfigure(IBKRConfig("live", account="Uexample"))
         self.assertEqual(health["state"], "disconnect_failed")
+        self.assertFalse(health["ready"])
+        self.assertFalse(health["data_complete"])
+        self.assertFalse(health["execution_enabled"])
+        self.assertIsNone(health["session_id"])
+        self.assertEqual(health["reconciliation_status"]["phase"], "disconnect_failed")
+        self.assertGreater(health["reconciliation_status"]["generation"],
+                           before["reconciliation_status"]["generation"])
         self.assertIs(self.adapter.config, old)
         self.assertEqual(health["configuration_revision"], 1)
         self.assertEqual(len(self.client.calls), 1)

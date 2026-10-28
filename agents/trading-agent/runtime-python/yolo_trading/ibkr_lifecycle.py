@@ -9,20 +9,24 @@ from .ibkr import IBKRAdapter, IBKROperationError, _timeout
 
 
 class IBKRBrokerLifecycle:
-    """Own one fresh adapter and one explicit paper-only connection attempt.
+    """Own one adapter and maintain a fail-closed Paper connection/reconciliation loop.
 
     Start does not wait for Gateway or prevent chat startup. The event loop
-    remains running after connect completes so SDK network/events stay alive.
+    reconnects recoverable local failures and always reruns the full startup
+    reconciliation before publishing ready. SDK network/events stay on it.
     A lifecycle is single-use; restart the Host to apply a different profile.
     """
 
-    def __init__(self, broker: IBKRAdapter, *, poll_interval=0.1):
+    def __init__(self, broker: IBKRAdapter, *, poll_interval=0.1, reconnect_interval=1.0):
         if not isinstance(broker, IBKRAdapter):
             raise TypeError("broker must be an IBKRAdapter")
         if not 0 < poll_interval <= 1:
             raise ValueError("poll_interval must be greater than 0 and at most 1")
+        if not 0 < reconnect_interval <= 60:
+            raise ValueError("reconnect_interval must be greater than 0 and at most 60")
         self._broker = broker
         self._poll_interval = poll_interval
+        self._reconnect_interval = reconnect_interval
         self._guard = threading.Lock()
         self._snapshot = broker.health()
         self._status = "not_started"
@@ -35,6 +39,8 @@ class IBKRBrokerLifecycle:
         self._orders_snapshot = []
         self._events_snapshot = []
         self._requests = set()
+        self._recovery_attempts = 0
+        self._next_retry_at = None
 
     def health(self):
         with self._guard:
@@ -43,6 +49,8 @@ class IBKRBrokerLifecycle:
                 "state": self._status,
                 "thread_alive": bool(self._thread and self._thread.is_alive()),
                 "error": deepcopy(self._error),
+                "recovery_attempts": self._recovery_attempts,
+                "retry_scheduled": self._next_retry_at is not None,
             }
             health["health_stale"] = self._status == "failed"
             return health
@@ -55,6 +63,8 @@ class IBKRBrokerLifecycle:
         with self._guard:
             self._snapshot = health
             self._paper_snapshot, self._orders_snapshot, self._events_snapshot = paper, orders, events
+            if health.get("ready"):
+                self._error = None
             if status is not None:
                 self._status = status
 
@@ -89,13 +99,30 @@ class IBKRBrokerLifecycle:
                 return False
         return True
 
-    async def _connect_once(self):
+    @staticmethod
+    def _recoverable(health):
+        if not health.get("dependency_available") or health.get("configuration", {}).get("account_configured") is not True:
+            return False
+        if health.get("connected"):
+            return health.get("state") in ("reconciliation_required", "reconciliation_failed")
+        return health.get("state") not in ("account_mismatch", "disconnect_failed")
+
+    async def _recover_once(self):
+        with self._guard:
+            self._recovery_attempts += 1
         try:
-            await self._broker.connect()
+            health = self._broker.health()
+            if health.get("connected") and health.get("state") == "reconciliation_required":
+                await self._broker.reconcile()
+            else:
+                await self._broker.disconnect()
+                await self._broker.connect()
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._failure("broker_connect_failed", "IBKR 连接任务失败，请检查 Gateway；聊天仍可使用。")
+            with self._guard:
+                self._error = {"code": "broker_recovery_failed",
+                               "message": "IBKR 恢复任务失败，将保持不可执行并稍后重试。"}
         finally:
             self._publish()
 
@@ -103,12 +130,27 @@ class IBKRBrokerLifecycle:
         loop, stop = asyncio.get_running_loop(), asyncio.Event()
         with self._guard:
             self._loop, self._stop = loop, stop
-        connection = None
+        recovery = None
+        retry_at = 0.0
         try:
             if not self._closing.is_set():
                 self._publish(status="running")
-                connection = asyncio.create_task(self._connect_once(), name="ibkr-initial-connect")
             while not self._closing.is_set() and not stop.is_set():
+                if recovery is not None and recovery.done():
+                    await asyncio.gather(recovery, return_exceptions=True)
+                    recovery = None
+                    retry_at = loop.time() + self._reconnect_interval
+                    with self._guard:
+                        self._next_retry_at = retry_at
+                health = self._broker.health()
+                recoverable = self._recoverable(health)
+                if recovery is None and not recoverable:
+                    with self._guard:
+                        self._next_retry_at = None
+                if recovery is None and loop.time() >= retry_at and recoverable:
+                    recovery = asyncio.create_task(self._recover_once(), name="ibkr-recover")
+                    with self._guard:
+                        self._next_retry_at = None
                 self._publish()
                 try:
                     await asyncio.wait_for(stop.wait(), self._poll_interval)
@@ -116,9 +158,9 @@ class IBKRBrokerLifecycle:
                     pass
         finally:
             self._publish(status="stopping")
-            if connection is not None:
-                connection.cancel()
-                await asyncio.gather(connection, return_exceptions=True)
+            if recovery is not None:
+                recovery.cancel()
+                await asyncio.gather(recovery, return_exceptions=True)
             requests = tuple(self._requests)
             for request in requests:
                 request.cancel()

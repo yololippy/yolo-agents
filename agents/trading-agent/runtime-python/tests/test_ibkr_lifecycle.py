@@ -21,18 +21,25 @@ from yolo_trading.ibkr import IBKRAdapter
 from yolo_trading.ibkr_config import IBKRConfig
 from yolo_trading.ibkr_lifecycle import IBKRBrokerLifecycle
 
-from test_ibkr import Client
+from test_ibkr import Client, Event
 
 
 class OwnerLoopClient(Client):
-    def __init__(self, *, failure=None, pending=False):
+    def __init__(self, *, account="DUexample", failure=None, pending=False,
+                 read_failure=None, block_read=None):
         super().__init__()
+        self.accounts = [account]
         self.loop = asyncio.get_running_loop()
         self.owner = threading.get_ident()
         self.access_threads = []
         self.failure = failure
+        self.read_failure = read_failure
         if pending:
             self.release = asyncio.Event()
+        if block_read:
+            self.read_release[block_read] = asyncio.Event()
+        for name in ("openOrderEvent", "orderStatusEvent", "execDetailsEvent", "commissionReportEvent"):
+            setattr(self, name, Event())
 
     def isConnected(self):
         self.access_threads.append(threading.get_ident())
@@ -44,14 +51,27 @@ class OwnerLoopClient(Client):
 
 
 class LifecycleTests(unittest.TestCase):
-    def build(self, *, environment="paper", account="DUexample", failure=None, pending=False):
+    def build(self, *, environment="paper", account="DUexample", failure=None, failures=None,
+              pending=False, read_failures=None, block_reads=None, execution=False,
+              managed_accounts=None, reconnect_interval=0.05):
         clients = []
+        def selected(values, index, default=None):
+            if values is None:
+                return default
+            return values[index] if index < len(values) else values[-1]
         def factory():
-            client = OwnerLoopClient(failure=failure, pending=pending)
+            index = len(clients)
+            client = OwnerLoopClient(account=account, failure=selected(failures, index, failure), pending=pending,
+                                     read_failure=selected(read_failures, index),
+                                     block_read=selected(block_reads, index))
+            if managed_accounts is not None:
+                client.accounts = list(managed_accounts)
             clients.append(client)
             return client
-        broker = IBKRAdapter(IBKRConfig(environment, account=account, connect_timeout=30), client_factory=factory)
-        lifecycle = IBKRBrokerLifecycle(broker, poll_interval=0.01)
+        config = IBKRConfig(environment, account=account, connect_timeout=30,
+                            read_only=not execution, execution_enabled=execution)
+        broker = IBKRAdapter(config, client_factory=factory)
+        lifecycle = IBKRBrokerLifecycle(broker, poll_interval=0.01, reconnect_interval=reconnect_interval)
         self.addCleanup(lifecycle.close)
         return broker, lifecycle, clients
 
@@ -72,7 +92,9 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotEqual(client.owner, threading.get_ident())
         self.assertTrue(client.loop.is_running())
         self.assertFalse(lifecycle.health()["execution_enabled"])
-        self.assertFalse(lifecycle.health()["data_complete"])
+        self.assertTrue(lifecycle.health()["data_complete"])
+        self.assertTrue(lifecycle.health()["ready"])
+        self.assertEqual(lifecycle.health()["reconciliation_status"]["phase"], "ready")
         # A scheduled event after connect returns must still be processed.
         client.loop.call_soon_threadsafe(client.errorEvent.emit, -1, 1100, "private account detail")
         self.wait(lambda: lifecycle.health()["state"] == "broker_unavailable")
@@ -130,15 +152,113 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(run_trading_host(object(), None), 0)
         self.assertEqual(run.call_args.kwargs["extension"].broker_health()["state"], "not_configured")
 
-    def test_gateway_failure_does_not_stop_loop_or_retry(self):
-        _, lifecycle, clients = self.build(failure=OSError("secret diagnostic"))
+    def test_gateway_failure_retries_and_recovers_with_full_reconciliation(self):
+        _, lifecycle, clients = self.build(failures=[OSError("secret diagnostic"), None])
         lifecycle.start()
-        self.wait(lambda: lifecycle.health()["state"] == "gateway_unavailable")
+        self.wait(lambda: lifecycle.health()["ready"])
         self.assertTrue(lifecycle.health()["lifecycle"]["thread_alive"])
-        self.assertFalse(lifecycle.health()["connected"])
+        self.assertTrue(lifecycle.health()["connected"])
         self.assertNotIn("secret", json.dumps(lifecycle.health()))
-        self.assertEqual(len(clients[0].calls), 1)
+        self.assertGreaterEqual(len(clients), 2)
+        self.assertEqual(clients[1].read_calls,
+                         ["positions", "open_orders", "executions", "account_summary"])
+        self.assertGreaterEqual(lifecycle.health()["lifecycle"]["recovery_attempts"], 2)
         self.assertTrue(lifecycle.close())
+
+    def test_account_mismatch_requires_manual_fix_without_retry_loop(self):
+        _, lifecycle, clients = self.build(managed_accounts=["Uother"], reconnect_interval=0.02)
+        lifecycle.start()
+        self.wait(lambda: lifecycle.health()["state"] == "account_mismatch")
+        attempts = lifecycle.health()["lifecycle"]["recovery_attempts"]
+        time.sleep(0.1)
+        health = lifecycle.health()
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(health["lifecycle"]["recovery_attempts"], attempts)
+        self.assertFalse(health["lifecycle"]["retry_scheduled"])
+        self.assertFalse(health["ready"])
+        self.assertNotIn("Uother", json.dumps(health))
+
+    def test_disconnect_revokes_ready_then_new_generation_reconciles_before_execution(self):
+        _, lifecycle, clients = self.build(account="DU123456", execution=True,
+                                            block_reads=[None, "positions"])
+        lifecycle.start()
+        self.wait(lambda: lifecycle.health()["execution_enabled"])
+        first = lifecycle.health()
+        old_client = clients[0]
+        old_error_handler = old_client.errorEvent.handlers[0]
+        old_client.loop.call_soon_threadsafe(old_client.disconnect)
+        self.wait(lambda: len(clients) >= 2 and lifecycle.health()["reconciliation_status"]["phase"] == "reconciling")
+        during = lifecycle.health()
+        self.assertFalse(during["ready"])
+        self.assertFalse(during["data_complete"])
+        self.assertFalse(during["execution_enabled"])
+        self.assertIsNone(during["session_id"])
+        self.assertGreater(during["reconciliation_status"]["connection_generation"],
+                           first["reconciliation_status"]["connection_generation"])
+        second = clients[1]
+        second.loop.call_soon_threadsafe(second.read_release["positions"].set)
+        self.wait(lambda: lifecycle.health()["execution_enabled"])
+        recovered = lifecycle.health()
+        self.assertNotEqual(recovered["session_id"], first["session_id"])
+        self.assertEqual(second.read_calls,
+                         ["positions", "open_orders", "executions", "account_summary"])
+        generation = recovered["reconciliation_status"]["generation"]
+        second.loop.call_soon_threadsafe(old_error_handler, -1, 1100, "late private event")
+        time.sleep(0.03)
+        after_late = lifecycle.health()
+        self.assertTrue(after_late["ready"])
+        self.assertEqual(after_late["reconciliation_status"]["generation"], generation)
+        self.assertNotIn("private", json.dumps(after_late))
+
+    def test_upstream_restore_reconciles_all_reads_on_same_connection_before_ready(self):
+        _, lifecycle, clients = self.build(account="DU123456", execution=True)
+        lifecycle.start()
+        self.wait(lambda: lifecycle.health()["execution_enabled"])
+        client = clients[0]
+        initial = lifecycle.health()
+        self.assertEqual(client.read_calls,
+                         ["positions", "open_orders", "executions", "account_summary"])
+
+        client.loop.call_soon_threadsafe(client.errorEvent.emit, -1, 1100, "private outage")
+        self.wait(lambda: lifecycle.health()["state"] == "broker_unavailable")
+        lost = lifecycle.health()
+        self.assertFalse(lost["ready"])
+        self.assertFalse(lost["execution_enabled"])
+        self.assertIsNone(lost["session_id"])
+
+        positions_release = asyncio.Event()
+        client.read_release["positions"] = positions_release
+        client.loop.call_soon_threadsafe(client.errorEvent.emit, -1, 1102, "private restored")
+        self.wait(lambda: lifecycle.health()["reconciliation_status"]["phase"] == "reconciling")
+        during = lifecycle.health()
+        self.assertFalse(during["ready"])
+        self.assertFalse(during["execution_enabled"])
+        self.assertEqual(len(clients), 1)
+
+        client.loop.call_soon_threadsafe(positions_release.set)
+        self.wait(lambda: lifecycle.health()["execution_enabled"])
+        recovered = lifecycle.health()
+        self.assertEqual(client.read_calls,
+                         ["positions", "open_orders", "executions", "account_summary"] * 2)
+        self.assertGreater(recovered["reconciliation_status"]["generation"],
+                           initial["reconciliation_status"]["generation"])
+        self.assertNotEqual(recovered["session_id"], initial["session_id"])
+        self.assertNotIn("private", json.dumps(recovered))
+
+    def test_failed_reconciliation_retries_all_reads_and_never_publishes_partial_ready(self):
+        _, lifecycle, clients = self.build(read_failures=["open_orders", None])
+        lifecycle.start()
+        self.wait(lambda: clients and clients[0].read_calls)
+        self.wait(lambda: lifecycle.health()["state"] == "reconciliation_failed")
+        failed = lifecycle.health()
+        self.assertFalse(failed["ready"])
+        self.assertFalse(failed["data_complete"])
+        self.assertEqual(failed["reconciliation_status"]["failure"]["step"], "open_orders")
+        self.wait(lambda: lifecycle.health()["ready"])
+        self.assertGreaterEqual(len(clients), 2)
+        self.assertEqual(clients[1].read_calls,
+                         ["positions", "open_orders", "executions", "account_summary"])
+        self.assertNotIn("sensitive", json.dumps(lifecycle.health()))
 
     def test_close_cancels_pending_connect_without_waiting_for_connect_timeout(self):
         _, lifecycle, clients = self.build(pending=True)
@@ -177,9 +297,10 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(clients, [])
 
     def test_disconnect_failure_is_reported_without_hanging_shutdown(self):
-        _, lifecycle, clients = self.build()
+        _, lifecycle, clients = self.build(account="DU123456", execution=True)
         lifecycle.start()
-        self.wait(lambda: lifecycle.health()["connected"])
+        self.wait(lambda: lifecycle.health()["execution_enabled"])
+        before = lifecycle.health()
         clients[0].disconnect_failure = True
         self.assertFalse(lifecycle.close(timeout=2))
         health = lifecycle.health()
@@ -187,6 +308,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(clients[0].loop.is_closed())
         self.assertEqual(health["lifecycle"]["error"]["code"], "broker_disconnect_failed")
         self.assertTrue(health["health_stale"])
+        self.assertFalse(health["ready"])
+        self.assertFalse(health["data_complete"])
+        self.assertFalse(health["execution_enabled"])
+        self.assertIsNone(health["session_id"])
+        self.assertGreater(health["reconciliation_status"]["generation"],
+                           before["reconciliation_status"]["generation"])
         self.assertNotIn("sensitive", json.dumps(health))
 
     def test_missing_sdk_is_visible_without_crashing_host(self):

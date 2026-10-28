@@ -119,6 +119,12 @@ class IBKRAdapter:
         self._reads = {name: False for name in ("account", "positions", "open_orders", "executions", "account_summary")}
         self._positions = []
         self._previews = {}
+        self._connection_generation = 0
+        self._reconciliation_generation = 0
+        self._ready_generation = None
+        self._reconciliation_phase = "idle"
+        self._reconciliation_failure = None
+        self._disconnecting_client = None
 
     def _assert_owner(self):
         try:
@@ -154,7 +160,7 @@ class IBKRAdapter:
             blockers.append({"code": "dependency_missing", "message": "未安装可选依赖 ib_async。"})
         if self._config.account is None:
             blockers.append({"code": "account_required", "message": "连接前需显式配置目标账户 account。"})
-        if self._account_verified and not all(self._reads.values()):
+        if self._account_verified and self._reconciliation_phase != "ready":
             blockers.append({"code": "reconciliation_incomplete", "message": "必需的启动读取未全部完成，禁止订单操作。"})
         if self._config.paper_execution_enabled and self._account_verified and not self._environment_verified:
             blockers.append({"code": "paper_environment_unverified", "message": "未核验受支持的 Paper 账户，禁止执行。"})
@@ -163,47 +169,116 @@ class IBKRAdapter:
             state = "dependency_missing" if not available else "configuration_incomplete"
         if self._client is not None and not self._client.isConnected() and state not in ("connecting", "disconnected"):
             state = "gateway_unavailable"
+        connected = bool(self._client is not None and self._client.isConnected())
+        ready = bool(connected and self._account_verified and self._reconciliation_phase == "ready"
+                     and self._ready_generation == self._reconciliation_generation and all(self._reads.values()))
         return {"state": state, "configuration": self._config.audit(),
                 "configuration_revision": self._revision, "last_configuration_change": self._last_change,
                 "dependency_available": available, "test_client": self._client_factory is not None,
                 "connection_attempted": self._attempted,
-                "connected": bool(self._client is not None and self._client.isConnected()),
-                "environment_verified": self._environment_verified, "data_complete": all(self._reads.values()),
+                "connected": connected, "ready": ready,
+                "environment_verified": self._environment_verified, "data_complete": ready,
                 "session_id": self._session_id, "account_verified": self._account_verified,
                 "permissions_verified": self._config.paper_execution_enabled and self._account_verified,
                 "reconciliation": dict(self._reads),
-                "execution_enabled": bool(self._config.paper_execution_enabled and self._account_verified
-                                          and self._environment_verified and all(self._reads.values())
+                "reconciliation_status": {"phase": self._reconciliation_phase,
+                                          "connection_generation": self._connection_generation,
+                                          "generation": self._reconciliation_generation,
+                                          "ready_generation": self._ready_generation,
+                                          "failure": deepcopy(self._reconciliation_failure)},
+                "execution_enabled": bool(self._config.paper_execution_enabled and ready
+                                          and self._environment_verified
                                           and self._state == "connected_paper"),
                 "tracked_orders": len(self._orders), "blockers": blockers, "error": self._error}
 
     def _fail(self, state, code, message):
         self._state, self._error = state, {"code": code, "message": message}
 
-    def _disconnect_client(self):
-        self._assert_owner()
+    def _invalidate_reconciliation(self, phase, *, code=None, message=None):
+        """Retire every in-flight read before publishing a non-ready state."""
+        self._reconciliation_generation += 1
+        self._ready_generation = None
+        self._reconciliation_phase = phase
+        self._reconciliation_failure = ({"code": code, "message": message} if code is not None else None)
         self._account_verified = False
         self._environment_verified = False
         self._reads = dict.fromkeys(self._reads, False)
+        self._positions = []
+        self._session_id = None
+        self._previews.clear()
+
+    def _begin_reconciliation(self):
+        self._invalidate_reconciliation("verifying_account")
+        return self._reconciliation_generation
+
+    def _current_attempt(self, client, connection_generation, reconciliation_generation=None):
+        current = self._client is client and self._connection_generation == connection_generation
+        if reconciliation_generation is not None:
+            current = current and self._reconciliation_generation == reconciliation_generation
+        return current
+
+    def _set_reconciliation_failure(self, code, message, *, step=None):
+        self._ready_generation = None
+        self._reconciliation_phase = "failed"
+        self._reconciliation_failure = {"code": code, "message": message}
+        if step is not None:
+            self._reconciliation_failure["step"] = step
+        self._session_id = None
+        self._previews.clear()
+        self._fail("reconciliation_failed", code, message)
+
+    def _bind_event(self, client, connection_generation, name, callback):
+        event = getattr(client, name, None)
+        if event is None:
+            if self._config.paper_execution_enabled:
+                raise RuntimeError("Required execution events unavailable")
+            return
+
+        def current_session_handler(*args):
+            if (self._disconnecting_client is client
+                    or not self._current_attempt(client, connection_generation)):
+                return
+            callback(*args)
+
+        event.connect(current_session_handler)
+        self._subscriptions.append((event, current_session_handler))
+
+    def _disconnect_client(self):
+        self._assert_owner()
         client = self._client
+        # Retire the active session before touching the SDK.  A disconnect can
+        # raise while the socket still looks connected; that uncertainty must
+        # never preserve a previously ready/executable generation.
+        self._invalidate_reconciliation("disconnecting")
         if client is not None:
+            self._disconnecting_client = client
             try:
                 client.disconnect()
                 if client.isConnected():
                     raise ConnectionError
             except Exception:
+                self._disconnecting_client = None
+                self._reconciliation_phase = "disconnect_failed"
+                self._reconciliation_failure = {
+                    "code": "disconnect_failed",
+                    "message": "无法确认原 Gateway 连接已关闭。",
+                }
                 self._fail("disconnect_failed", "disconnect_failed", "无法确认原 Gateway 连接已关闭，配置切换已阻止。")
                 return False
         for event, handler in self._subscriptions:
             event.disconnect(handler)
         self._subscriptions.clear()
+        self._disconnecting_client = None
         self._client = None
+        self._connection_generation += 1
+        self._reconciliation_phase = "idle"
+        self._reconciliation_failure = None
         return True
 
     def _on_disconnected(self, *args):
         self._assert_owner()
-        self._account_verified = False
-        self._reads = dict.fromkeys(self._reads, False)
+        self._invalidate_reconciliation("connection_lost", code="connection_lost",
+                                        message="Gateway 连接已断开，需重新连接并完整对账。")
         self._mark_orders_unknown("connection_lost")
         self._fail("gateway_unavailable", "connection_lost", "Gateway 连接已断开，需恢复后重新对账。")
 
@@ -211,17 +286,17 @@ class IBKRAdapter:
         self._assert_owner()
         # Never publish/log broker error_text: it can contain account details.
         if error_code in (1100, 1300, 2110):
-            self._account_verified = False
-            self._reads = dict.fromkeys(self._reads, False)
+            self._invalidate_reconciliation("connection_lost", code="broker_connection_lost",
+                                            message="Gateway 与 IBKR 的连接异常，等待恢复后重新对账。")
             self._mark_orders_unknown("broker_connection_lost")
             self._fail("broker_unavailable", "broker_connection_lost", "Gateway 与 IBKR 的连接异常，当前数据不可视为最新。")
         elif error_code in (1101, 1102):
-            self._account_verified = False
-            self._reads = dict.fromkeys(self._reads, False)
+            self._invalidate_reconciliation("reconciliation_required", code="connection_restored",
+                                            message="券商连接已恢复，必须完整重跑启动对账。")
             self._fail("reconciliation_required", "reconciliation_required", "券商连接恢复，需重新核对账户、挂单、成交和订阅。")
         elif error_code == 10197:
-            self._account_verified = False
-            self._reads = dict.fromkeys(self._reads, False)
+            self._invalidate_reconciliation("session_conflict", code="session_conflict",
+                                            message="检测到竞争登录会话，当前数据失效。")
             self._mark_orders_unknown("session_conflict")
             self._fail("session_conflict", "session_conflict", "存在竞争登录会话，请检查 Gateway 登录状态。")
         record = self._orders.get(self._order_ids.get((self._config.client_id, request_id)))
@@ -246,6 +321,7 @@ class IBKRAdapter:
             if self._config.account is None or not self._dependency_available():
                 return self.health()
             self._state, self._error, self._attempted = "connecting", None, True
+            self._invalidate_reconciliation("connecting")
             try:
                 factory = self._client_factory
                 if factory is None:
@@ -256,17 +332,13 @@ class IBKRAdapter:
                         return self.health()
                 client = factory()
                 self._client = client
+                self._connection_generation += 1
+                connection_generation = self._connection_generation
                 client.RaiseRequestErrors = True
                 for name, handler in (("disconnectedEvent", self._on_disconnected), ("errorEvent", self._on_error),
                                       ("openOrderEvent", self._on_open_order), ("orderStatusEvent", self._on_order_status),
                                       ("execDetailsEvent", self._on_execution), ("commissionReportEvent", self._on_commission)):
-                    event = getattr(client, name, None)
-                    if event is None:
-                        if self._config.paper_execution_enabled:
-                            raise RuntimeError("Required execution events unavailable")
-                        continue
-                    event.connect(handler)
-                    self._subscriptions.append((event, handler))
+                    self._bind_event(client, connection_generation, name, handler)
                 await asyncio.wait_for(client.connectAsync(
                     self._config.host, self._config.port, clientId=self._config.client_id,
                     timeout=self._config.connect_timeout, readonly=not self._config.paper_execution_enabled,
@@ -274,52 +346,105 @@ class IBKRAdapter:
                 ), timeout=self._config.connect_timeout)
                 if not client.isConnected():
                     raise ConnectionError
-                if self._config.account not in client.managedAccounts():
-                    if self._disconnect_client():
-                        self._fail("account_mismatch", "account_mismatch", "Gateway 返回的账户不包含配置目标；已断开，未自动选择其他账户。")
-                elif self._state == "connecting":
-                    self._account_verified = True
-                    self._session_id = str(uuid4())
-                    # Never infer configured mode from a port. The first batch
-                    # additionally restricts execution to known, broker-returned
-                    # Paper namespaces; unknown namespaces fail closed.
-                    self._environment_verified = (self._config.environment == "paper"
-                        and _is_supported_paper_account(self._config.account))
-                    self._reads["account"] = True
-                    await self._reconcile()
-                    if self._state == "connecting" and self._account_verified:
-                        self._state = "connected_paper" if self._config.paper_execution_enabled else "connected_read_only"
+                await self._verify_and_reconcile(client, connection_generation)
             except asyncio.CancelledError:
                 if self._disconnect_client():
                     self._fail("disconnected", "connection_cancelled", "连接已取消。")
                 raise
             except Exception:
                 if self._disconnect_client():
+                    self._reconciliation_phase = "failed"
+                    self._reconciliation_failure = {"code": "connection_failed",
+                        "message": "无法完成 Gateway 连接或启动握手。"}
                     self._fail("gateway_unavailable", "connection_failed", "无法完成 Gateway 连接；请检查进程、登录/API 配置、端口及 client ID。")
             return self.health()
 
-    async def _reconcile(self):
+    async def _verify_and_reconcile(self, client, connection_generation):
+        reconciliation_generation = self._begin_reconciliation()
+        try:
+            accounts = client.managedAccounts()
+        except Exception:
+            accounts = None
+        if not self._current_attempt(client, connection_generation, reconciliation_generation):
+            return False
+        if (not isinstance(accounts, (list, tuple))
+                or sum(account == self._config.account for account in accounts) != 1):
+            if self._disconnect_client():
+                self._set_reconciliation_failure("target_account_not_unique",
+                    "Gateway 未唯一返回配置的目标账户；已断开且不会自动选择其他账户。", step="account")
+                self._fail("account_mismatch", "target_account_not_unique",
+                           "Gateway 未唯一返回配置目标账户；已断开，未自动选择其他账户。")
+            return False
+        self._account_verified = True
+        self._environment_verified = (self._config.environment == "paper"
+            and _is_supported_paper_account(self._config.account))
+        self._reads["account"] = True
+        self._reconciliation_phase = "reconciling"
+        results = await self._reconcile(client, connection_generation, reconciliation_generation)
+        if not self._current_attempt(client, connection_generation, reconciliation_generation):
+            return False
+        self._reads.update({name: success for name, success, _, _ in results})
+        first_failure = next((item for item in results if not item[1]), None)
+        if first_failure is not None:
+            name, _, _, reason = first_failure
+            self._set_reconciliation_failure("reconciliation_read_failed",
+                "启动对账的必需读取未完成。", step=name)
+            self._reconciliation_failure["reason"] = reason
+            return False
+        if not client.isConnected():
+            self._invalidate_reconciliation("connection_lost", code="connection_lost",
+                                            message="Gateway 在启动对账完成前断开。")
+            self._fail("gateway_unavailable", "connection_lost", "Gateway 在启动对账完成前断开。")
+            return False
+        positions = next(value for name, _, value, _ in results if name == "positions")
+        self._positions = [row for row in positions if getattr(row, "account", None) == self._config.account]
+        self._ready_generation = reconciliation_generation
+        self._reconciliation_phase = "ready"
+        self._reconciliation_failure = None
+        self._session_id = str(uuid4())
+        self._state = "connected_paper" if self._config.paper_execution_enabled else "connected_read_only"
+        self._error = None
+        return True
+
+    async def _reconcile(self, client, connection_generation, reconciliation_generation):
         methods = (("positions", "reqPositionsAsync", ()),
                    ("open_orders", "reqAllOpenOrdersAsync", ()),
                    ("executions", "reqExecutionsAsync", ()),
                    ("account_summary", "accountSummaryAsync", (self._config.account,)))
         async def read(name, method, args):
-            self._reads[name] = False
-            call = getattr(self._client, method, None)
+            call = getattr(client, method, None)
             if call is None:
-                return
+                return name, False, None, "method_unavailable"
             try:
                 rows = await asyncio.wait_for(call(*args), self._config.connect_timeout)
                 if not isinstance(rows, (list, tuple)):
-                    return
+                    return name, False, None, "invalid_response"
                 if name == "account_summary" and not any(getattr(row, "account", None) == self._config.account for row in rows):
-                    return
-                if name == "positions":
-                    self._positions = [row for row in rows if getattr(row, "account", None) == self._config.account]
-                self._reads[name] = True
+                    return name, False, None, "target_account_missing"
+                return name, True, rows, None
+            except asyncio.TimeoutError:
+                return name, False, None, "timeout"
             except Exception:
-                pass  # A failed read must never look like an empty account.
-        await asyncio.gather(*(read(*item) for item in methods))
+                return name, False, None, "request_failed"
+        results = await asyncio.gather(*(read(*item) for item in methods))
+        if not self._current_attempt(client, connection_generation, reconciliation_generation):
+            return tuple(results)
+        return tuple(results)
+
+    async def reconcile(self):
+        """Revalidate the exact account and every required read on the current connection."""
+        self._assert_owner()
+        async with self._lock:
+            client = self._client
+            connection_generation = self._connection_generation
+            if client is None or not client.isConnected():
+                self._invalidate_reconciliation("connection_lost", code="connection_lost",
+                                                message="Gateway 未连接，无法执行启动对账。")
+                self._fail("gateway_unavailable", "connection_lost", "Gateway 未连接，无法执行启动对账。")
+                return self.health()
+            self._state, self._error = "reconciling", None
+            await self._verify_and_reconcile(client, connection_generation)
+            return self.health()
 
     async def disconnect(self):
         self._assert_owner()
