@@ -295,12 +295,16 @@ private struct ChatDetail: View {
                                 }
                                 .padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
                             }
+                            ForEach(model.awaitingReplies) { reply in
+                                AwaitingReplyBubble(reply: reply, isOnline: model.isOnline)
+                            }
                             Color.clear.frame(height: 1).id("bottom")
                         }.padding().frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: model.messages) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                     .onChange(of: model.partialReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                    .onChange(of: model.awaitingReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 }
                 .task(id: model.selectedID) { await model.loadSelectedMessages() }
             }
@@ -412,6 +416,44 @@ private struct ChatDetail: View {
     }
 }
 
+struct AwaitingReplyPresentation: Equatable {
+    let status: String
+    let showsProgress: Bool
+    let accessibilityIdentifier: String
+
+    init(reply: AwaitingReply, isOnline: Bool) {
+        status = isOnline ? "正在思考…" : "等待重新同步…"
+        showsProgress = isOnline
+        accessibilityIdentifier = "chat.awaiting-reply.\(reply.id.uuidString.lowercased())"
+    }
+}
+
+private struct AwaitingReplyBubble: View {
+    let reply: AwaitingReply
+    let isOnline: Bool
+    private var presentation: AwaitingReplyPresentation {
+        AwaitingReplyPresentation(reply: reply, isOnline: isOnline)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("助手").font(.caption.bold()).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                if presentation.showsProgress {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
+                }
+                Text(presentation.status).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier(presentation.accessibilityIdentifier)
+    }
+}
+
 private struct MessageBubble: View {
     let message: Message
     @ObservedObject var model: ChatModel
@@ -431,7 +473,7 @@ private struct MessageBubble: View {
                 if let outgoing {
                     switch outgoing.status {
                     case .submitting: Text("正在发送…").font(.caption).foregroundStyle(.secondary)
-                    case .accepted: Text("已送达 · 等待回复").font(.caption).foregroundStyle(.secondary)
+                    case .accepted: Text("已送达").font(.caption).foregroundStyle(.secondary)
                     case .needsRetry:
                         Text(outgoing.error ?? "发送结果待确认").font(.caption).foregroundStyle(.orange)
                         Button("重试并核对发送结果") { Task { await model.retry(outgoing.id) } }

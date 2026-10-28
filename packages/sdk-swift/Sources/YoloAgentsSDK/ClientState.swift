@@ -20,6 +20,15 @@ public struct PartialReply: Codable, Equatable, Sendable, Identifiable {
     public let createdAt: Date
 }
 
+public struct AwaitingReply: Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let conversationID: UUID
+    public let createdAt: Date
+    public init(id: UUID, conversationID: UUID, createdAt: Date) {
+        self.id = id; self.conversationID = conversationID; self.createdAt = createdAt
+    }
+}
+
 /// A page is reduced transactionally. Persist the returned value before publishing it.
 /// Cursor gaps are legal (a global log may contain events outside a device's scope),
 /// but order, page boundaries, and duplicate events are checked.
@@ -33,6 +42,26 @@ public struct ClientState: Codable, Equatable, Sendable {
 
     public func messages(in conversationID: UUID) -> [Message] {
         messagesByConversation[conversationID.uuidString] ?? []
+    }
+    /// Accepted runs that have not produced their first assistant event yet.
+    /// This is derived so terminal events arriving before the POST response cannot
+    /// briefly resurrect a waiting indicator.
+    public func awaitingReplies(in conversationID: UUID) -> [AwaitingReply] {
+        let partialRunIDs = Set(partialReplies.lazy.filter {
+            $0.conversationID == conversationID
+        }.map(\.id))
+        let terminalRunIDs = Set(messages(in: conversationID).lazy.compactMap { message in
+            message.role == .assistant && message.status != .pending ? message.runID : nil
+        })
+        var seen = Set<UUID>()
+        return outgoing.lazy
+            .filter { $0.conversationID == conversationID && $0.status == .accepted }
+            .compactMap { outgoing -> AwaitingReply? in
+                guard let runID = outgoing.runID, seen.insert(runID).inserted,
+                      !partialRunIDs.contains(runID), !terminalRunIDs.contains(runID) else { return nil }
+                return AwaitingReply(id: runID, conversationID: conversationID, createdAt: outgoing.createdAt)
+            }
+            .sorted { $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt }
     }
     public mutating func upsertConversation(_ conversation: Conversation) {
         if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {

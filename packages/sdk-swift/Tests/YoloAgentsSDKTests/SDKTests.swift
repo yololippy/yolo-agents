@@ -210,6 +210,45 @@ func invalidServiceAddressesFail(_ value: String) {
     #expect(state.messages(in: conversationID) == [canonical])
     #expect(state.outgoing.first?.status == .accepted)
     #expect(state.outgoing.first?.runID == runID)
+    #expect(state.awaitingReplies(in: conversationID).map(\.id) == [runID])
+}
+
+@Test func acceptedRunsWaitOnlyUntilTheirFirstAssistantEventAndStayConversationScoped() throws {
+    let secondRunID = UUID(uuidString: "20000000-0000-4000-8000-000000000003")!
+    let secondClientID = UUID(uuidString: "30000000-0000-4000-8000-000000000004")!
+    let otherConversationID = UUID(uuidString: "10000000-0000-4000-8000-000000000005")!
+    let otherRunID = UUID(uuidString: "20000000-0000-4000-8000-000000000006")!
+    let otherClientID = UUID(uuidString: "30000000-0000-4000-8000-000000000007")!
+    var state = ClientState()
+
+    for (client, run, createdAt) in [
+        (clientID, runID, now),
+        (secondClientID, secondRunID, now.addingTimeInterval(1)),
+    ] {
+        state.enqueue(content: "hello", conversationID: conversationID, id: client, now: createdAt)
+        let canonical = Message(id: UUID(), conversationID: conversationID, role: .user, content: "hello",
+                                createdAt: createdAt, status: .completed, clientMessageID: client)
+        try state.accept(SendMessageResponse(message: canonical, runID: run, status: "accepted"), clientMessageID: client)
+    }
+    state.enqueue(content: "other", conversationID: otherConversationID, id: otherClientID, now: now)
+    let otherCanonical = Message(id: UUID(), conversationID: otherConversationID, role: .user, content: "other",
+                                 createdAt: now, status: .completed, clientMessageID: otherClientID)
+    try state.accept(SendMessageResponse(message: otherCanonical, runID: otherRunID, status: "accepted"),
+                     clientMessageID: otherClientID)
+
+    #expect(state.awaitingReplies(in: conversationID).map(\.id) == [runID, secondRunID])
+    #expect(state.awaitingReplies(in: otherConversationID).map(\.id) == [otherRunID])
+
+    state = try state.applying(page([event(1, "assistant.delta", EventPayload(runID: runID, delta: "你"))]))
+    #expect(state.awaitingReplies(in: conversationID).map(\.id) == [secondRunID])
+    #expect(state.partialReplies.map(\.id).contains(runID))
+
+    let failed = ServerEvent(seq: 2, type: "assistant.failed", conversationID: conversationID,
+                             payload: EventPayload(runID: secondRunID,
+                                                   error: ServiceError(code: "failed", message: "失败")),
+                             createdAt: now)
+    state = try state.applying(EventsPage(events: [failed], nextCursor: 2, hasMore: false))
+    #expect(state.awaitingReplies(in: conversationID).isEmpty)
 }
 
 @Test func completionBeforePostResponseStillClearsPendingDelivery() throws {
@@ -217,9 +256,11 @@ func invalidServiceAddressesFail(_ value: String) {
     state.enqueue(content: "hello", conversationID: conversationID, id: clientID, now: now)
     let completed = message()
     state = try state.applying(page([event(1, "assistant.completed", EventPayload(message: completed, runID: runID))]))
+    #expect(state.awaitingReplies(in: conversationID).isEmpty)
     try state.accept(SendMessageResponse(message: message(role: .user, clientMessageID: clientID),
                                         runID: runID, status: "duplicate"), clientMessageID: clientID)
     #expect(state.outgoing.isEmpty)
+    #expect(state.awaitingReplies(in: conversationID).isEmpty)
     #expect(state.messages(in: conversationID).count == 2)
 }
 

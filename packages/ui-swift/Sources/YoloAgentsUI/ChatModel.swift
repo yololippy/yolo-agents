@@ -64,6 +64,9 @@ public final class ChatModel: ObservableObject {
     public var partialReplies: [PartialReply] {
         state.partialReplies.filter { $0.conversationID == selectedID }.sorted { $0.createdAt < $1.createdAt }
     }
+    public var awaitingReplies: [AwaitingReply] {
+        selectedID.map { state.awaitingReplies(in: $0) } ?? []
+    }
     public var devicePlatform: DevicePlatform {
         #if os(iOS)
         .ios

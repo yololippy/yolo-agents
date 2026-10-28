@@ -44,6 +44,18 @@ private actor UIHTTP: HTTPTransport {
                 "{\"models\":[{\"id\":\"model-a\",\"display_name\":\"Model A\"},{\"id\":\"model-b\",\"display_name\":\"Model B\"}],\"default_model\":\"model-a\",\"auth\":{\"status\":\"authenticated\"}}"
         } else if path == "/v1/conversations" {
             json = "{\"conversations\":[\(conversationJSON)]}"
+        } else if request.httpMethod == "POST", path.hasSuffix("/messages") {
+            guard let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String],
+                  let clientID = body["client_message_id"], let content = body["content"] else {
+                throw URLError(.cannotParseResponse)
+            }
+            let encodedContent = String(decoding: try JSONEncoder().encode(content), as: UTF8.self)
+            json = """
+            {"message":{"id":"30000000-0000-4000-8000-000000000003","conversation_id":"\(testConversationID)",
+            "role":"user","content":\(encodedContent),
+            "created_at":"2026-10-27T00:00:01Z","status":"completed","client_message_id":"\(clientID)","run_id":null},
+            "run_id":"\(testRunID)","status":"accepted"}
+            """
         } else if path.hasSuffix("/messages") {
             if let messageErrorCode { throw URLError(messageErrorCode) }
             json = "{\"messages\":[]}"
@@ -131,6 +143,32 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     model.setActive(false)
     try await waitUntil { cancelled.isSet }
     #expect(model.connectionState == .disconnected)
+}
+
+@Test @MainActor func acceptedMessageExposesLoadingUntilTheFirstDelta() async throws {
+    let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+    let streams = UIStreams([
+        SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() }),
+    ])
+    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = ChatModel(repository: repository, transport: UIHTTP(), streamTransport: streams)
+    defer { model.setActive(false) }
+    await model.start()
+    try await waitUntil { model.isOnline }
+
+    #expect(await model.send("hello"))
+    let waiting = try #require(model.awaitingReplies.first)
+    #expect(waiting.id == testRunID)
+    #expect(AwaitingReplyPresentation(reply: waiting, isOnline: true).status == "正在思考…")
+    #expect(AwaitingReplyPresentation(reply: waiting, isOnline: true).showsProgress)
+    #expect(AwaitingReplyPresentation(reply: waiting, isOnline: false).status == "等待重新同步…")
+    #expect(!AwaitingReplyPresentation(reply: waiting, isOnline: false).showsProgress)
+    #expect(AwaitingReplyPresentation(reply: waiting, isOnline: true).accessibilityIdentifier ==
+            "chat.awaiting-reply.\(testRunID.uuidString.lowercased())")
+
+    continuation.yield(try bytes(delta(2, "你")))
+    try await waitUntil { model.partialReplies.first?.content == "你" }
+    #expect(model.awaitingReplies.isEmpty)
 }
 
 @Test @MainActor func catalogServiceErrorIsVisibleWithoutDisablingChat() async throws {
