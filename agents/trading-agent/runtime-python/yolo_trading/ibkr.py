@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import re
 import threading
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .ibkr_config import IBKRConfig, IBKRConfigurationError, load_ibkr_config
 
@@ -135,6 +135,7 @@ class IBKRAdapter:
         self._reconciliation_phase = "idle"
         self._reconciliation_failure = None
         self._disconnecting_client = None
+        self._unresolved_recovery_refs = set()
 
     def _assert_owner(self):
         try:
@@ -370,6 +371,82 @@ class IBKRAdapter:
                     self._fail("gateway_unavailable", "connection_failed", "无法完成 Gateway 连接；请检查进程、登录/API 配置、端口及 client ID。")
             return self.health()
 
+    async def restore_tracked_orders(self, plan):
+        """Restore private identities before connect; this never calls the SDK."""
+        self._bind_owner()
+        async with self._lock:
+            if self._client is not None:
+                self._unresolved_recovery_refs.add("recovery_started_after_connect")
+                return {"restored": 0, "unresolved": len(self._unresolved_recovery_refs)}
+            try:
+                if (not isinstance(plan, dict) or set(plan) != {"active_order_refs", "records"}
+                        or not isinstance(plan["active_order_refs"], list)
+                        or not isinstance(plan["records"], list)
+                        or len(plan["records"]) > 1000):
+                    raise ValueError()
+                active = {_intent(value) for value in plan["active_order_refs"]}
+                if any(str(UUID(value)) != value for value in active):
+                    raise ValueError()
+                if len(active) != len(plan["active_order_refs"]) or len(active) > 1000:
+                    raise ValueError()
+            except (IBKROperationError, TypeError, ValueError):
+                self._unresolved_recovery_refs = {"invalid_recovery_plan"}
+                return {"restored": 0, "unresolved": 1}
+            self._unresolved_recovery_refs = set(active)
+            restored = 0
+            for value in plan["records"][:1000]:
+                try:
+                    required = {"order_ref", "broker_order_id", "config_id", "session_id", "intent",
+                                "qualified_contract", "filled_quantity", "average_fill_price"}
+                    if not isinstance(value, dict) or set(value) != required:
+                        raise ValueError()
+                    reference = _intent(value["order_ref"])
+                    if reference not in active or reference in self._orders or value["config_id"] != self.config.config_id:
+                        raise ValueError()
+                    session_id = value["session_id"]
+                    if (not isinstance(session_id, str) or not 1 <= len(session_id) <= 100
+                            or any(ord(char) < 33 or ord(char) > 126 for char in session_id)):
+                        raise ValueError()
+                    request = self._request(value["intent"])
+                    contract = value["qualified_contract"]
+                    expected_contract = {"con_id", "symbol", "sec_type", "exchange", "currency"}
+                    if (not isinstance(contract, dict) or set(contract) != expected_contract
+                            or type(contract["con_id"]) is not int or contract["con_id"] <= 0
+                            or any(contract.get(key) != request[source] for key, source in (
+                                ("symbol", "symbol"), ("sec_type", "sec_type"),
+                                ("exchange", "exchange"), ("currency", "currency")))):
+                        raise ValueError()
+                    broker_id = value["broker_order_id"]
+                    order_id = None
+                    if broker_id is not None:
+                        if (not isinstance(broker_id, str) or not broker_id.isascii() or not broker_id.isdecimal()
+                                or not 0 < int(broker_id) <= 2147483647 or str(int(broker_id)) != broker_id):
+                            raise ValueError()
+                        order_id = int(broker_id)
+                        if (self.config.client_id, order_id) in self._order_ids:
+                            raise ValueError()
+                    filled = value["filled_quantity"]
+                    average = _number(value["average_fill_price"]) if value["average_fill_price"] is not None else None
+                    if (type(filled) is not int or not 0 <= filled <= request["quantity"]
+                            or (value["average_fill_price"] is not None and (average is None or average <= 0))):
+                        raise ValueError()
+                except (IBKROperationError, KeyError, TypeError, ValueError):
+                    continue
+                record = {"order_ref": reference, "broker_order_id": broker_id, "order_id": order_id,
+                          "client_id": self.config.client_id, "perm_id": None, "config_id": self.config.config_id,
+                          "session_id": session_id, "request": request, "qualified_contract": deepcopy(contract),
+                          "status": "unknown", "filled_quantity": filled,
+                          "average_fill_price": format(average, "f") if average is not None else None,
+                          "error_code": None, "unknown_reason": "process_restart", "executions": {},
+                          "_account": self.config.account, "_order": None, "_ack": asyncio.Event(),
+                          "_cancel_attempted": True, "_integrity_failed": False, "_recovered": True, "_last": None}
+                self._orders[reference] = record
+                if order_id is not None:
+                    self._order_ids[(self.config.client_id, order_id)] = reference
+                self._unresolved_recovery_refs.discard(reference)
+                restored += 1
+            return {"restored": restored, "unresolved": len(self._unresolved_recovery_refs)}
+
     async def _verify_and_reconcile(self, client, connection_generation):
         reconciliation_generation = self._begin_reconciliation()
         try:
@@ -599,7 +676,7 @@ class IBKRAdapter:
                     or preview.get("what_if") != saved["result"]["what_if"] or preview.get("context") != context
                     or saved["result"]["context"] != context):
                 raise IBKROperationError("preview_required", "需要当前配置、会话和订单内容对应的有效 What-if 预览。")
-            if any(row["status"] == "unknown" for row in self._orders.values()):
+            if self._unresolved_recovery_refs or any(row["status"] == "unknown" for row in self._orders.values()):
                 raise IBKROperationError("unresolved_order", "已有结果未知的订单，先对账再提交新订单。")
             try:
                 order_id = self._client.client.getReqId()
@@ -614,7 +691,7 @@ class IBKRAdapter:
                       "status": "unknown", "filled_quantity": 0, "average_fill_price": None, "error_code": None,
                       "unknown_reason": "pending_submission", "executions": {}, "_account": self.config.account,
                       "_order": order, "_ack": asyncio.Event(), "_cancel_attempted": False,
-                      "_integrity_failed": False, "_last": None}
+                      "_integrity_failed": False, "_recovered": False, "_last": None}
             # Reserve the intent and ID before the only call that may transmit.
             self._orders[reference] = record
             self._order_ids[(self.config.client_id, order_id)] = reference
@@ -777,8 +854,63 @@ class IBKRAdapter:
             self._unknown(record, "inactive_order")
         self._record_event(record, kind)
 
+    def _bind_recovered_open_order(self, trade):
+        order, contract = getattr(trade, "order", None), getattr(trade, "contract", None)
+        reference = getattr(order, "orderRef", None)
+        record = self._orders.get(reference)
+        if record is None or record["order_id"] is not None:
+            return None
+        quantity = _number(getattr(order, "totalQuantity", None))
+        price = _number(getattr(order, "lmtPrice", None))
+        order_id = getattr(order, "orderId", None)
+        request = record["request"]
+        if (getattr(order, "account", None) != record["_account"]
+                or getattr(order, "clientId", None) != record["client_id"]
+                or type(order_id) is not int or not 0 < order_id <= 2147483647
+                or (record["client_id"], order_id) in self._order_ids
+                or getattr(order, "action", None) != request["action"]
+                or quantity is None or quantity != request["quantity"]
+                or getattr(order, "orderType", None) != "LMT" or price != _number(request["limit_price"])
+                or getattr(order, "tif", None) != "DAY" or getattr(order, "outsideRth", False) is not False
+                or getattr(order, "whatIf", False) is not False or getattr(order, "transmit", True) is not True
+                or getattr(order, "shortSaleSlot", 0) != 0
+                or getattr(contract, "conId", None) != record["qualified_contract"]["con_id"]
+                or getattr(contract, "symbol", None) != request["symbol"]
+                or getattr(contract, "secType", None) != "STK"
+                or getattr(contract, "exchange", None) != "SMART"
+                or getattr(contract, "currency", None) != "USD"):
+            return None
+        if not self._bind_perm_id(record, getattr(order, "permId", 0)):
+            return None
+        record["order_id"], record["broker_order_id"], record["_order"] = order_id, str(order_id), deepcopy(order)
+        self._order_ids[(record["client_id"], order_id)] = reference
+        return record
+
+    def _observe_open_order(self, trade, kind):
+        record = self._owned_trade(trade)
+        if record is not None and record["_recovered"]:
+            order, contract, request = trade.order, trade.contract, record["request"]
+            quantity = _number(getattr(order, "totalQuantity", None))
+            price = _number(getattr(order, "lmtPrice", None))
+            if (getattr(order, "action", None) != request["action"]
+                    or quantity is None or quantity != request["quantity"]
+                    or getattr(order, "orderType", None) != "LMT" or price != _number(request["limit_price"])
+                    or getattr(order, "tif", None) != "DAY" or getattr(order, "outsideRth", False) is not False
+                    or getattr(order, "whatIf", False) is not False or getattr(order, "transmit", True) is not True
+                    or getattr(order, "shortSaleSlot", 0) != 0
+                    or getattr(contract, "symbol", None) != request["symbol"]
+                    or getattr(contract, "secType", None) != "STK"
+                    or getattr(contract, "exchange", None) != "SMART"
+                    or getattr(contract, "currency", None) != "USD"):
+                self._unknown(record, "identity_conflict", integrity=True)
+                self._record_event(record, "identity_conflict")
+                return
+        if record is None and self._bind_recovered_open_order(trade) is None:
+            return
+        self._observe_trade(trade, kind)
+
     def _on_open_order(self, trade):
-        self._observe_trade(trade, "open_order")
+        self._observe_open_order(trade, "open_order")
 
     def _on_order_status(self, trade):
         self._observe_trade(trade, "order_status")
@@ -793,10 +925,32 @@ class IBKRAdapter:
             return
         self._apply_execution(record, fill, "execution")
 
+    def _bind_recovered_execution(self, fill):
+        execution, contract = getattr(fill, "execution", None), getattr(fill, "contract", None)
+        reference = getattr(execution, "orderRef", None)
+        record = self._orders.get(reference)
+        order_id = getattr(execution, "orderId", None)
+        expected_side = {"BUY": "BOT", "SELL": "SLD"}.get(record["request"]["action"]) if record else None
+        if (record is None or not record["_recovered"] or record["order_id"] is not None
+                or getattr(execution, "acctNumber", None) != record["_account"]
+                or getattr(execution, "clientId", None) != record["client_id"]
+                or type(order_id) is not int or not 0 < order_id <= 2147483647
+                or (record["client_id"], order_id) in self._order_ids
+                or getattr(execution, "side", None) != expected_side
+                or getattr(contract, "conId", None) != record["qualified_contract"]["con_id"]):
+            return None
+        if not self._bind_perm_id(record, getattr(execution, "permId", 0)):
+            return None
+        record["order_id"], record["broker_order_id"] = order_id, str(order_id)
+        self._order_ids[(record["client_id"], order_id)] = reference
+        return record
+
     def _record_for_execution(self, fill):
         execution = getattr(fill, "execution", None)
         record = self._orders.get(self._order_ids.get(
             (getattr(execution, "clientId", None), getattr(execution, "orderId", None))))
+        if record is None:
+            record = self._bind_recovered_execution(fill)
         if (record is None or getattr(execution, "acctNumber", None) != record["_account"]
                 or getattr(execution, "clientId", None) != record["client_id"]
                 or getattr(execution, "orderId", None) != record["order_id"]
@@ -874,7 +1028,7 @@ class IBKRAdapter:
     def _reconcile_tracked_orders(self, open_orders, executions):
         """Normalize active-query facts through the same order state machine as events."""
         for trade in open_orders:
-            self._observe_trade(trade, "reconcile_open_order")
+            self._observe_open_order(trade, "reconcile_open_order")
         for fill in executions:
             record = self._record_for_execution(fill)
             if record is not None:

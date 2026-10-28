@@ -63,11 +63,31 @@ class TradingAPIExtension:
         with self._order_guard:
             if self._orders is None:
                 store = self._order_store or PaperOrderStore(Path(handler.server.service.store.path).parent / "paper-orders.sqlite3")
-                service = PaperOrderService(store, self.broker)
-                # The HTTP server exists only after run_host acquires server.lock.
-                service.recover_interrupted()
-                self._orders = service
+                self._initialize_orders(store)
             return self._orders
+
+    def _initialize_orders(self, store):
+        service = PaperOrderService(store, self.broker)
+        service.recover_interrupted()
+        self._orders = service
+
+    def prepare_broker_recovery(self):
+        """Read and stage private identities without performing restart writes.
+
+        ``run_host`` owns the process lock.  The normal ``orders`` path calls
+        ``recover_interrupted`` only after that lock exists.
+        """
+        with self._order_guard:
+            if self._order_store is None or self.broker is None:
+                return 0
+            service = self._orders or PaperOrderService(self._order_store, self.broker)
+            plan = service.recovery_plan()
+            if not plan["active_order_refs"]:
+                return 0
+            stage = getattr(self.broker, "stage_order_recovery", None)
+            if not callable(stage) or stage(plan) is not True:
+                raise RuntimeError("Paper order recovery could not be staged safely")
+            return len(plan["active_order_refs"])
 
     @staticmethod
     def order_admin(handler):

@@ -74,6 +74,24 @@ class PaperOrderStore:
         finally:
             db.close()
 
+    @contextmanager
+    def read_only(self):
+        """Open an existing ledger without acquiring a writer reservation.
+
+        Startup recovery planning runs before the Host owns its process lock.
+        URI ``mode=ro`` and SQLite ``query_only`` make this boundary explicit;
+        unlike ``transaction`` it never changes journal settings or starts an
+        IMMEDIATE transaction.
+        """
+        db = sqlite3.connect(self.path.as_uri() + "?mode=ro", timeout=10,
+                             isolation_level=None, uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA query_only=ON")
+            yield db
+        finally:
+            db.close()
+
     @staticmethod
     def order(db, order_id, user_id):
         row = db.execute("SELECT * FROM paper_orders WHERE id=? AND user_id=?", (order_id, user_id)).fetchone()

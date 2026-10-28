@@ -65,6 +65,7 @@ def run_trading_host(args, broker) -> int:
         orders_path = Path(data_dir).expanduser().resolve() / "paper-orders.sqlite3" if data_dir is not None else None
         extension = TradingAPIExtension(lifecycle, orders_path=orders_path)
         if lifecycle is not None:
+            extension.prepare_broker_recovery()
             lifecycle.start()
         return run_host(args, extension=extension, agent_name=AGENT_ID, app_name=APP_NAME)
     finally:

@@ -13,6 +13,7 @@ import unittest
 from uuid import uuid4
 
 from test_ibkr import Client, Event
+from yolo_trading.api_extension import TradingAPIExtension
 from yolo_trading.ibkr import IBKRAdapter, IBKROperationError
 from yolo_trading.ibkr_config import IBKRConfig
 from yolo_trading.ibkr_lifecycle import IBKRBrokerLifecycle
@@ -32,6 +33,31 @@ def intent(config, **overrides):
 def context(broker):
     value = broker.paper_order_snapshot()
     return {key: value[key] for key in ("config_id", "session_id")}
+
+
+def recovery_plan(config, order_ref, *, broker_order_id="100", request=None,
+                  session_id="prior-host-session", filled_quantity=0, average_fill_price=None):
+    request = request or intent(config)
+    return {"active_order_refs": [order_ref], "records": [{
+        "order_ref": order_ref, "broker_order_id": broker_order_id,
+        "config_id": config.config_id, "session_id": session_id,
+        "intent": deepcopy(request),
+        "qualified_contract": {"con_id": 265598, **deepcopy(request["contract"])},
+        "filled_quantity": filled_quantity, "average_fill_price": average_fill_price,
+    }]}
+
+
+def open_trade(client, config, order_ref, *, order_id=100, request=None, account=None,
+               client_id=None, quantity=None, price=None, perm_id=4100, status="Submitted"):
+    request = request or intent(config)
+    order = NS(orderId=order_id, clientId=config.client_id if client_id is None else client_id,
+               account=config.account if account is None else account, action=request["side"],
+               totalQuantity=request["quantity"] if quantity is None else quantity,
+               orderType="LMT", lmtPrice=Decimal(request["limit_price"] if price is None else price),
+               tif="DAY", outsideRth=False, orderRef=order_ref, whatIf=False, transmit=True,
+               shortSaleSlot=0, permId=perm_id)
+    return NS(contract=deepcopy(client.contract), order=order,
+              orderStatus=NS(status=status, filled=0, avgFillPrice=0, permId=perm_id))
 
 
 class ExecutionClient(Client):
@@ -140,6 +166,8 @@ class ExecutionClient(Client):
     def fill(self, trade, exec_id, quantity, price="100"):
         return NS(contract=deepcopy(trade.contract), execution=NS(acctNumber=trade.order.account, clientId=trade.order.clientId,
                               orderId=trade.order.orderId, permId=trade.order.permId,
+                              orderRef=trade.order.orderRef,
+                              side="BOT" if trade.order.action == "BUY" else "SLD",
                               execId=exec_id, shares=Decimal(quantity), price=Decimal(price)))
 
 
@@ -162,6 +190,17 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         request = request or self.request
         preview = await self.preview(ref, request)
         return await self.broker.submit_paper_order(request, order_ref=ref, preview=preview, context=self.ctx, timeout=timeout)
+
+    async def restarted_broker(self, plan, *, open_orders=(), executions=()):
+        client = ExecutionClient()
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        restored = await broker.restore_tracked_orders(plan)
+        client.open_orders = list(open_orders)
+        client.execution_rows = list(executions)
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+        return broker, client, restored
 
     async def test_exact_target_writable_paper_and_full_initial_reads(self):
         value = self.broker.paper_order_snapshot()
@@ -379,6 +418,204 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                                                  preview=preview, context=self.ctx)
         self.assertEqual(failure.exception.code, "unresolved_order")
         self.assertEqual(len(self.client.placed), 1)
+
+    async def test_process_restart_learns_missing_broker_id_only_from_exact_open_order(self):
+        reference = str(uuid4())
+        plan = recovery_plan(self.config, reference, broker_order_id=None)
+        client = ExecutionClient()
+        trade = open_trade(client, self.config, reference, order_id=777)
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        restored = await broker.restore_tracked_orders(plan)
+        client.open_orders = [trade]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+
+        row = broker.orders_snapshot()[0]
+        self.assertEqual(restored, {"restored": 1, "unresolved": 0})
+        self.assertEqual((row["status"], row["broker_order_id"], row["session_id"]),
+                         ("working", "777", "prior-host-session"))
+        self.assertEqual(client.placed, [])
+        again = await broker.submit_paper_order(intent(self.config), order_ref=reference,
+                                                preview={}, context=context(broker))
+        self.assertEqual(again["broker_order_id"], "777")
+        self.assertEqual(client.placed, [])
+        with self.assertRaises(IBKROperationError) as failure:
+            await broker.cancel_paper_order(order_ref=reference, broker_order_id="777", context=context(broker))
+        self.assertEqual(failure.exception.code, "order_not_owned")
+        self.assertEqual(client.cancelled, [])
+
+    async def test_process_restart_no_evidence_foreign_and_cross_order_facts_stay_unknown(self):
+        first, second = str(uuid4()), str(uuid4())
+        plans = [recovery_plan(self.config, first, broker_order_id="100"),
+                 recovery_plan(self.config, second, broker_order_id="101")]
+        plan = {"active_order_refs": [first, second],
+                "records": [plans[0]["records"][0], plans[1]["records"][0]]}
+        client = ExecutionClient()
+        foreign = open_trade(client, self.config, first, order_id=100, account="DU654321")
+        crossed_first = open_trade(client, self.config, second, order_id=100)
+        crossed_second = open_trade(client, self.config, first, order_id=101)
+        wrong_terms = open_trade(client, self.config, first, order_id=100, quantity=11)
+        execution = client.fill(open_trade(client, self.config, first, order_id=100), "foreign-execution", "10")
+        execution.execution.acctNumber = "DU654321"
+
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        await broker.restore_tracked_orders(plan)
+        client.open_orders = [foreign, crossed_first, crossed_second, wrong_terms]
+        client.execution_rows = [execution]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+
+        rows = broker.orders_snapshot()
+        self.assertEqual({row["order_ref"]: row["status"] for row in rows}, {first: "unknown", second: "unknown"})
+        self.assertTrue(all(row["filled_quantity"] == 0 for row in rows))
+        next_ref = str(uuid4())
+        preview = await broker.preview_paper_order(intent(self.config), order_ref=next_ref, context=context(broker))
+        with self.assertRaises(IBKROperationError) as failure:
+            await broker.submit_paper_order(intent(self.config), order_ref=next_ref,
+                                            preview=preview, context=context(broker))
+        self.assertEqual(failure.exception.code, "unresolved_order")
+        self.assertEqual(client.placed, [])
+
+    async def test_process_restart_known_execution_recovers_full_fill_without_open_order(self):
+        reference = str(uuid4())
+        client = ExecutionClient()
+        trade = open_trade(client, self.config, reference, order_id=100)
+        fill = client.fill(trade, "restart-fill", "10", "101")
+        fill.commissionReport = NS(execId="restart-fill", commission=Decimal("1"), currency="USD")
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        await broker.restore_tracked_orders(recovery_plan(self.config, reference))
+        client.execution_rows = [fill, fill]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+
+        row = broker.orders_snapshot()[0]
+        self.assertEqual((row["status"], row["filled_quantity"], row["average_fill_price"]),
+                         ("filled", 10, "101"))
+        self.assertEqual(row["executions"]["restart-fill"]["commission"], "1")
+        self.assertEqual(client.placed, [])
+
+    async def test_crash_after_durable_submitting_only_execution_recovers_fill(self):
+        reference = str(uuid4())
+        client = ExecutionClient()
+        trade = open_trade(client, self.config, reference, order_id=777)
+        fill = client.fill(trade, "submit-crash-fill", "10", "101")
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        restored = await broker.restore_tracked_orders(
+            recovery_plan(self.config, reference, broker_order_id=None))
+        client.execution_rows = [fill, fill]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+
+        row = broker.orders_snapshot()[0]
+        self.assertEqual(restored, {"restored": 1, "unresolved": 0})
+        self.assertEqual((row["status"], row["broker_order_id"], row["filled_quantity"],
+                          row["average_fill_price"]), ("filled", "777", 10, "101"))
+        self.assertEqual(list(row["executions"]), ["submit-crash-fill"])
+        self.assertEqual(client.placed, [])
+
+    async def test_missing_broker_id_execution_requires_exact_recovered_identity(self):
+        cases = {
+            "missing_order_ref": lambda fill: setattr(fill.execution, "orderRef", None),
+            "foreign_order_ref": lambda fill: setattr(fill.execution, "orderRef", str(uuid4())),
+            "foreign_account": lambda fill: setattr(fill.execution, "acctNumber", "DU654321"),
+            "wrong_client": lambda fill: setattr(fill.execution, "clientId", 55),
+            "wrong_side": lambda fill: setattr(fill.execution, "side", "SLD"),
+            "wrong_contract": lambda fill: setattr(fill.contract, "conId", 999),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                reference = str(uuid4())
+                client = ExecutionClient()
+                fill = client.fill(open_trade(client, self.config, reference, order_id=777),
+                                   "invalid-" + name, "10")
+                mutate(fill)
+                broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                                     contract_factory=NS, order_factory=NS)
+                await broker.restore_tracked_orders(
+                    recovery_plan(self.config, reference, broker_order_id=None))
+                client.execution_rows = [fill]
+                await broker.connect()
+                row = broker.orders_snapshot()[0]
+                self.assertEqual((row["status"], row["broker_order_id"], row["filled_quantity"]),
+                                 ("unknown", None, 0))
+                self.assertEqual(client.placed, [])
+                await broker.disconnect()
+
+    async def test_missing_broker_id_execution_rejects_order_and_perm_id_conflicts(self):
+        target, other = str(uuid4()), str(uuid4())
+        target_plan = recovery_plan(self.config, target, broker_order_id=None)
+        other_plan = recovery_plan(self.config, other, broker_order_id="777")
+        plan = {"active_order_refs": [target, other],
+                "records": [target_plan["records"][0], other_plan["records"][0]]}
+        client = ExecutionClient()
+        collision = client.fill(open_trade(client, self.config, target, order_id=777),
+                                "order-id-collision", "10")
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        await broker.restore_tracked_orders(plan)
+        client.execution_rows = [collision]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+        rows = {row["order_ref"]: row for row in broker.orders_snapshot()}
+        self.assertEqual((rows[target]["status"], rows[target]["broker_order_id"]), ("unknown", None))
+
+        await broker.disconnect()
+        target, other = str(uuid4()), str(uuid4())
+        target_plan = recovery_plan(self.config, target, broker_order_id=None)
+        other_plan = recovery_plan(self.config, other, broker_order_id="100")
+        plan = {"active_order_refs": [target, other],
+                "records": [target_plan["records"][0], other_plan["records"][0]]}
+        client = ExecutionClient()
+        other_fill = client.fill(open_trade(client, self.config, other, order_id=100, perm_id=4100),
+                                 "other-fill", "1")
+        conflict = client.fill(open_trade(client, self.config, target, order_id=778, perm_id=4100),
+                               "perm-id-conflict", "10")
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        await broker.restore_tracked_orders(plan)
+        client.execution_rows = [other_fill, conflict]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+        rows = {row["order_ref"]: row for row in broker.orders_snapshot()}
+        self.assertEqual((rows[target]["status"], rows[target]["broker_order_id"],
+                          rows[target]["filled_quantity"]), ("unknown", None, 0))
+        self.assertEqual(client.placed, [])
+
+    async def test_process_restart_execution_recovers_partial_fill_without_resend(self):
+        reference = str(uuid4())
+        client = ExecutionClient()
+        trade = open_trade(client, self.config, reference, order_id=100)
+        fill = client.fill(trade, "restart-partial", "4", "99.5")
+        broker = IBKRAdapter(self.config, client_factory=lambda: client,
+                             contract_factory=NS, order_factory=NS)
+        await broker.restore_tracked_orders(recovery_plan(self.config, reference))
+        client.execution_rows = [fill]
+        await broker.connect()
+        self.addAsyncCleanup(broker.disconnect)
+
+        row = broker.orders_snapshot()[0]
+        self.assertEqual((row["status"], row["filled_quantity"], row["average_fill_price"]),
+                         ("partial", 4, "99.5"))
+        self.assertEqual(client.placed, [])
+
+    async def test_process_restart_config_mismatch_remains_unresolved_and_blocks_new_send(self):
+        reference = str(uuid4())
+        other = paper_config(client_id=21)
+        plan = recovery_plan(other, reference)
+        broker, client, restored = await self.restarted_broker(plan)
+        self.assertEqual(restored, {"restored": 0, "unresolved": 1})
+        self.assertEqual(broker.orders_snapshot(), [])
+        next_ref = str(uuid4())
+        preview = await broker.preview_paper_order(intent(self.config), order_ref=next_ref, context=context(broker))
+        with self.assertRaises(IBKROperationError) as failure:
+            await broker.submit_paper_order(intent(self.config), order_ref=next_ref,
+                                            preview=preview, context=context(broker))
+        self.assertEqual(failure.exception.code, "unresolved_order")
+        self.assertEqual(client.placed, [])
 
     async def test_contract_details_must_be_unique_and_exact(self):
         for details in ([], self.client.details * 2, [NS(contract=NS(**{**vars(self.client.contract), "conId": 0}))],
@@ -689,6 +926,65 @@ class ExecutionLifecycleTests(unittest.TestCase):
             self.assertEqual((result["order"]["state"], result["order"]["filled_quantity"],
                               result["order"]["average_fill_price"]), ("filled", 10, "101"))
             self.assertEqual((len(clients[0].placed), len(clients[1].placed)), (1, 0))
+            self.assertNotIn("DU123456", json.dumps(result))
+
+    def test_host_process_restart_recovers_persisted_fill_without_resend(self):
+        from yolo_trading.paper_order_store import PaperOrderStore
+        from yolo_trading.paper_orders import PaperOrderService
+
+        first_lifecycle, first_client, request = self.build()
+        caller = {"id": "mac-device", "platform": "macos", "permissions": ["devices:manage"]}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "paper.sqlite3"
+            service = PaperOrderService(PaperOrderStore(path), first_lifecycle)
+            _, body = service.operate("create", {"client_request_id": str(uuid4()), **request}, caller, "user")
+            row = body["order"]
+            for action in ("preview", "confirm", "submit"):
+                data = {"client_request_id": str(uuid4()), "version": row["version"],
+                        "content_hash": row["content_hash"]}
+                if action == "confirm":
+                    data.update(preview_id=row["preview"]["id"], expires_at=row["preview"]["expires_at"],
+                                user_action="confirm_paper_order")
+                elif action == "submit":
+                    data.update(confirmation_id=row["confirmation"]["id"], user_action="submit_paper_order")
+                status, body = service.operate(action, data, caller, "user", order_id=row["id"])
+                self.assertEqual(status, 200, body)
+                row = body["order"]
+            self.assertEqual(row["state"], "working")
+            old_trade = deepcopy(first_client.placed[0])
+            old_session = first_lifecycle.orders_snapshot()[0]["session_id"]
+            self.assertTrue(first_lifecycle.close())
+
+            restarted_clients = []
+
+            def restarted_factory():
+                client = ExecutionClient()
+                fill = client.fill(old_trade, "post-crash-fill", "10", "101")
+                fill.commissionReport = NS(execId="post-crash-fill", commission=Decimal("1"), currency="USD")
+                client.execution_rows = [fill, fill]
+                restarted_clients.append(client)
+                return client
+
+            config = paper_config()
+            restarted = IBKRBrokerLifecycle(IBKRAdapter(config, client_factory=restarted_factory,
+                contract_factory=NS, order_factory=NS), poll_interval=0.005)
+            self.addCleanup(restarted.close)
+            extension = TradingAPIExtension(restarted, orders_path=path)
+            self.assertEqual(extension.prepare_broker_recovery(), 1)
+            self.assertEqual(extension.prepare_broker_recovery(), 1)
+            self.assertTrue(restarted.start())
+            self.wait(lambda: restarted.orders_snapshot()
+                      and restarted.orders_snapshot()[0]["status"] == "filled")
+
+            restarted_service = PaperOrderService(PaperOrderStore(path), restarted)
+            restarted_service.recover_interrupted()
+            result = restarted_service.get(row["id"], "user")
+            self.assertEqual((result["order"]["state"], result["order"]["filled_quantity"],
+                              result["order"]["average_fill_price"]), ("filled", 10, "101"))
+            recovered = restarted.orders_snapshot()[0]
+            self.assertEqual(recovered["session_id"], old_session)
+            self.assertNotEqual(restarted.paper_order_snapshot()["session_id"], old_session)
+            self.assertEqual(restarted_clients[0].placed, [])
             self.assertNotIn("DU123456", json.dumps(result))
 
 

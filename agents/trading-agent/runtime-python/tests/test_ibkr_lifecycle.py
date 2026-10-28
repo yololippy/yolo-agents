@@ -118,6 +118,33 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(clients[0].calls), 1)
         self.assertEqual(clients[0].disconnects, 1)
 
+    def test_order_recovery_plan_is_idempotent_before_start_and_immutable_after(self):
+        _, lifecycle, _ = self.build(account="DU123456", execution=True)
+        plan = {"active_order_refs": ["recovery-ref"], "records": []}
+        self.assertTrue(lifecycle.stage_order_recovery(plan))
+        plan["active_order_refs"].append("mutated-after-stage")
+        self.assertTrue(lifecycle.stage_order_recovery({"active_order_refs": ["recovery-ref"], "records": []}))
+        self.assertFalse(lifecycle.stage_order_recovery({"active_order_refs": ["other-ref"], "records": []}))
+        self.assertTrue(lifecycle.start())
+        self.wait(lambda: lifecycle.health()["ready"])
+        self.assertFalse(lifecycle.stage_order_recovery({"active_order_refs": ["recovery-ref"], "records": []}))
+
+    def test_order_recovery_exception_blocks_connection_and_stays_failed(self):
+        broker, lifecycle, clients = self.build(account="DU123456", execution=True)
+
+        async def fail_recovery(plan):
+            raise RuntimeError("private persisted value")
+
+        broker.restore_tracked_orders = fail_recovery
+        self.assertTrue(lifecycle.start())
+        self.wait(lambda: lifecycle.health()["lifecycle"]["state"] == "failed")
+        health = lifecycle.health()
+        self.assertEqual(health["lifecycle"]["error"]["code"], "order_recovery_failed")
+        self.assertFalse(health["connected"])
+        self.assertFalse(health["ready"])
+        self.assertEqual(clients, [])
+        self.assertNotIn("private", json.dumps(health))
+
     def test_live_profile_never_starts_a_connection(self):
         _, lifecycle, clients = self.build(environment="live", account="Uexample")
         self.assertFalse(lifecycle.start())

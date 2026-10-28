@@ -41,6 +41,7 @@ class IBKRBrokerLifecycle:
         self._requests = set()
         self._recovery_attempts = 0
         self._next_retry_at = None
+        self._order_recovery_plan = {"active_order_refs": [], "records": []}
 
     def health(self):
         with self._guard:
@@ -99,6 +100,23 @@ class IBKRBrokerLifecycle:
                 return False
         return True
 
+    def stage_order_recovery(self, plan):
+        """Accept a copied internal recovery plan only before the owner loop starts."""
+        if (not isinstance(plan, dict) or set(plan) != {"active_order_refs", "records"}
+                or not isinstance(plan["active_order_refs"], list)
+                or not isinstance(plan["records"], list)
+                or len(plan["active_order_refs"]) > 1000 or len(plan["records"]) > 1000):
+            return False
+        value = deepcopy(plan)
+        with self._guard:
+            if self._status != "not_started" or self._closing.is_set():
+                return False
+            current = self._order_recovery_plan
+            if current["active_order_refs"] and current != value:
+                return False
+            self._order_recovery_plan = value
+            return True
+
     @staticmethod
     def _recoverable(health):
         if not health.get("dependency_available") or health.get("configuration", {}).get("account_configured") is not True:
@@ -130,10 +148,18 @@ class IBKRBrokerLifecycle:
         loop, stop = asyncio.get_running_loop(), asyncio.Event()
         with self._guard:
             self._loop, self._stop = loop, stop
+            recovery_plan = deepcopy(self._order_recovery_plan)
         recovery = None
         retry_at = 0.0
         try:
             if not self._closing.is_set():
+                try:
+                    await self._broker.restore_tracked_orders(recovery_plan)
+                except Exception:
+                    self._failure("order_recovery_failed",
+                                  "持久化订单身份无法安全恢复；订单保持未知且不会自动重发。")
+                    await stop.wait()
+                    return
                 self._publish(status="running")
             while not self._closing.is_set() and not stop.is_set():
                 if recovery is not None and recovery.done():

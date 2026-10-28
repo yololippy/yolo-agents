@@ -440,8 +440,13 @@ class FakePaperLifecycle:
         self.cancel_result = {"status": "cancelled", "broker_order_id": "123", "filled_quantity": 0}
         self.preview_complete = True
         self.updates = []
+        self.recovery_plans = []
         self.snapshot_hook = self.submit_hook = self.cancel_hook = None
         self.store_path = None
+
+    def stage_order_recovery(self, plan):
+        self.recovery_plans.append(deepcopy(plan))
+        return True
 
     def health(self):
         return {"configuration": {"environment": self.facts["environment"], "config_id": self.config_id,
@@ -675,12 +680,36 @@ class PaperOrderAPITests(unittest.TestCase):
         self.broker.submit_error = SystemExit("synthetic crash")
         with self.assertRaises(SystemExit):
             self.extension._orders.operate("submit", request, self.mac["device"], self.auth.server_id, order_id=order["id"])
-        self.server.extension = TradingAPIExtension(self.broker, orders_path=self.path)
-        status, body = self.request("GET", "/v1/orders/" + order["id"], token=self.token)
+        restarted = TradingAPIExtension(self.broker, orders_path=self.path)
+        self.assertEqual(restarted.prepare_broker_recovery(), 1)
+        self.assertEqual(restarted.prepare_broker_recovery(), 1)
+        self.assertEqual(self.broker.recovery_plans[0], self.broker.recovery_plans[1])
+        self.assertEqual(self.broker.recovery_plans[0]["active_order_refs"], [order["id"]])
+        self.assertEqual(self.broker.recovery_plans[0]["records"][0]["broker_order_id"], None)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT state FROM paper_orders WHERE id=?", (order["id"],)).fetchone()[0],
+                             "submitting")
+        self.server.extension = restarted
+        status, body = self.request("GET", "/v1/orders/" + order["id"], token=self.ios["token"])
         self.assertEqual(status, 200)
         self.assertEqual(body["order"]["state"], "unknown")
         self.assertEqual(self.action(order, "submit", request)[1]["order"]["state"], "unknown")
         self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_recovery_plan_is_query_only_even_while_writer_is_reserved(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        service = self.extension._orders
+        with service.store.read_only() as reader:
+            self.assertEqual(reader.execute("PRAGMA query_only").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.OperationalError):
+                reader.execute("UPDATE paper_orders SET state='filled' WHERE id=?", (order["id"],))
+        with service.store.transaction() as writer:
+            self.assertEqual(writer.execute("SELECT state FROM paper_orders WHERE id=?", (order["id"],)).fetchone()[0],
+                             "working")
+            with patch.object(service.store, "transaction", side_effect=AssertionError("writer path used")):
+                plan = service.recovery_plan()
+        self.assertEqual(plan["active_order_refs"], [order["id"]])
+        self.assertEqual(plan["records"][0]["broker_order_id"], "123")
 
     def test_concurrent_submit_retries_and_new_request_do_not_send_twice(self):
         order = self.confirmed()
@@ -877,7 +906,8 @@ class PaperOrderAPITests(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertEqual(self.request("POST", "/v1/orders", {**self.draft_data(), **fields}, self.token)[0], 400)
         self.assertEqual(self.request("POST", "/v1/orders", {**self.draft_data(), "environment": "live"}, self.token)[0], 403)
-        for path in ("/v1/orders/cancel-all", "/v1/orders/modify", "/v1/automations", "/v1/trades"):
+        for path in ("/v1/orders/cancel-all", "/v1/orders/modify", "/v1/orders/recover",
+                     "/v1/automations", "/v1/trades"):
             self.assertEqual(self.request("POST", path, {}, self.token)[0], 403)
         self.assertEqual(self.broker.calls["submit"], 0)
 

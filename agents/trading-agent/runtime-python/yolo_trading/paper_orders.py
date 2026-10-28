@@ -159,7 +159,8 @@ class PaperOrderService:
     def recover_interrupted(self):
         """Call once after the Host owns its single-instance lock. Never replay."""
         with self.store.transaction() as db:
-            rows = db.execute("SELECT * FROM paper_orders WHERE state IN ('submitting','cancel_pending','previewing')").fetchall()
+            rows = db.execute("SELECT * FROM paper_orders WHERE state IN "
+                              "('submitting','accepted','working','partial','cancel_pending','previewing')").fetchall()
             for saved in rows:
                 row = dict(saved)
                 preview_only = row["state"] == "previewing"
@@ -172,6 +173,67 @@ class PaperOrderService:
                 row = self.store.order(db, request["order_id"], request["user_id"])
                 if row:
                     self._finish(db, request["id"], row, 200, {"order": public_order(row)})
+
+    def recovery_plan(self):
+        """Return backend-validated identities for owner-loop startup recovery.
+
+        Every active row remains an unresolved blocker.  Records with a valid
+        preview may additionally be matched against read-only broker queries;
+        a missing broker ID can only be learned from a strictly matching open
+        order or execution carrying the backend-generated order reference.
+        """
+        records = []
+        with self.store.read_only() as db:
+            rows = db.execute("SELECT * FROM paper_orders WHERE state IN "
+                              "('submitting','unknown','accepted','working','partial','cancel_pending') "
+                              "ORDER BY created_at,id LIMIT 1001").fetchall()
+            if len(rows) > 1000:
+                raise RuntimeError("Too many active Paper orders for safe startup recovery")
+            active_refs = []
+            for saved in rows:
+                row = dict(saved)
+                try:
+                    order_ref = uuid_text(row["id"])
+                except OrderError:
+                    raise RuntimeError("Invalid active Paper order identity") from None
+                active_refs.append(order_ref)
+                try:
+                    intent = json.loads(row["intent"])
+                    if intent_from({"client_request_id": row["client_request_id"], **intent}) != intent:
+                        raise ValueError()
+                    preview = json.loads(row["preview"])
+                    if not isinstance(preview, dict) or set(preview) != {
+                            "id", "qualified_contract", "what_if", "context", "expires_at"}:
+                        raise ValueError()
+                    contract, context = preview["qualified_contract"], preview["context"]
+                    if (not isinstance(contract, dict) or set(contract) != {
+                            "con_id", "symbol", "sec_type", "exchange", "currency"}
+                            or type(contract["con_id"]) is not int or contract["con_id"] <= 0
+                            or any(contract.get(key) != value for key, value in intent["contract"].items())
+                            or not isinstance(context, dict) or set(context) != {"config_id", "session_id"}
+                            or context["config_id"] != intent["account_selection"]
+                            or not isinstance(context["session_id"], str)
+                            or not 1 <= len(context["session_id"]) <= 100
+                            or any(ord(char) < 33 or ord(char) > 126 for char in context["session_id"])):
+                        raise ValueError()
+                    broker_id = row["broker_order_id"]
+                    if broker_id is not None and (not isinstance(broker_id, str) or not broker_id.isascii()
+                            or not broker_id.isdecimal() or not 0 < int(broker_id) <= 2147483647
+                            or str(int(broker_id)) != broker_id):
+                        raise ValueError()
+                    filled = row["filled_quantity"]
+                    if type(filled) is not int or not 0 <= filled <= intent["quantity"]:
+                        raise ValueError()
+                    average = row["average_fill_price"]
+                    if average is not None:
+                        average = money(average)
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError, OrderError):
+                    continue
+                records.append({"order_ref": order_ref, "broker_order_id": broker_id,
+                    "config_id": context["config_id"], "session_id": context["session_id"],
+                    "intent": intent, "qualified_contract": contract,
+                    "filled_quantity": filled, "average_fill_price": average})
+        return {"active_order_refs": active_refs, "records": records}
 
     def _finish(self, db, request_id, row, status=200, response=None, error=None):
         response = response or {"order": public_order(row)}
