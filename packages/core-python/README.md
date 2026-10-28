@@ -91,14 +91,13 @@ for delta in runtime.stream_reply(history, conversation_id, user_id="local-user"
 
 ## 依赖与后续真实验证
 
-标准库路径可以直接测试，无需安装：
+标准库存储路径可以直接测试，无需安装第三方依赖：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python python3 -m unittest discover -s packages/core-python/tests -p 'test_store.py' -v
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python python3 -m unittest discover -s packages/core-python/tests -p 'test_agent_runtime.py' -v
 ```
 
-已安装的官方 SDK 离线测试使用根虚拟环境运行；没有该固定版本依赖的解释器会明确 skip 这些用例，不会把它们算作通过：
+运行时和 Guardrails 测试使用已安装固定版本依赖的根虚拟环境；其中 contract double 用于供应商故障注入，凭据检查仍使用真实官方检测器：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s packages/core-python/tests -p 'test_agent_runtime.py' -v
@@ -108,9 +107,20 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python .venv/bin/python -W er
 
 - `pydantic-ai-slim[openai,anthropic]==2.61.0`
 - `pydantic-ai-harness==0.61.0`
+- `regex==2026.9.29`（与锁文件中的已有版本一致，用于流式凭据前缀匹配）
 
 代码依赖已获用户授权，由 main 统一安装到根 `.venv`，避免多个会话并发修改环境；完整软件安装仍需先告知用户。本实现不会自行运行安装。供应商的模型名和环境变量密钥由用户配置，代码不打印它们，也不将原始供应商异常发给客户端。其他供应商需要选择相应 extra 后再验证。
 
 官方 TestModel／FunctionModel 离线验证已补入可选集成测试，包含真实 Harness 工具执行与流式失败，所有数据均位于测试临时目录。后续由用户配置真实模型，验证供应商流式行为、费用、中文召回、实际记忆写入决策及长时间运行；确定性离线模型不证明真实模型会正确选择工具或记忆内容。
+
+### 凭据防护
+
+`pydantic` 和 `chatgpt` 使用官方 Harness `InputGuardrail`、`ToolGuardrail` 和 `OutputGuardrail`，按官方 `secret_data` 的已知凭据格式阻断输入、工具参数、工具结果和最终输出。模型请求前还检查现有会话、记忆注入和指令；Skills 文件在加载前检查。工具参数在工具执行前检查，因此命中的凭据不会通过 Agent 的记忆工具写入记忆。恢复已完成回复时也会检查缓存。命中凭据时只向上层返回固定错误，不包含原始凭据。
+
+官方输出 guardrail 在最终结果时执行，无法单独保护已发送的流式片段。运行时使用相同的官方正则模式进行增量匹配，保留可能组成凭据的前缀，识别到完整凭据、匹配超时或待判定内容超限时中止。普通内容仍逐段发送；已发送的无凭据前文不会撤回。
+
+这一保护只覆盖官方模式支持的文本凭据，无法识别所有密码、非标准密钥、提示注入、二进制内容或供应商侧执行的工具。已有历史的独立文本字段逐个检查，不保证识别跨不同字段拆分的凭据。产品服务可能在调用 runtime 前把用户原文写入 `app.sqlite3`；Harness 的 StepPersistence 也可能先保存模型原始输出或工具调用再拦截。本功能不提供数据库或已有快照的静态脱敏，也不会清理历史数据；外部导入的旧数据在被读取、注入或恢复时才会检查。`demo` 和 `codex` 模式不启用此防护。
+
+官方参考：[Guardrails 和凭据检测器](https://pydantic.dev/docs/ai/harness/guardrails/)。
 
 参考：[官方同步流源码（v2.61.0）](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/result.py)、[完整 Conversation](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/conversation.py)、[官方 Harness](https://pydantic.dev/docs/ai/harness/)、[项目调研](../../docs/RESEARCH_PYDANTICAI.md)。

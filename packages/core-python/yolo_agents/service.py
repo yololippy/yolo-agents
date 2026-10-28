@@ -5,7 +5,7 @@ from collections import deque
 import threading
 from uuid import uuid4
 
-from .agent_runtime import LoginRequiredError, RuntimeConfigurationError, RuntimeStateError
+from .agent_runtime import LoginRequiredError, RuntimeConfigurationError, RuntimeGuardrailError, RuntimeStateError
 from .codex_runtime import CodexBusyError
 
 
@@ -112,6 +112,8 @@ class ChatService:
             if not content.strip():
                 raise ValueError("runtime returned an empty reply")
             self.store.finish_run(conversation_id, run_id, content)
+        except RuntimeGuardrailError:
+            self.fail(conversation_id, run_id, "guardrail_blocked", "内容检查已拦截本次回复。请移除消息中的密钥或令牌后重新发送；若未提供凭据，可新建会话重试。")
         except LoginRequiredError:
             self.fail(conversation_id, run_id, "login_required", "请先在 Mac 完成当前 Agent 的 ChatGPT 登录，再发送新消息。")
         except RuntimeStateError:

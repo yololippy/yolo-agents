@@ -2,3 +2,5 @@
 # Exact pair verified in ../../docs/RESEARCH_PYDANTICAI.md.
 pydantic-ai-slim[openai,anthropic]==2.61.0
 pydantic-ai-harness[skills]==0.61.0
+# Already pinned in requirements.lock; needed for partial matching of streamed credentials.
+regex==2026.9.29

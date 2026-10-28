@@ -154,6 +154,7 @@ class ChatGPTRuntime(PydanticRuntime):
         global workspace or arbitrary bundled file. Every open is dirfd-relative
         with O_NOFOLLOW; size/count bounds cap untrusted local inputs.
         """
+        from .guardrails import check_text
         self._skills_dir.mkdir(mode=0o700, exist_ok=True)
         flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0)
         try:
@@ -185,6 +186,10 @@ class ChatGPTRuntime(PydanticRuntime):
                             content = source.read(65537)
                         if len(content) > 65536:
                             raise RuntimeConfigurationError('Agent skill 文件过大。')
+                        try:
+                            check_text(content.decode('utf-8'))
+                        except UnicodeDecodeError:
+                            raise RuntimeConfigurationError('Agent skill 文件必须是 UTF-8。') from None
                         files.append((name, content))
                     finally:
                         os.close(fd)

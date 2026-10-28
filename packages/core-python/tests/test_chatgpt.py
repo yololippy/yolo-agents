@@ -353,6 +353,16 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         self.assertFalse((snapshot / 'external').exists())
         self.assertFalse((snapshot / 'file-link').exists())
 
+    def test_skills_with_credentials_are_blocked_before_snapshot(self):
+        from yolo_agents.agent_runtime import RuntimeGuardrailError
+        skills = self.root / 'skills' / 'local'
+        skills.mkdir(parents=True)
+        secret = 'sk-proj-' + 'K' * 32
+        (skills / 'SKILL.md').write_text('---\nname: local\ndescription: local\n---\n' + secret)
+        with self.assertRaises(RuntimeGuardrailError) as error:
+            self.runtime._prepare_skills()
+        self.assertNotIn(secret, str(error.exception))
+
     def test_account_mutation_rejected_while_catalog_or_generation_running(self):
         entered, release = threading.Event(), threading.Event()
         self.runtime._catalog_unlocked = lambda: (entered.set(), release.wait(3), {'models': [], 'default_model': None})[-1]

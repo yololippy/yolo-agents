@@ -113,6 +113,8 @@ data: {"seq":42,"type":"assistant.delta","conversation_id":"…","payload":{"run
 
 错误不返回模型原始异常、账户信息、密钥或服务器文件路径。配对按来源 IP 每分钟最多五次尝试。
 
+`pydantic` / `chatgpt` 模式的内容检查命中时，以 `assistant.failed`、`error.code: guardrail_blocked` 和固定说明结束运行，不返回检测到的凭据或上游异常，不自动重试。它不代表设备认证失效，客户端不得因此清除配对令牌。已发送的安全增量仍是未完成回复，以最终失败消息为准。用户原始消息仍按现有产品记录规则保存和同步；此检查不提供历史数据库清理，也不改变 `demo` / `codex` 模式。
+
 已接受但无产品最终回复的聊天运行，重启时先检查 Runtime 是否已保存匹配该输入的完整回复；确定有完整缓存时直接补齐产品结果，不再调用模型。其余标为 `run_interrupted`，不自动重跑模型或工具。聊天模型没有订单确认或执行工具；独立 Paper HTTP API 的确认、幂等和对账边界见下文，不能借聊天重试执行交易。
 
 Codex 使用 app-server JSONL 流的 `item/agentMessage/delta` 即时产生既有 `assistant.delta`，不等待 turn 结束再统一输出；failed/interrupted 不能生成 `assistant.completed`。登录缺失产生 `assistant.failed` 的 `login_required` 错误码；它不代表设备配对失效，不应清空设备凭据。Codex 子进程退出、协议超时和不确定运行不会自动重放。

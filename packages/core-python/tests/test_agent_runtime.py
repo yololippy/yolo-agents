@@ -189,7 +189,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(options["output_type"], str)
         self.assertEqual(options["retries"], 0)
         self.assertNotIn("tools", options)
-        self.assertEqual(len(options["capabilities"]), 4)
+        self.assertEqual(len(options["capabilities"]), 9)
         searches = [c for c in backend.components if c.kwargs.get("scope") == "all"]
         self.assertEqual(len(searches), 1)
         paths = [Path(c.kwargs["database"]) for c in backend.components if "database" in c.kwargs]
@@ -532,6 +532,63 @@ class OfficialSDKTests(unittest.TestCase):
         history = [str(part.content) for part in returned if part.tool_name == "search_conversation_history"]
         self.assertTrue(any("User watches AAPL" in text for text in memory))
         self.assertTrue(any("historical_seed_marker_1122" in text and self.cid in text for text in history))
+
+    def test_guardrail_blocks_memory_write_before_execution(self):
+        from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+        from yolo_agents.agent_runtime import RuntimeGuardrailError
+        import sqlite3
+        from contextlib import closing
+
+        secret = 'sk-proj-' + 'A' * 32
+        async def stream(messages, _info):
+            yield {0: DeltaToolCall(name='write_memory', json_args=json.dumps({'file': 'MEMORY.md', 'content': secret}))}
+
+        runtime = self.runtime(FunctionModel(stream_function=stream))
+        with self.assertRaises(RuntimeGuardrailError) as error:
+            self.ask(runtime, 'Please remember this preference')
+        self.assertNotIn(secret, str(error.exception))
+        path = next((self.root / 'users').glob('*/memory.sqlite3'))
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM memory_files').fetchone()[0], 0)
+
+    def test_guardrail_blocks_injected_existing_memory_before_model(self):
+        from pydantic_ai.models.function import FunctionModel
+        from yolo_agents.agent_runtime import RuntimeGuardrailError, _scope
+        from pydantic_ai_harness.memory import SqliteMemoryStore
+
+        calls = []
+        async def stream(messages, _info):
+            calls.append(1)
+            yield 'ok'
+
+        runtime = self.runtime(FunctionModel(stream_function=stream))
+        runtime._agent(_scope('local-user'))
+        path = next((self.root / 'users').glob('*/memory.sqlite3'))
+        memory = SqliteMemoryStore(database=str(path))
+        runtime._worker_loop().run_until_complete(memory.write(
+            _scope('local-user') + '/main/MEMORY.md', 'sk-proj-' + 'B' * 32,
+            expected_version=None))
+        with self.assertRaises(RuntimeGuardrailError):
+            self.ask(runtime, 'hello')
+        self.assertEqual(calls, [])
+
+    def test_guardrail_blocks_legacy_history_and_cached_reply(self):
+        from pydantic_ai.models.test import TestModel
+        from yolo_agents.agent_runtime import RuntimeGuardrailError
+
+        runtime = self.runtime(TestModel(call_tools=[], custom_output_text='safe reply'))
+        _, message = self.ask(runtime, 'first turn')
+        state = json.loads(self.store.get_agent_state(self.cid))
+        secret = 'sk-proj-' + 'M' * 32
+        state['last_reply'] = secret
+        self.store.save_agent_state(self.cid, json.dumps(state))
+        with self.assertRaises(RuntimeGuardrailError):
+            runtime.recover_completed_reply(self.cid, message['id'])
+        state['last_reply'] = 'safe reply'
+        state['conversation']['messages'][0]['parts'][0]['content'] = secret
+        self.store.save_agent_state(self.cid, json.dumps(state))
+        with self.assertRaises(RuntimeGuardrailError):
+            self.ask(runtime, 'continue')
 
     def test_official_compaction_preserves_product_messages_and_searchable_originals(self):
         from pydantic_ai.messages import ModelResponse, TextPart, ToolReturnPart

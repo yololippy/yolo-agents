@@ -32,6 +32,10 @@ class RuntimeExecutionError(RuntimeError):
     """A real model run failed; no demo fallback or automatic replay occurred."""
 
 
+class RuntimeGuardrailError(RuntimeExecutionError):
+    """The credential guard blocked a request, tool call, or response."""
+
+
 class LoginRequiredError(RuntimeConfigurationError):
     """Managed ChatGPT login must be completed locally in Codex."""
 
@@ -248,6 +252,7 @@ class PydanticRuntime(_Runtime):
         return loop
 
     def _agent(self, namespace: str, model_name: str | None = None) -> Any:
+        from .guardrails import capabilities
         # Keep provider clients on one worker's sync-stream event loop.
         selected = model_name or self.model_name
         key = (namespace, threading.get_ident(), selected)
@@ -288,7 +293,7 @@ class PydanticRuntime(_Runtime):
                             injection_errors="raise",
                             write_metadata={"writer": "agent"},
                         ),
-                    ] + self._additional_capabilities(),
+                    ] + self._additional_capabilities() + capabilities(),
                 )
             return self._agents[key]
 
@@ -363,8 +368,17 @@ class PydanticRuntime(_Runtime):
     def _validate_completed_state(self, state: dict, conversation_id: str) -> None:
         self._conversation_from_state(state, conversation_id)
 
+    def _completed_reply(self, state, conversation_id, user_message_id):
+        from .guardrails import check_text
+        reply = super()._completed_reply(state, conversation_id, user_message_id)
+        if reply is not None:
+            check_text(reply)
+        return reply
+
     def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user") -> Iterator[str]:
+        from .guardrails import check_text, check_value, CredentialStreamFilter, is_guardrail_error
         prompt, message_id = _prompt(history, conversation_id)
+        check_text(prompt)
         namespace = self._namespace(user_id)
         with self._lock(conversation_id):
             state = self._load(conversation_id, user_id)
@@ -378,14 +392,16 @@ class PydanticRuntime(_Runtime):
             previous = None
             if state is not None:
                 previous = self._conversation_from_state(state, conversation_id)
+                check_value(state['conversation'])
             elif len(history) != 1:
                 raise RuntimeStateError("此会话已有产品历史但缺少官方 Agent 状态，请新建真实模型会话。")
             try:
                 self._worker_loop()
                 selected_model = self._select_model(conversation_id, state)
                 prompt, previous = self._prepare_run(history, state, conversation_id, prompt, previous, selected_model)
+                check_text(prompt)
                 agent = self._agent(namespace, selected_model)
-            except (RuntimeConfigurationError, RuntimeStateError):
+            except (RuntimeConfigurationError, RuntimeStateError, RuntimeGuardrailError):
                 raise
             except Exception:
                 raise RuntimeConfigurationError("真实模型初始化失败，请检查已安装的供应商依赖、模型名称和服务端密钥配置。") from None
@@ -406,6 +422,7 @@ class PydanticRuntime(_Runtime):
             if history[-1].get("run_id"):
                 kwargs["run_id"] = history[-1]["run_id"]
             pieces: list[str] = []
+            output_filter = CredentialStreamFilter()
             self._before_model_request(conversation_id, user_id, message_id)
             try:
                 with agent.run_stream_sync(prompt, **kwargs) as response:
@@ -416,7 +433,7 @@ class PydanticRuntime(_Runtime):
                                 raise TypeError("Expected a text delta")
                             if delta:
                                 pieces.append(delta)
-                                yield delta
+                                yield from output_filter.feed(delta)
                     except GeneratorExit:
                         # The pinned SDK's async lifecycle cannot safely receive
                         # GeneratorExit from a synchronous consumer. Close the pump
@@ -432,6 +449,7 @@ class PydanticRuntime(_Runtime):
                     output = response.get_output()
                     if output != "".join(pieces):
                         raise RuntimeError("Final output disagrees with streamed text")
+                    tail = output_filter.finish()
                     # Sync streaming exposes these public fields rather than result.conversation.
                     # This runtime has text output and no deferred tools, so pending requests are None.
                     conversation = backend.Conversation(
@@ -440,9 +458,13 @@ class PydanticRuntime(_Runtime):
                     )
                     encoded = backend.ConversationTypeAdapter.dump_json(conversation)
             except Exception as exc:
+                if is_guardrail_error(exc):
+                    raise RuntimeGuardrailError("检测到可能的凭据，已阻止本次请求。") from None
                 raise RuntimeExecutionError(
                     f"真实模型运行失败（{type(exc).__name__}），本次未自动重试或切换到演示模式。"
                 ) from None
+            if tail:
+                yield tail
             # No partial/failed state replaces the last successful official Conversation.
             # Cache the reply to recover the window before the API commits its assistant row.
             self.store.save_agent_state(conversation_id, _encode({
