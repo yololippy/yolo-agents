@@ -223,7 +223,8 @@ public struct APIClient: Sendable {
         if let conversationID { query.append(URLQueryItem(name: "conversation_id", value: conversationID.uuidString)) }
         return try await request("GET", path: "events", query: query)
     }
-    private func request<Response: Decodable>(_ method: String, path: String,
+    /// Sends one request to an Agent-owned v1 endpoint using the shared transport and error handling.
+    public func request<Response: Decodable>(_ method: String, path: String,
         query: [URLQueryItem] = [], body: Data? = nil, authenticated: Bool = true) async throws -> Response {
         let request = try makeRequest(method, path: path, query: query, body: body, authenticated: authenticated)
         let result = try await transport.send(request)

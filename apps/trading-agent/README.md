@@ -202,3 +202,13 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 ```
 
 SDK 42 项通过、1 项真实服务测试默认跳过；UI 17 项通过；Mac 构建成功。账号测试使用 HTTP fixtures，不打开浏览器、不执行真实 Codex 登录或退出；原生按键测试验证 Enter 单次提交及 Shift+Enter 换行。main 已实测浏览器账号状态界面、Mac 排版、Enter 单次发送及 Shift+Enter 换行；iPhone 真机键盘仍需验收。
+
+## Paper 订单客户端（2026-10-28）
+
+领域专用 Swift 代码及测试位于 [client-swift](client-swift/README.md)，由 `TradingAgentRootView` 注入共享聊天入口；Xcode 的两端 targets 均依赖该本地 Package。
+
+聊天侧边栏和工具栏新增“Paper 订单”。Mac 管理设备通过独立步骤创建美股限价草稿、获取 What-if 预览、核对合约/保证金/佣金、明确确认预览，再单独确认提交；支持核对后撤销单笔活动订单。目标账户仅取服务端已认证健康响应的 `broker.configuration.config_id`，不提供账户号输入。预览、确认、提交和撤单前均重新校验 Paper 执行门槛及最新订单版本。
+
+iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Writer、写请求类型或 UI 写方法。打开页面、恢复和刷新都只读取数据。超时或无效写响应显示待核对状态，无自动重试；提交/撤单在途及 unknown 不显示为成功，完整成交不会被迟到撤单覆盖。状态通过“刷新订单”更新。
+
+本轮验证：共享 SDK 共 43 项（42 项通过、1 项真实服务测试按默认条件跳过），共享 UI 17 项通过，Trading Agent 客户端 21 项通过；`YoloAgentsMac` arm64 与 `YoloAgentsIOS` Simulator 通用 Debug 目标构建成功。订单测试使用纯内存假服务，没有发出真实 Paper 订单；真实 Paper What-if/提交、签名真机与界面点击验收仍需单独执行。

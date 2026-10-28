@@ -19,3 +19,7 @@ Mac 编辑器将 `textContainerInset` 设为 `(12,10)`、`lineFragmentPadding` �
 侧边栏和聊天工具栏提供“Codex 账号”。Mac 管理设备读取邮箱、套餐和登录状态，发起浏览器登录后轮询账号状态，退出必须先确认影响本机 Codex 受管登录。iOS 及非管理设备只使用模型目录中的脱敏认证状态，不调用私有账号接口。邮箱和套餐只在内存展示，不加入聊天缓存。
 
 账号单测使用隔离 HTTP fixtures，不打开浏览器、不修改本机 Codex 登录。UI 包 17 项测试通过，包括 MacReturnAction、原生 Enter 单次提交、Shift+Enter 换行、排版参数、账号权限、登录轮询/取消/超时及退出失败保留状态。
+
+## App 功能入口
+
+`YoloAgentsRootView(features:)` 接收 App 注入的 `ChatFeature`，在侧边栏和工具栏展示入口，并将当前配对连接传给弹出页面。默认列表为空，其他 Agent 不会自动获得 Trading Agent 的订单入口。共享 UI 不持有 Paper 模型或交易动作；实现与测试见 [Trading Agent 客户端](../../apps/trading-agent/client-swift/README.md)。

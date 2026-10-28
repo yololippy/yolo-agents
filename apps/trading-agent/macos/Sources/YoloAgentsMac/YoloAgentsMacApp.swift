@@ -1,5 +1,5 @@
 import SwiftUI
-import YoloAgentsUI
+import TradingAgentClient
 
 @main
 struct YoloAgentsMacApp: App {
@@ -10,10 +10,10 @@ struct YoloAgentsMacApp: App {
             // Hosted SDK tests must not restore production pairing or cached chat.
             Color.clear
         } else {
-            YoloAgentsRootView()
+            TradingAgentRootView()
         }
         #else
-        YoloAgentsRootView()
+        TradingAgentRootView()
         #endif
     }
     var body: some Scene {

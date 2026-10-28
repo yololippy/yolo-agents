@@ -8,7 +8,8 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
 public struct YoloAgentsRootView: View {
     @StateObject private var model = ChatModel()
     @Environment(\.scenePhase) private var scenePhase
-    public init() {}
+    private let features: [ChatFeature]
+    public init(features: [ChatFeature] = []) { self.features = features }
     public var body: some View {
         Group {
             if !model.started {
@@ -16,7 +17,7 @@ public struct YoloAgentsRootView: View {
             } else if model.connection == nil {
                 PairingView(model: model, isSettings: false)
             } else {
-                ChatShell(model: model)
+                ChatShell(model: model, features: features)
             }
         }
         .task { await model.start() }
@@ -153,10 +154,12 @@ private struct PairingView: View {
 
 private struct ChatShell: View {
     @ObservedObject var model: ChatModel
+    let features: [ChatFeature]
     @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
     @ViewState private var showAccount = false
+    @ViewState private var selectedFeature: ChatFeature?
     @ViewState private var renaming: Conversation? = nil
     @ViewState private var newTitle = ""
     @ViewState private var drafts = ComposerDrafts()
@@ -194,6 +197,12 @@ private struct ChatShell: View {
                 }
                 Toggle("显示归档", isOn: $includeArchived)
                     .toggleStyle(.switch).font(.caption).padding()
+                ForEach(features) { feature in
+                    Button { selectedFeature = feature } label: {
+                        Label(feature.title, systemImage: feature.systemImage)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).padding(.horizontal).accessibilityIdentifier(feature.id)
+                }
                 Button { showAccount = true } label: {
                     Label("Codex 账号", systemImage: "person.crop.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -206,9 +215,13 @@ private struct ChatShell: View {
             .navigationTitle("会话")
             .searchable(text: $query, prompt: "搜索已同步的会话标题")
         } detail: {
-            ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true }, openAccount: { showAccount = true })
+            ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true },
+                       openAccount: { showAccount = true }, features: features, openFeature: { selectedFeature = $0 })
         }
         .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
+        .sheet(item: $selectedFeature) { feature in
+            if let connection = model.connection { feature.content(connection) }
+        }
         .sheet(isPresented: $showAccount) {
             if let connection = model.connection {
                 CodexAccountView(connection: connection) { Task { await model.refreshModels() } }
@@ -232,6 +245,8 @@ private struct ChatDetail: View {
     @Binding var drafts: ComposerDrafts
     let openSettings: () -> Void
     let openAccount: () -> Void
+    let features: [ChatFeature]
+    let openFeature: (ChatFeature) -> Void
     private var composerAvailability: ComposerAvailability {
         ComposerAvailability(hasConversation: model.selectedID != nil,
                              archived: model.selectedConversation?.archived == true,
@@ -289,6 +304,10 @@ private struct ChatDetail: View {
             ToolbarItem(placement: .navigation) { newConversationButton }
             #endif
             ToolbarItemGroup(placement: .primaryAction) {
+                ForEach(features) { feature in
+                    Button { openFeature(feature) } label: { Label(feature.title, systemImage: feature.systemImage) }
+                        .accessibilityIdentifier(feature.id + ".toolbar")
+                }
                 Button(action: openAccount) { Label("Codex 账号", systemImage: "person.crop.circle") }
                 Button(action: openSettings) { Label("连接设置", systemImage: "gearshape") }
             }

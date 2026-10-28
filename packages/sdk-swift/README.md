@@ -4,6 +4,10 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 `YoloAgentsProbe` 是使用该 SDK 的本地联调可执行程序。
 
+## Agent 私有接口扩展
+
+`APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。Trading Agent 的 Paper 客户端位于 [client-swift](../../apps/trading-agent/client-swift/README.md)。
+
 ## Codex 账号
 
 `account()`、`startAccountLogin()`、`logoutAccount()` 使用 `/v1/codex/account`、`/v1/codex/account/login`、`/v1/codex/account/logout`，携带设备 Bearer 凭据；POST 仅发送空 JSON 对象。账号状态支持后端 `{account:{status,email,plan_type}}` 包装，登录响应为 `{login_id,auth_url}`。

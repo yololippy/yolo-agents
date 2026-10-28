@@ -1,5 +1,5 @@
 import SwiftUI
-import YoloAgentsUI
+import TradingAgentClient
 
 @main
 struct YoloAgentsIOSApp: App {
@@ -9,10 +9,10 @@ struct YoloAgentsIOSApp: App {
         if ProcessInfo.processInfo.environment["YOLO_AGENTS_RUNNING_SDK_TESTS"] == "1" {
             Color.clear
         } else {
-            YoloAgentsRootView()
+            TradingAgentRootView()
         }
         #else
-        YoloAgentsRootView()
+        TradingAgentRootView()
         #endif
     }
 
