@@ -15,4 +15,3 @@ xcuserdata/
 *.sqlite3-wal
 *.pem
 *.key
-/runtime/codex-quota-watch/
