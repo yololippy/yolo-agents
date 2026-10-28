@@ -1,6 +1,6 @@
 # Mac Agent 与 Apple 客户端通信 v1
 
-这是本项目自己的协议，不传递 PydanticAI 内部对象。首版面向同一位用户的 Mac 和 iPhone；账户与交易服务后续接入。
+这是本项目自己的协议，不传递 PydanticAI 内部对象。面向同一位用户的 Mac 和 iPhone；Paper 订单是交易 Agent 私有的受控 HTTP 能力。
 
 ## 地址、认证与运行模式
 
@@ -8,14 +8,14 @@
 - JSON 编码 UTF-8，字段使用 snake_case，ID 为 UUID，时间为 UTC ISO8601。版本是 URL `/v1` 及健康/配对响应的 `api_version: 1`。
 - 除健康检查与首次配对外，每个请求携带 `Authorization: Bearer <device_token>`。令牌在客户端 Keychain 保存，后端只存 SHA-256；无浏览器全局 CORS 放行。
 - 服务启动时本机控制台显示两个一次性配对码，分别绑定 `macos` / `ios`，有效十分钟。代码必须与请求平台一致；设备自报平台不能提升配对码授权。
-- 两端都有 `chat:read`、`chat:write`；Mac 配对码另授 `devices:manage`，iPhone 不具备管理其他设备的能力。所有交易提交/确认/预授权接口均关闭，即使客户端自造请求也返回 403。
+- 两端都有 `chat:read`、`chat:write`；Mac 配对码另授 `devices:manage`。Paper 订单操作同时要求服务端配对记录为 macos 且具有 devices:manage，iPhone 只读脱敏订单；Live、自动预授权和定时交易接口关闭。
 - 健康响应明确 `agent_mode: demo`、`pydantic` 或 `codex`。演示模式不调用云端模型；Codex 模式复用 Mac 上由 Codex 受管的 ChatGPT 登录，不向设备提供 OpenAI token。
 
 ## HTTP 接口
 
 | 方法与路径 | 请求 | 响应 |
 | --- | --- | --- |
-| `GET /v1/health` | 无认证 | `{status, api_version, server_id, agent_mode, model, trade_execution_enabled:false}` |
+| `GET /v1/health` | 无认证 | `{status, api_version, server_id, agent_mode, model, trade_execution_enabled,broker}`；执行标记只在完整 Paper 门面及所有快照门槛通过时为 true |
 | `GET /v1/models` | 已配对设备 | `{models:[model],default_model,catalog_only:true,auth:{status,method},error?}` |
 | `GET /v1/codex/account` | Mac 管理凭据；Codex 模式 | `{account:{status,email,plan_type}}` |
 | `POST /v1/codex/account/login` | Mac 管理凭据；空 JSON `{}` | `{login_id,auth_url}`；启动 Codex 托管浏览器登录 |
@@ -99,10 +99,14 @@ data: {"seq":42,"type":"assistant.delta","conversation_id":"…","payload":{"run
 
 错误不返回模型原始异常、账户信息、密钥或服务器文件路径。配对按来源 IP 每分钟最多五次尝试。
 
-已接受但无产品最终回复的运行，重启时先检查 Runtime 是否已保存匹配该输入的完整回复；确定有完整缓存时直接补齐产品结果，不再调用模型。其余标为 `run_interrupted`，不自动重跑模型或工具。当前没有交易工具；未来交易工具必须另行实现授权、幂等和券商对账，不能借聊天重试直接执行。
+已接受但无产品最终回复的聊天运行，重启时先检查 Runtime 是否已保存匹配该输入的完整回复；确定有完整缓存时直接补齐产品结果，不再调用模型。其余标为 `run_interrupted`，不自动重跑模型或工具。聊天模型没有订单确认或执行工具；独立 Paper HTTP API 的确认、幂等和对账边界见下文，不能借聊天重试执行交易。
 
 Codex 使用 app-server JSONL 流的 `item/agentMessage/delta` 即时产生既有 `assistant.delta`，不等待 turn 结束再统一输出；failed/interrupted 不能生成 `assistant.completed`。登录缺失产生 `assistant.failed` 的 `login_required` 错误码；它不代表设备配对失效，不应清空设备凭据。Codex 子进程退出、协议超时和不确定运行不会自动重放。
 
 app conversation 与 Codex thread 的映射只保存在后端 Agent 状态中。正常重启后先 `thread/resume` 再创建新 turn；更换模型或上个 turn 未确定完成时，以明确的新 thread 重建引用上下文。不同 Runtime 模式的旧状态不自动混用，切换 demo/pydantic/codex 时应新建产品会话；原会话记录保留。
 
 本协议已定义设备认证、增量补齐和 HTTPS 接口；公网可达性、可信证书配置、iOS 后台推送及真机测试分别验收，不能仅凭本机 HTTP 测试认定完成。
+
+## Trading Agent 扩展
+
+Paper 订单是交易 Agent 私有接口，见 [Paper 订单协议](../../agents/trading-agent/PAPER_ORDERS.md)。

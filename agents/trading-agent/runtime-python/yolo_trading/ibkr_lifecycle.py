@@ -1,10 +1,11 @@
 """Trading-owned background loop; HTTP threads only read copied health snapshots."""
 
 import asyncio
+from concurrent.futures import CancelledError as FutureCancelled, TimeoutError as FutureTimeout
 from copy import deepcopy
 import threading
 
-from .ibkr import IBKRAdapter
+from .ibkr import IBKRAdapter, IBKROperationError, _timeout
 
 
 class IBKRBrokerLifecycle:
@@ -30,6 +31,10 @@ class IBKRBrokerLifecycle:
         self._loop = None
         self._stop = None
         self._closing = threading.Event()
+        self._paper_snapshot = broker.paper_order_snapshot()
+        self._orders_snapshot = []
+        self._events_snapshot = []
+        self._requests = set()
 
     def health(self):
         with self._guard:
@@ -45,8 +50,11 @@ class IBKRBrokerLifecycle:
     def _publish(self, *, status=None):
         # This is called only on the SDK-owning event-loop thread.
         health = self._broker.health()
+        paper = self._broker.paper_order_snapshot()
+        orders, events = self._broker.orders_snapshot(), self._broker.events_snapshot()
         with self._guard:
             self._snapshot = health
+            self._paper_snapshot, self._orders_snapshot, self._events_snapshot = paper, orders, events
             if status is not None:
                 self._status = status
 
@@ -111,6 +119,10 @@ class IBKRBrokerLifecycle:
             if connection is not None:
                 connection.cancel()
                 await asyncio.gather(connection, return_exceptions=True)
+            requests = tuple(self._requests)
+            for request in requests:
+                request.cancel()
+            await asyncio.gather(*requests, return_exceptions=True)
             await self._broker.disconnect()
             self._publish()
             if self._broker.health()["connected"]:
@@ -118,6 +130,69 @@ class IBKRBrokerLifecycle:
             else:
                 with self._guard:
                     self._status = "stopped"
+
+    def paper_order_snapshot(self):
+        with self._guard:
+            value = deepcopy(self._paper_snapshot)
+            value["health_stale"] = self._status != "running" or self._closing.is_set()
+            if value["health_stale"]:
+                value["execution_enabled"] = False
+            return value
+
+    def orders_snapshot(self):
+        with self._guard:
+            return deepcopy(self._orders_snapshot)
+
+    def events_snapshot(self, after=0):
+        if type(after) is not int or after < 0:
+            raise IBKROperationError("invalid_cursor", "事件游标必须为非负整数。")
+        with self._guard:
+            return deepcopy([event for event in self._events_snapshot if event["seq"] > after])
+
+    async def _request(self, method, args, kwargs):
+        task = asyncio.current_task()
+        self._requests.add(task)
+        try:
+            if self._closing.is_set():
+                raise IBKROperationError("broker_closing", "Broker 正在关闭，不能执行新请求。")
+            return await getattr(self._broker, method)(*args, **kwargs)
+        finally:
+            self._requests.discard(task)
+            self._publish()
+
+    def _call(self, method, args, kwargs, timeout):
+        timeout = _timeout(timeout)
+        with self._guard:
+            loop, worker = self._loop, self._thread
+            if self._status != "running" or self._closing.is_set() or loop is None:
+                raise IBKROperationError("broker_not_running", "Broker 循环尚未就绪或已关闭。")
+        if worker is threading.current_thread():
+            raise IBKROperationError("facade_on_owner_thread", "同步门面不能阻塞 Broker 所属线程。")
+        coroutine = self._request(method, deepcopy(args), {**deepcopy(kwargs), "timeout": timeout})
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            raise IBKROperationError("broker_not_running", "Broker 循环已关闭。") from None
+        try:
+            return future.result(timeout=timeout + 1)
+        except (FutureTimeout, FutureCancelled):
+            future.cancel()
+            if method in ("submit_paper_order", "cancel_paper_order"):
+                return {"order_ref": kwargs["order_ref"], "status": "unknown",
+                        "broker_order_id": kwargs.get("broker_order_id"), "filled_quantity": 0}
+            raise IBKROperationError("preview_timeout", "预览超时，不能提交订单。") from None
+
+    def preview_paper_order(self, intent, *, order_ref, context, timeout=5.0):
+        return self._call("preview_paper_order", (intent,), {"order_ref": order_ref, "context": context}, timeout)
+
+    def submit_paper_order(self, intent, *, order_ref, preview, context, timeout=5.0):
+        return self._call("submit_paper_order", (intent,),
+                          {"order_ref": order_ref, "preview": preview, "context": context}, timeout)
+
+    def cancel_paper_order(self, *, order_ref, broker_order_id, context, timeout=5.0):
+        return self._call("cancel_paper_order", (),
+                          {"order_ref": order_ref, "broker_order_id": broker_order_id, "context": context}, timeout)
 
     def _thread_main(self):
         try:

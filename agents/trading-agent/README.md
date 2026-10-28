@@ -1,101 +1,121 @@
-# IBKR 第一阶段：配置、只读连接与健康状态
+# IBKR Paper 交易 Agent
 
-更新日期：2026-10-27。
+更新日期：2026-10-28。
 
-本阶段提供交易 Agent 私有的配置、只读适配层与后台连接生命周期。Host 启动时，仅在显式配置 paper 和目标账户后自动尝试只读连接；缺依赖、Gateway 连接失败不会阻止聊天启动。本轮验证使用模拟客户端，尚未完成真实账户连接；没有下单/撤单接口、Gateway 安装或登录凭据保存。需求依据见 [项目大纲](../../docs/PROJECT_OUTLINE.md) 和 [任务清单](../../docs/TODO.md)。
+本模块是 `trading-agent` 私有的 IBKR 运行时。它提供显式 paper/live 配置、Gateway 生命周期、启动对账、Paper 股票限价单和独立订单账本。Live 环境没有执行路径；聊天模型也没有直接订单工具。Mac 管理设备必须按“草稿 → What-if → 确认 → 提交”逐步操作，iOS 仅查看脱敏订单状态。
 
-## 模块与调用
+## 模块
 
-- `yolo_trading.ibkr_config.IBKRConfig`：不可变配置，校验类型、环境、本机地址、端口、client ID 和只读限制。
-- `load_ibkr_config(base=None, environ=None, overrides=None)`：配置合并，优先级为默认值 < 基础字典/JSON < 环境变量 < 显式覆盖。
-- `yolo_trading.ibkr.IBKRAdapter(config)`：构造和 `health()` 不导入 SDK、不探测端口、不建立连接；异步方法负责连接、断开和重配。
-- `yolo_trading.ibkr_lifecycle.IBKRBrokerLifecycle`：由交易 Agent 启动入口管理，SDK 创建、连接、事件接收与断开均在同一个常驻 asyncio 线程中进行。HTTP 线程只读取深拷贝健康快照，默认最多约 0.1 秒同步一次。
+- `ibkr_config.py`：不可变配置、来源审计和安全默认值。
+- `ibkr.py`：同一 asyncio owner 线程上的 SDK 连接、启动读取、合约确认、What-if、提交、事件与单笔撤单。
+- `ibkr_lifecycle.py`：Host 后台生命周期及线程安全同步门面。
+- `paper_order_store.py`：独立 `paper-orders.sqlite3` schema、事务和请求/事件存储。
+- `paper_orders.py`：草稿、预览、确认、提交、撤单、幂等和恢复状态机。
+- `paper_order_broker.py`：订单服务与券商 lifecycle 之间的严格边界。
+- `api_extension.py`：`/v1/broker/health` 和 `/v1/orders` 路由；写操作仅接受有效 Mac 管理设备。
 
-`reconfigure` 在生命周期锁下先关闭旧连接再应用配置，返回新健康状态而不自动连接。不能确认原连接关闭时返回 `disconnect_failed`，保留旧配置，阻止切换。健康输出包含配置摘要、字段来源、配置指纹、修订号及最近一次切换的前后指纹；集成方负责将这些信息写入已有审计存储，本模块不提供持久审计账本。账户 ID 不出现在健康输出或配置 repr 中。
+账户号、Gateway 登录凭据、设备 token 和上游原始错误不写入公开健康、订单响应或文档。配置目标通过不可逆 `config_id` 暴露给客户端。
 
-## 显式配置与保护
+## 配置与保护
 
 | 字段 | 规则 |
 | --- | --- |
-| `environment` | 必填 `paper` 或 `live`，不按端口或账户前缀推断。 |
-| `host` | 默认 `127.0.0.1`；首版仅支持回环 IP 或规范化后的 `localhost`，不解析任意域名。 |
-| `port` | 未指定时按显式环境取默认 Gateway 端口：paper 4002、live 4001；允许显式自定义，不因此更改环境。 |
-| `client_id` | 默认 20，范围 1～2147483647；拒绝 0，避免库自动绑定手工订单。 |
-| `read_only` | 默认且必须为 true。 |
-| `execution_enabled` | 默认且必须为 false；paper/live 都拒绝开启，本阶段不支持执行。 |
-| `account` | 可缺省以检查配置；连接前必须显式指定并与 Gateway 返回的 managed accounts 比对，不自动取第一个账户。 |
-| `connect_timeout` | 默认 5 秒，范围大于 0 且不超过 60 秒，限制一次完整连接尝试。 |
+| `environment` | 必填 `paper` 或 `live`；不根据端口推断。 |
+| `host` | 默认 `127.0.0.1`，仅允许回环地址。 |
+| `port` | Gateway 默认 Paper 4002、Live 4001；允许显式覆盖。 |
+| `client_id` | 默认 20，必须为非零正整数；不自动绑定手工订单。 |
+| `account` | 连接前显式指定，并与 `managedAccounts()` 精确比对；不取第一个账户。 |
+| `read_only` | 默认 `true`。只有 Paper 且同时显式开启 execution 时允许 `false`。 |
+| `execution_enabled` | 默认 `false`；只有 Paper＋`read_only=false` 可开启，Live 永远拒绝。 |
+| `connect_timeout` | 默认 5 秒，范围 `(0, 60]`。 |
 
-环境变量使用 `YOLO_AGENTS_TRADING_IBKR_` 前缀，例如 `YOLO_AGENTS_TRADING_IBKR_ENVIRONMENT`、`YOLO_AGENTS_TRADING_IBKR_PORT`、`YOLO_AGENTS_TRADING_IBKR_ACCOUNT`。布尔值只接受 true/false；未知字段、用户名或密码字段均拒绝，错误不回显原始输入。
+环境变量前缀为 `YOLO_AGENTS_TRADING_IBKR_`。布尔值只接受 `true`/`false`。环境切换会丢弃旧环境的账户、地址、端口、client ID 和执行授权，避免 Paper 配置泄漏到 Live。
 
-某一覆盖层改变 environment 时，先丢弃低优先级的整个旧配置，再应用该层显式字段和安全默认值。因此 paper → live 不会继承旧 account、host、port 或 client ID；同一环境的覆盖则保留其他字段。
+Paper 执行还要求目标账户由 Gateway 返回，并属于当前明确支持的 Paper 账户命名空间。IBKR 没有公开账户号命名契约，当前仅对白名单 `DU+数字` 与实机返回的 `DUR+数字` 放行，未知命名空间失败关闭。账户前缀不是唯一依据：显式环境、精确目标账户、Gateway 返回账户、完整启动读取及当前会话必须同时匹配。
 
-SDK `readonly=True` 主要控制库的启动同步行为，不能证明 Gateway 的 Read-Only API 设置已启用。用户仍需在 Gateway 开启只读。本模块不暴露底层 client 或交易方法，也不将本机连接、目标账户匹配当作实际 paper/live 环境已经验证。
-
-## 离线检查
-
-在仓库根目录运行以下命令，只检查配置和依赖，绝不连接：
+离线检查不连接 Gateway：
 
 ```sh
 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading.ibkr --environment paper
 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading.ibkr --environment live --port 4002
 ```
 
-第二条仍然明确表示 live 配置；端口 4002 不会将它变成 paper。亦可使用 `--config /path/to/ibkr.json`，再用同名 CLI 参数覆盖字段。不要在配置中填写 Gateway 登录用户名或密码。
+## 启动
 
-退出码：0 表示配置完整且依赖可发现（不代表 Gateway 可用）；1 表示缺依赖或目标账户等配置未补齐；2 表示配置不合法/文件无法解析。结果为 JSON，含固定错误代码及可解释提示。
+用户名、密码和二次认证只在 IB Gateway 内完成，不能写进仓库或 Agent 配置。只读观察时保留 Gateway 的 `Read-Only API`，并使用默认 `read_only=true` / `execution_enabled=false`。需要验证 Paper 订单时，必须先确认 Gateway 登录的是 Paper，再取消 Gateway 的 `Read-Only API`；否则开放订单/已完成订单读取会被拒绝，启动对账不会就绪。
 
-可选依赖位于 [runtime-python/requirements.txt](runtime-python/requirements.txt)，完整锁定版本在 [runtime-python/requirements.lock](runtime-python/requirements.lock)。其他聊天/演示模式不依赖它；只有显式配置 IBKR 环境时才会构造适配层。
-
-## 随 Host 启动 Paper 只读连接
-
-先在本机安装并登录 IB Gateway 的 Paper Trading，完成二次认证，开启 Read-Only API、仅本机连接，并确认实际端口和目标 Paper 账户。不要将用户名、密码或验证码填入程序配置。
-
-在终端自行设置 `YOLO_AGENTS_TRADING_IBKR_ACCOUNT` 为实际 Paper 账户号，再从仓库根目录运行：
+示例只展示变量名，不保存实际账户号：
 
 ```sh
-PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading \
-  --mode demo \
-  --ibkr-environment paper \
-  --ibkr-host 127.0.0.1 \
-  --ibkr-port 4002 \
-  --ibkr-client-id 20 \
-  --ibkr-account "${YOLO_AGENTS_TRADING_IBKR_ACCOUNT:?请先设置实际 Paper 账户号}"
+export YOLO_AGENTS_TRADING_IBKR_ENVIRONMENT=paper
+export YOLO_AGENTS_TRADING_IBKR_HOST=127.0.0.1
+export YOLO_AGENTS_TRADING_IBKR_PORT=4002
+export YOLO_AGENTS_TRADING_IBKR_CLIENT_ID=20
+export YOLO_AGENTS_TRADING_IBKR_ACCOUNT='在本机终端填写实际 Paper 账户'
+export YOLO_AGENTS_TRADING_IBKR_READ_ONLY=false
+export YOLO_AGENTS_TRADING_IBKR_EXECUTION_ENABLED=true
+
+PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python \
+  .venv/bin/python -m yolo_trading --mode codex
 ```
 
-端口 4002 只是 Gateway 模拟盘默认值；自定义端口时按实际修改，程序不依靠端口猜测环境。client ID 20 必须未被其他 API 程序占用。也可使用 `--ibkr-config /path/to/local-paper-config.json`；配置覆盖规则与离线检查相同。
+构造、离线检查和 `health()` 不打开 socket。Host 只在显式配置后启动 lifecycle；失败不影响聊天服务。正常退出、SIGTERM 和异常路径都会尝试在 owner 线程断开 SDK，不静默重试订单。
 
-- 未配置券商时聊天照常运行；缺少目标账户时只显示配置未完成，不连接。
-- `live` 可供离线检查配置，但 Host 自动连接返回 `automatic_connection_blocked`，不启动券商连接线程。所有路径始终关闭执行。
-- Paper 连接只尝试一次，不切换端口、账户或环境，也不自动重试。Gateway 启动/登录就绪后，若此前连接失败，需要重启 Host 再尝试。
-- 连接完成后事件循环继续运行，处理 SDK 后续网络事件；`connected_read_only` 不代表对账完成或可以交易。
-- 正常退出、Ctrl-C、SIGTERM，以及 Host 初始化/运行异常，均通过交易入口的 `finally` 取消未完成连接，在原线程断开 SDK，再等待线程停止。默认最多等待 5 秒；无法确认清理时报告生命周期错误，不假装已成功关闭。
+## 启动对账与健康
 
-公开 `/v1/health` 中的 `broker`，以及设备认证后的 `/v1/broker/health`，均读取真实适配状态的线程安全快照，不暴露目标账户号。`lifecycle` 显示后台线程状态和脱敏错误；循环故障时 `health_stale=true` 提示快照可能过期。单独运行 `python -m yolo_trading.ibkr` 仍是纯离线检查，不建立连接。
+连接成功后必须完成以下读取，任何一项失败都令 `data_complete=false` 并阻止订单：
 
-## 健康状态语义
+- 精确目标账户；
+- 持仓；
+- 可见开放订单；
+- 当日成交；
+- 目标账户摘要。
 
-- `dependency_missing` / `dependency_unavailable`：未安装或不能加载 ib_async。
-- `configuration_incomplete`：如目标账户未配置，不发起连接。
-- `disconnected`：未连接；`connection_attempted=false` 时没有检查 Gateway，不能宣称它已停止或认证过期。
-- `connecting` / `connected_read_only`：SDK 正在连接或已完成启动握手，不表示应用级账户/挂单/成交对账完成。
-- `gateway_unavailable`：显式连接失败、SDK 断开或连接已丢失；错误不足以判断究竟是未启动、未登录、端口错误还是认证失效，需在 Gateway 确认。
-- `broker_unavailable` / `session_conflict`：收到对应券商连接或竞争会话事件。
-- `reconciliation_required`：连接恢复，仍需重新核对状态和订阅。
-- `account_mismatch`：未返回目标账户，已断开，不自动改用其他账户。
-- `disconnect_failed`：旧连接关闭无法确认，配置切换被阻止。
-- `automatic_connection_blocked`：Host 自动连接的环境不是 paper；未发起连接。
+健康状态包含 `connected`、`account_verified`、`environment_verified`、`data_complete`、`execution_enabled`、会话 ID 和逐项 reconciliation，不包含账户号。只有显式 Paper 可写配置、受支持账户、当前连接和五项启动读取全部通过时才进入 `connected_paper`。
 
-第一阶段所有健康结果固定 `execution_enabled=false`、`environment_verified=false`、`data_complete=false`。没有账户数据快照、完整订单对账或自动重连调度；这些由下一阶段实现，不能把 `connected_read_only` 解释为可交易。
+端口可连不等于环境或权限已验证。断线、会话冲突和券商恢复会撤销就绪状态；未重新对账前禁止操作。当前没有自动重连/跨重启主动券商对账调度，相关恢复仍是后续任务。
 
-## 验证与后续配置
+## Paper 订单范围
+
+首批只支持：
+
+- `STK / SMART / USD`；
+- `BUY` 或普通 `SELL`；
+- 正整数数量；
+- `LMT / DAY`；
+- `outsideRth=false`。
+
+预览要求唯一、完整合约，执行 IBKR What-if 并返回保证金/佣金估计，不提交实单。提交绑定不可变草稿、预览、确认、`config_id`、`session_id` 和稳定 `orderRef`；数据库先写 `submitting`，SDK 最多调用一次。超时、断开或无法判断是否已接单时标记 `unknown`，不自动重发，并阻止相同经济意图绕过。
+
+撤单只允许当前 Agent 所属、已知 broker ID 的单笔活动订单，不调用 global cancel。部分成交、迟到成交、拒单、撤单竞争和乱序事件采用单调状态；完整成交优先于迟到撤单确认。
+
+HTTP 和客户端契约见 [通信协议](../../packages/protocol/COMMUNICATION_V1.md)。Mac/iOS 界面说明见 [Apple 客户端](../../apps/trading-agent/README.md)。
+
+## 当前验证边界
+
+已完成：
+
+- 交易 Agent 111 项 Python 测试；其中 Paper 执行、HTTP、持久化和恢复均使用注入式内存 SDK/本机测试服务；
+- 共享 Swift SDK 43 项中的 42 项通过、1 项真实服务测试默认跳过；共享 SwiftUI 17 项、Trading Agent 客户端 21 项通过；
+- Mac arm64 与 iOS Simulator Debug 构建；
+- 本机 Gateway 已安装、Paper 登录及端口可达；现有只读 Agent 连接曾成功。
+
+未完成：
+
+- Gateway 的 `Read-Only API` 仍开启，Paper 可写连接预检被官方接口拒绝；
+- 尚未对真实 Gateway 执行 What-if、提交模拟订单、成交或撤单；
+- 未做进程重启后的活动订单主动恢复、外部订单完整对账、跨周认证和长期运行验收；
+- 未开放 Live，也没有实盘验收。
+
+运行测试：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s agents/trading-agent/runtime-python/tests -p 'test_ibkr*.py' -v
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python \
+.venv/bin/python -W error::ResourceWarning -m unittest discover \
+  -s agents/trading-agent/runtime-python/tests -v
 ```
 
-测试仅使用模拟客户端及本机 HTTP，覆盖配置优先级/审计、环境切换、执行禁用、缺 SDK/账户、连接参数、Gateway 故障、账户不匹配、超时/取消、并发、关闭失败与恢复状态；另验证持续运行的事件循环、同线程 SDK 访问、Host 退出清理、HTTP 健康同步及券商失败后聊天仍可用。测试通过不代表真实 SDK 或账户已联调。
+资料：[IBKR Paper Trading](https://www.interactivebrokers.com/campus/glossary-terms/paper-trading-account/)、[TWS API 连接](https://www.interactivebrokers.com/docs/tws-api/doc/connectivity/verify-api-connection)、[ib_async API](https://ib-api-reloaded.github.io/ib_async/api.html)。
 
-用户后续需在 Mac 安装/登录 IB Gateway，选择环境，开启 Read-Only API 并核对仅本机连接、实际端口、可用 client ID、目标账户及行情订阅。程序不接收登录密码；首次登录/每周认证仍在 Gateway 与 IB Key 中完成。Paper 自动连接与健康接口已接入，真实账户读取、对账及跨周运行仍须单独验收。
-
-接口依据：[ib_async API 文档](https://ib-api-reloaded.github.io/ib_async/api.html)、[IBKR 连接握手说明](https://www.interactivebrokers.com/docs/tws-api/doc/connectivity/verify-api-connection)。
+Paper HTTP 请求、状态机与幂等约定见 [订单协议](PAPER_ORDERS.md)；双端专用 Swift 实现见 [Trading Agent 客户端](../../apps/trading-agent/client-swift/README.md)。

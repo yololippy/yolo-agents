@@ -1,12 +1,16 @@
 """Exercise real local HTTP, SQLite, authentication, streaming, and restart behavior."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import http.client
 import json
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import shutil
 import ssl
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,6 +27,7 @@ from yolo_agents.auth import DeviceAuth
 from yolo_trading.api_extension import TradingAPIExtension
 from yolo_trading.ibkr import IBKRAdapter
 from yolo_trading.ibkr_config import IBKRConfig
+from yolo_trading.paper_order_store import PaperOrderStore
 from yolo_agents.service import ChatService
 from yolo_agents.store import Store
 
@@ -419,6 +424,449 @@ extendedKeyUsage=serverAuth
                 server.server_close()
                 worker.join(timeout=2)
                 store.close()
+
+
+class FakePaperLifecycle:
+    """No SDK or network; methods model the normalized lifecycle seam."""
+    def __init__(self):
+        self.config_id = "a" * 64
+        self.facts = {"environment": "paper", "config_id": self.config_id, "session_id": "session-1",
+                      "account_verified": True, "permissions_verified": True, "environment_verified": True,
+                      "execution_enabled": True, "read_only": False, "connected": True,
+                      "data_complete": True, "health_stale": False}
+        self.calls = {"preview": 0, "submit": 0, "cancel": 0}
+        self.submit_error = None
+        self.submit_result = {"status": "working", "broker_order_id": "123", "filled_quantity": 0}
+        self.cancel_result = {"status": "cancelled", "broker_order_id": "123", "filled_quantity": 0}
+        self.preview_complete = True
+        self.updates = []
+        self.snapshot_hook = self.submit_hook = self.cancel_hook = None
+        self.store_path = None
+
+    def health(self):
+        return {"configuration": {"environment": self.facts["environment"], "config_id": self.config_id,
+                                  "account_configured": True}}
+
+    def paper_order_snapshot(self):
+        if self.snapshot_hook:
+            self.snapshot_hook()
+        return deepcopy(self.facts)
+
+    def orders_snapshot(self):
+        return deepcopy(self.updates)
+
+    def _before(self, action, order_ref):
+        self.calls[action] += 1
+        with closing(sqlite3.connect(self.store_path)) as db, db:
+            state = db.execute("SELECT state FROM paper_orders WHERE id=?", (order_ref,)).fetchone()[0]
+            expected = {"preview": "previewing", "submit": "submitting", "cancel": "cancel_pending"}[action]
+            if state != expected or not db.execute("SELECT 1 FROM paper_requests WHERE order_id=? AND status='in_progress'", (order_ref,)).fetchone():
+                raise AssertionError("order and request must commit before lifecycle call")
+
+    def preview_paper_order(self, intent, *, order_ref, context):
+        self._before("preview", order_ref)
+        return {"qualified_contract": {**intent["contract"], "con_id": 265598},
+                "what_if": {"complete": self.preview_complete, "accepted": True, "currency": "USD",
+                            "initial_margin_change": "10.00", "maintenance_margin_change": "8.00", "commission": "1.00",
+                            "account": "DU_SECRET_ACCOUNT"}}
+
+    def submit_paper_order(self, intent, *, order_ref, preview, context):
+        self._before("submit", order_ref)
+        # The real facade binds the exact normalized what-if representation.
+        if preview["what_if"]["initial_margin_change"] != "10.00":
+            raise AssertionError("what-if decimal spelling changed across preview binding")
+        if self.submit_hook:
+            self.submit_hook(order_ref)
+        if self.submit_error:
+            raise self.submit_error
+        return {"order_ref": order_ref, **self.submit_result, "account": "DU_SECRET_ACCOUNT"}
+
+    def cancel_paper_order(self, *, order_ref, broker_order_id, context):
+        self._before("cancel", order_ref)
+        if self.cancel_hook:
+            self.cancel_hook(order_ref)
+        return {"order_ref": order_ref, **self.cancel_result, "account": "DU_SECRET_ACCOUNT"}
+
+
+class PaperOrderAPITests(unittest.TestCase):
+    request = HTTPTests.request
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.store = Store(self.root / "app.sqlite3")
+        self.addCleanup(self.store.close)
+        self.auth = DeviceAuth(self.root / "devices.sqlite3")
+        runtime = create_runtime("demo", None, self.root, self.store)
+        self.addCleanup(runtime.close)
+        self.app = ChatService(self.store, runtime)
+        self.addCleanup(self.app.close)
+        self.broker = FakePaperLifecycle()
+        self.path = self.root / "paper-orders.sqlite3"
+        self.broker.store_path = self.path
+        self.extension = TradingAPIExtension(self.broker, orders_path=self.path)
+        self.server = ChatHTTPServer(("127.0.0.1", 0), self.app, self.auth, extension=self.extension)
+        self.addCleanup(self.server.server_close)
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.server.shutdown)
+        self.mac = self.auth.pair(self.auth.issue_pairing_code("macos"), "Mac", "macos", "local")
+        self.token = self.mac["token"]
+        self.ios = self.auth.pair(self.auth.issue_pairing_code("ios"), "Phone", "ios", "local")
+
+    def draft_data(self):
+        return {"client_request_id": str(uuid4()), "account_selection": self.broker.config_id,
+                "contract": {"symbol": "AAPL", "sec_type": "STK", "exchange": "SMART", "currency": "USD"},
+                "side": "BUY", "quantity": 2, "limit_price": "10.00", "tif": "DAY", "order_type": "LMT"}
+
+    def create(self, data=None):
+        status, body = self.request("POST", "/v1/orders", data or self.draft_data(), self.token)
+        self.assertEqual(status, 201, body)
+        return body["order"]
+
+    def action_data(self, order, action):
+        data = {"client_request_id": str(uuid4()), "version": order["version"], "content_hash": order["content_hash"]}
+        if action == "confirm":
+            data.update(preview_id=order["preview"]["id"], expires_at=order["preview"]["expires_at"], user_action="confirm_paper_order")
+        elif action == "submit":
+            data.update(confirmation_id=order["confirmation"]["id"] if order["confirmation"] else str(uuid4()), user_action="submit_paper_order")
+        elif action == "cancel":
+            data.update(user_action="cancel_paper_order")
+        return data
+
+    def action(self, order, action, data=None, token=None):
+        return self.request("POST", "/v1/orders/" + order["id"] + "/" + action,
+                            data or self.action_data(order, action), token or self.token)
+
+    def previewed(self):
+        status, body = self.action(self.create(), "preview")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["state"], "proposed")
+        return body["order"]
+
+    def confirmed(self):
+        status, body = self.action(self.previewed(), "confirm")
+        self.assertEqual(status, 200, body)
+        return body["order"]
+
+    def test_full_flow_commits_before_each_broker_call_and_redacts_account(self):
+        order = self.confirmed()
+        status, body = self.action(order, "submit")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["state"], "working")
+        status, body = self.action(body["order"], "cancel")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["state"], "cancelled")
+        self.assertEqual(self.broker.calls, {"preview": 1, "submit": 1, "cancel": 1})
+        for path in ("/v1/orders", "/v1/orders/" + order["id"]):
+            status, view = self.request("GET", path, token=self.ios["token"])
+            self.assertEqual(status, 200)
+            self.assertNotIn("DU_SECRET_ACCOUNT", json.dumps(view))
+            self.assertNotIn("broker_order_id", json.dumps(view))
+        with closing(sqlite3.connect(self.path)) as db, db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_versions").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_confirmations").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_requests WHERE status='completed'").fetchone()[0], 5)
+        self.assertNotIn(b"DU_SECRET_ACCOUNT", self.path.read_bytes())
+
+    def test_ios_chat_only_forged_permissions_and_revoked_device_cannot_operate(self):
+        order = self.create()
+        with self.auth.connect() as db:
+            db.execute("UPDATE devices SET permissions='chat:read,chat:write,devices:manage' WHERE id=?", (self.ios["device"]["id"],))
+        for action in ("preview", "confirm", "submit", "cancel"):
+            self.assertEqual(self.action(order, action, {"permissions": ["devices:manage"], "platform": "macos"}, self.ios["token"])[0], 403)
+        self.assertEqual(self.request("POST", "/v1/orders", self.draft_data(), self.ios["token"])[0], 403)
+        with self.auth.connect() as db:
+            db.execute("UPDATE devices SET permissions='chat:read,chat:write' WHERE id=?", (self.mac["device"]["id"],))
+        self.assertEqual(self.action(order, "preview")[0], 403)
+        self.auth.revoke(self.mac["device"], self.mac["device"]["id"])
+        self.assertEqual(self.action(order, "preview")[0], 401)
+        self.assertEqual(self.broker.calls, {"preview": 0, "submit": 0, "cancel": 0})
+
+    def test_submit_without_preview_confirmation_and_other_mac_confirm_are_denied(self):
+        draft = self.create()
+        self.assertEqual(self.action(draft, "submit")[0], 409)
+        order = self.confirmed()
+        other = self.auth.pair(self.auth.issue_pairing_code("macos"), "other", "macos", "local")
+        self.assertEqual(self.action(order, "submit", token=other["token"])[0], 409)
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_repeated_http_requests_replay_original_results_and_conflicting_ids_fail(self):
+        data = self.draft_data()
+        order = self.create(data)
+        self.assertEqual(self.request("POST", "/v1/orders", data, self.token), (201, {"order": order}))
+        self.assertEqual(self.request("POST", "/v1/orders", {**data, "quantity": 3}, self.token)[0], 409)
+        for action in ("preview", "confirm", "submit", "cancel"):
+            request = self.action_data(order, action)
+            first = self.action(order, action, request)
+            self.assertEqual(first[0], 200, first)
+            self.assertEqual(self.action(order, action, request), first)
+            order = first[1]["order"]
+        self.assertEqual(self.broker.calls, {"preview": 1, "submit": 1, "cancel": 1})
+
+    def test_confirmation_content_version_expiry_and_action_are_bound(self):
+        order = self.previewed()
+        original = self.action_data(order, "confirm")
+        for patch_fields in ({"version": 1}, {"content_hash": "0" * 64}, {"preview_id": str(uuid4())},
+                             {"expires_at": "2099-01-01T00:00:00Z"}, {"user_action": "model_approved"}):
+            data = {**original, "client_request_id": str(uuid4()), **patch_fields}
+            self.assertEqual(self.action(order, "confirm", data)[0], 409)
+        status, next_view = self.action(order, "preview")
+        self.assertEqual(status, 200)
+        self.assertEqual(next_view["order"]["version"], 3)
+        self.assertEqual(self.action(order, "confirm", original)[0], 409)
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_expired_confirmation_is_never_submitted(self):
+        order = self.confirmed()
+        expires = datetime.fromisoformat(order["confirmation"]["expires_at"].replace("Z", "+00:00"))
+        self.extension._orders.clock = lambda: expires + timedelta(microseconds=1)
+        status, body = self.action(order, "submit")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "confirmation_expired")
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_every_snapshot_gate_is_enforced_again_before_submit(self):
+        for key, value in (("environment", "live"), ("execution_enabled", False), ("read_only", True),
+                           ("connected", False), ("data_complete", False), ("account_verified", False),
+                           ("permissions_verified", False), ("environment_verified", False), ("health_stale", True),
+                           ("session_id", "session-changed"), ("config_id", "b" * 64)):
+            with self.subTest(key=key):
+                order = self.confirmed()
+                original = self.broker.facts[key]
+                self.broker.facts[key] = value
+                try:
+                    self.assertIn(self.action(order, "submit")[0], (403, 409))
+                finally:
+                    self.broker.facts[key] = original
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_incomplete_what_if_cannot_be_confirmed_and_facade_absence_fails_closed(self):
+        order = self.create()
+        self.broker.preview_complete = False
+        status, body = self.action(order, "preview")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "preview_failed")
+        self.extension._orders.broker = object()
+        self.assertEqual(self.action(order, "preview")[0], 409)
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_unknown_prevents_replay_and_same_intent_new_request_after_restart(self):
+        order = self.confirmed()
+        request = self.action_data(order, "submit")
+        self.broker.submit_error = TimeoutError("DU_SECRET_ACCOUNT token=private")
+        first = self.action(order, "submit", request)
+        self.assertEqual(first[0], 200)
+        self.assertEqual(first[1]["order"]["state"], "unknown")
+        self.assertNotIn("DU_SECRET_ACCOUNT", json.dumps(first))
+        self.server.extension = TradingAPIExtension(self.broker, orders_path=self.path)
+        self.assertEqual(self.action(order, "submit", request), first)
+        self.assertEqual(self.request("POST", "/v1/orders", self.draft_data(), self.token)[0], 409)
+        self.broker.config_id = "b" * 64
+        self.broker.facts["config_id"] = self.broker.config_id
+        self.assertEqual(self.request("POST", "/v1/orders", self.draft_data(), self.token)[0], 409)
+        self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_crash_after_durable_submitting_recovers_unknown_without_retransmit(self):
+        order = self.confirmed()
+        request = self.action_data(order, "submit")
+        self.broker.submit_error = SystemExit("synthetic crash")
+        with self.assertRaises(SystemExit):
+            self.extension._orders.operate("submit", request, self.mac["device"], self.auth.server_id, order_id=order["id"])
+        self.server.extension = TradingAPIExtension(self.broker, orders_path=self.path)
+        status, body = self.request("GET", "/v1/orders/" + order["id"], token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"]["state"], "unknown")
+        self.assertEqual(self.action(order, "submit", request)[1]["order"]["state"], "unknown")
+        self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_concurrent_submit_retries_and_new_request_do_not_send_twice(self):
+        order = self.confirmed()
+        request = self.action_data(order, "submit")
+        entered, release = threading.Event(), threading.Event()
+        self.broker.submit_hook = lambda ref: (entered.set(), release.wait(3))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            first = pool.submit(self.action, order, "submit", request)
+            try:
+                self.assertTrue(entered.wait(2))
+                duplicate = self.action(order, "submit", request)
+                self.assertEqual(duplicate[0], 202)
+                self.assertEqual(duplicate[1]["order"]["state"], "submitting")
+                self.assertEqual(self.action(order, "submit")[0], 409)
+            finally:
+                release.set()
+            self.assertEqual(first.result()[1]["order"]["state"], "working")
+        self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_fill_wins_cancel_race_and_pending_cancel_does_not_claim_cancelled(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        self.broker.cancel_result["status"] = "cancel_pending"
+        status, body = self.action(order, "cancel")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"]["state"], "cancel_pending")
+        self.assertEqual(self.action(body["order"], "cancel")[1]["order"]["state"], "cancel_pending")
+        self.assertEqual(self.broker.calls["cancel"], 1)
+        self.extension._orders.apply_broker_update(order["id"], {"order_ref": order["id"], "status": "filled",
+            "broker_order_id": "123", "filled_quantity": 2, "average_fill_price": "10"})
+        self.extension._orders.apply_broker_update(order["id"], {"order_ref": order["id"], "status": "cancelled",
+            "broker_order_id": "123", "filled_quantity": 0})
+        latest = self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]["order"]
+        self.assertEqual((latest["state"], latest["filled_quantity"], latest["average_fill_price"]), ("filled", 2, "10"))
+
+    def test_partial_fill_and_broker_rejection_are_persisted(self):
+        self.broker.submit_result.update(status="partial", filled_quantity=1, average_fill_price="9.5")
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        self.assertEqual((order["state"], order["filled_quantity"]), ("partial", 1))
+        self.action(order, "cancel")
+        self.broker.submit_result.update(status="rejected", filled_quantity=0, average_fill_price=None)
+        rejected = self.action(self.confirmed(), "submit")[1]["order"]
+        self.assertEqual(rejected["state"], "rejected")
+        self.assertEqual(rejected["error_code"], "broker_rejected")
+
+    def test_fill_during_cancel_call_wins_late_cancelled_reply(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        self.broker.cancel_hook = lambda ref: self.extension._orders.apply_broker_update(ref, {
+            "order_ref": ref, "status": "filled", "broker_order_id": "123", "filled_quantity": 2,
+            "average_fill_price": "10"})
+        status, body = self.action(order, "cancel")
+        self.assertEqual(status, 200)
+        self.assertEqual((body["order"]["state"], body["order"]["filled_quantity"]), ("filled", 2))
+        self.assertEqual(self.broker.calls["cancel"], 1)
+
+    def test_ambiguous_and_mismatched_broker_results_cannot_claim_filled(self):
+        for index, patch_fields in enumerate(({"status": "unknown", "filled_quantity": 2}, {"order_ref": str(uuid4())},
+                                             {"status": "Filled"}, {"filled_quantity": True})):
+            with self.subTest(fields=patch_fields):
+                # Distinct economic intent so each uncertain result remains blocked.
+                data = self.draft_data()
+                data["limit_price"] = str(10 + index)
+                draft = self.create(data)
+                proposed = self.action(draft, "preview")[1]["order"]
+                order = self.action(proposed, "confirm")[1]["order"]
+                self.broker.submit_result = {"status": "working", "broker_order_id": "123", "filled_quantity": 0, **patch_fields}
+                result = self.action(order, "submit")[1]["order"]
+                self.assertEqual(result["state"], "unknown")
+                self.assertEqual(result["filled_quantity"], 0)
+
+    def test_owner_loop_cached_updates_match_context_and_persist_without_duplicate_events(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        record = {"order_ref": order["id"], "status": "filled", "broker_order_id": "123", "filled_quantity": 2,
+                  "average_fill_price": "9.5", "config_id": self.broker.config_id, "session_id": "wrong-session"}
+        self.broker.updates = [record]
+        path = "/v1/orders/" + order["id"]
+        self.assertEqual(self.request("GET", path, token=self.token)[1]["order"]["state"], "working")
+        record["session_id"] = self.broker.facts["session_id"]
+        first = self.request("GET", path, token=self.ios["token"])[1]
+        self.assertEqual(first["order"]["state"], "filled")
+        again = self.request("GET", path, token=self.token)[1]
+        self.assertEqual(first, again)
+        self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_http_domain_and_real_lifecycle_facade_integrate_with_offline_sdk(self):
+        from types import SimpleNamespace
+        from test_ibkr_execution import ExecutionClient, paper_config
+        from yolo_trading.ibkr_lifecycle import IBKRBrokerLifecycle
+
+        config, clients = paper_config(), []
+        def factory():
+            client = ExecutionClient()
+            clients.append(client)
+            return client
+        adapter = IBKRAdapter(config, client_factory=factory, contract_factory=SimpleNamespace, order_factory=SimpleNamespace)
+        lifecycle = IBKRBrokerLifecycle(adapter, poll_interval=.01)
+        self.addCleanup(lifecycle.close)
+        self.assertTrue(lifecycle.start())
+        deadline = time.monotonic() + 3
+        while not lifecycle.paper_order_snapshot()["execution_enabled"] and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(lifecycle.paper_order_snapshot()["execution_enabled"])
+        self.extension = TradingAPIExtension(lifecycle, orders_path=self.path)
+        self.server.extension = self.extension
+        data = self.draft_data()
+        data["account_selection"] = config.config_id
+        draft = self.create(data)
+        status, body = self.action(draft, "preview")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["preview"]["what_if"]["initial_margin_change"], "1000.00")
+        status, body = self.action(body["order"], "confirm")
+        self.assertEqual(status, 200, body)
+        status, body = self.action(body["order"], "submit")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["state"], "working")
+        status, body = self.action(body["order"], "cancel")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["order"]["state"], "cancel_pending")
+
+        def fill_on_owner_loop():
+            trade = clients[0].placed[0]
+            trade.orderStatus.status, trade.orderStatus.filled, trade.orderStatus.avgFillPrice = "Filled", 2, 10
+            clients[0].orderStatusEvent.emit(trade)
+        clients[0].loop.call_soon_threadsafe(fill_on_owner_loop)
+        deadline = time.monotonic() + 3
+        while lifecycle.orders_snapshot()[0]["status"] != "filled" and time.monotonic() < deadline:
+            time.sleep(.005)
+        latest = self.request("GET", "/v1/orders/" + draft["id"], token=self.ios["token"])[1]["order"]
+        self.assertEqual((latest["state"], latest["filled_quantity"]), ("filled", 2))
+        self.assertNotIn("DU123456", json.dumps(latest))
+        self.assertEqual((len(clients[0].placed), len(clients[0].cancelled)), (1, 1))
+        self.assertEqual(set(clients[0].access_threads), {clients[0].owner})
+
+    def test_revocation_during_final_snapshot_prevents_broker_submit(self):
+        order = self.confirmed()
+        count = [0]
+        def revoke_on_final_check():
+            count[0] += 1
+            if count[0] == 2:
+                self.auth.revoke(self.mac["device"], self.mac["device"]["id"])
+        self.broker.snapshot_hook = revoke_on_final_check
+        status, body = self.action(order, "submit")
+        self.assertEqual(status, 403)
+        self.assertEqual(body["error"]["code"], "permission_revoked")
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_malicious_fields_limits_live_and_unsupported_actions_are_rejected(self):
+        for fields in ({"quantity": True}, {"quantity": 1.0}, {"quantity": 0}, {"quantity": 100001},
+                       {"limit_price": 1.25}, {"limit_price": "NaN"}, {"limit_price": "1e3"},
+                       {"limit_price": "-1"}, {"limit_price": "1000001"}, {"tif": "GTC"},
+                       {"order_type": "MKT"}, {"account_selection": "DU_SECRET_ACCOUNT"},
+                       {"contract": {"symbol": "AAPL", "sec_type": "OPT", "exchange": "SMART", "currency": "USD"}},
+                       {"transmit": True}, {"approved": True}, {"capabilities": ["trade"]}):
+            with self.subTest(fields=fields):
+                self.assertEqual(self.request("POST", "/v1/orders", {**self.draft_data(), **fields}, self.token)[0], 400)
+        self.assertEqual(self.request("POST", "/v1/orders", {**self.draft_data(), "environment": "live"}, self.token)[0], 403)
+        for path in ("/v1/orders/cancel-all", "/v1/orders/modify", "/v1/automations", "/v1/trades"):
+            self.assertEqual(self.request("POST", path, {}, self.token)[0], 403)
+        self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_strict_json_rejects_duplicates_nonfinite_surrogates_and_size(self):
+        for body in (b'{"client_request_id":"a","client_request_id":"b"}', b'{"quantity":NaN}',
+                     b'{"price":Infinity}', b'[]', b'null', b'{"x":"\\ud800"}', b'{"x":"\xff"}',
+                     b'{"contract":{"symbol":"AAPL","symbol":"MSFT"}}'):
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            try:
+                connection.request("POST", "/v1/orders", body, {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400, body)
+                response.read()
+            finally:
+                connection.close()
+        self.assertEqual(self.request("POST", "/v1/orders", {"huge": "x" * 65537}, self.token)[0], 413)
+
+    def test_schema_migration_and_private_db_do_not_modify_chat_tables(self):
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'paper_%'").fetchall(), [])
+        legacy = self.root / "empty-v0.sqlite3"
+        with closing(sqlite3.connect(legacy)) as db, db:
+            db.execute("CREATE TABLE paper_schema(version INTEGER NOT NULL)")
+            db.execute("INSERT INTO paper_schema VALUES (0)")
+        PaperOrderStore(legacy)
+        with closing(sqlite3.connect(legacy)) as db, db:
+            self.assertEqual(db.execute("SELECT version FROM paper_schema").fetchone()[0], 1)
+            db.execute("UPDATE paper_schema SET version=99")
+        with self.assertRaises(RuntimeError):
+            TradingAPIExtension(self.broker, orders_path=legacy)
 
 
 if __name__ == "__main__":

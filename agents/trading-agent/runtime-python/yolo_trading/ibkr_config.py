@@ -75,10 +75,12 @@ class IBKRConfig:
             raise IBKRConfigurationError("invalid_client_id", "client_id 必须为正整数；第一阶段禁止自动绑定订单的 client ID 0。")
         read_only = _boolean(self.read_only, "read_only")
         execution_enabled = _boolean(self.execution_enabled, "execution_enabled")
-        if execution_enabled:
-            raise IBKRConfigurationError("execution_not_supported", "IBKR 第一阶段仅支持只读，paper/live 均禁止开启执行。")
-        if not read_only:
-            raise IBKRConfigurationError("read_only_required", "IBKR 第一阶段要求 read_only=true。")
+        if execution_enabled and self.environment != "paper":
+            raise IBKRConfigurationError("execution_not_supported", "live 永远禁止执行；模拟执行必须显式选择 paper。")
+        if execution_enabled and read_only:
+            raise IBKRConfigurationError("execution_requires_writable_paper", "模拟执行还需显式设置 read_only=false。")
+        if not read_only and not execution_enabled:
+            raise IBKRConfigurationError("read_only_required", "未显式开启模拟执行时必须保持 read_only=true。")
         if self.account is not None and (
             not isinstance(self.account, str) or not self.account or len(self.account) > 64
             or not self.account.isascii() or not self.account.isalnum()
@@ -98,6 +100,10 @@ class IBKRConfig:
             object.__setattr__(self, key, value)
 
     @property
+    def paper_execution_enabled(self):
+        return self.environment == "paper" and self.execution_enabled and not self.read_only
+
+    @property
     def config_id(self):
         values = {item.name: getattr(self, item.name) for item in fields(self) if not item.name.startswith("_")}
         return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
@@ -107,7 +113,7 @@ class IBKRConfig:
         return {"config_id": self.config_id, "environment": self.environment,
                 "host": self.host, "port": self.port, "client_id": self.client_id,
                 "read_only": self.read_only, "execution_enabled": self.execution_enabled,
-                "execution_supported": False, "account_configured": self.account is not None,
+                "execution_supported": self.environment == "paper", "account_configured": self.account is not None,
                 "connect_timeout": self.connect_timeout, "sources": dict(self._sources)}
 
 

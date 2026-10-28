@@ -1,7 +1,8 @@
-"""Run the Yolo Agents trading host; IBKR remains explicitly read-only."""
+"""Run the Yolo Agents trading host with opt-in Paper-only IBKR execution."""
 
 import json
 import os
+from pathlib import Path
 import sys
 
 from yolo_agents.host import create_parser, run_host, validate_host_arguments
@@ -53,9 +54,12 @@ def run_trading_host(args, broker) -> int:
     """Keep the broker private to this Agent and close it on every Host exit."""
     lifecycle = IBKRBrokerLifecycle(broker) if broker is not None else None
     try:
+        data_dir = getattr(args, "data_dir", None)
+        orders_path = Path(data_dir).expanduser().resolve() / "paper-orders.sqlite3" if data_dir is not None else None
+        extension = TradingAPIExtension(lifecycle, orders_path=orders_path)
         if lifecycle is not None:
             lifecycle.start()
-        return run_host(args, extension=TradingAPIExtension(lifecycle), agent_name="trading-agent")
+        return run_host(args, extension=extension, agent_name="trading-agent")
     finally:
         if lifecycle is not None and not lifecycle.close():
             print("IBKR background shutdown could not be confirmed; check Gateway and Host process.", file=sys.stderr)

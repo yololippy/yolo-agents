@@ -28,7 +28,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.port, port)
             self.assertIs(config.read_only, True)
             self.assertIs(config.execution_enabled, False)
-            self.assertFalse(config.audit()["execution_supported"])
+            self.assertEqual(config.audit()["execution_supported"], environment == "paper")
 
     def test_custom_ports_never_change_environment(self):
         for environment, port in (("paper", 4001), ("live", 4002), ("live", 43123)):
@@ -72,15 +72,26 @@ class ConfigurationTests(unittest.TestCase):
                            overrides={"environment": "paper", "client_id": 27})
         self.assertEqual((config.account, config.port, config.client_id), ("DUexample", 49123, 27))
 
-    def test_both_environments_reject_execution_and_writable_mode(self):
+    def test_execution_requires_all_three_explicit_paper_flags(self):
         for environment in ("paper", "live"):
-            for field, value, code in (("execution_enabled", True, "execution_not_supported"),
-                                       ("execution_enabled", "true", "execution_not_supported"),
-                                       ("read_only", False, "read_only_required")):
-                with self.subTest(environment=environment, field=field):
-                    with self.assertRaises(IBKRConfigurationError) as failure:
-                        self.load({"environment": environment}, overrides={field: value})
-                    self.assertEqual(failure.exception.code, code)
+            for execution in (False, True):
+                for readonly in (False, True):
+                    with self.subTest(environment=environment, execution=execution, readonly=readonly):
+                        profile = {"environment": environment, "execution_enabled": execution, "read_only": readonly}
+                        allowed = (readonly and not execution) or (environment == "paper" and execution and not readonly)
+                        if allowed:
+                            config = self.load(profile)
+                            self.assertEqual(config.paper_execution_enabled, execution)
+                        else:
+                            with self.assertRaises(IBKRConfigurationError):
+                                self.load(profile)
+
+    def test_environment_switch_discards_execution_authorization(self):
+        config = self.load({"environment": "paper", "account": "DU123456", "execution_enabled": True,
+                            "read_only": False}, overrides={"environment": "live"})
+        self.assertFalse(config.execution_enabled)
+        self.assertTrue(config.read_only)
+        self.assertIsNone(config.account)
 
     def test_config_rejects_ambiguous_numbers_and_booleans(self):
         cases = {"port": [0, 65536, True, "4e3", 4002.0, "9" * 5000],
