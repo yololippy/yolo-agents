@@ -231,6 +231,12 @@ public final class ChatModel: ObservableObject {
         try Task.checkCancellation()
         if generation != attempt { throw CancellationError() }
     }
+    private func isCancellation(_ error: Error) -> Bool {
+        if Task.isCancelled || error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        let error = error as NSError
+        return error.domain == NSURLErrorDomain && error.code == URLError.Code.cancelled.rawValue
+    }
     private func commit(_ next: ClientState) throws {
         guard let connection, next != state else { return }
         try repository.saveState(next, for: connection)
@@ -287,7 +293,7 @@ public final class ChatModel: ObservableObject {
             try check(attempt)
             var next = state; next.upsertConversation(updated); try commit(next)
         } catch {
-            guard generation == attempt, !(error is CancellationError) else { return }
+            guard generation == attempt, !isCancellation(error) else { return }
             // Catalog selection is not proof of provider entitlement. Preserve the
             // current model and show the actual server error when selection fails.
             errorMessage = error.localizedDescription
@@ -347,7 +353,7 @@ public final class ChatModel: ObservableObject {
         }
     }
     private func handle(_ error: Error, attempt: UUID) {
-        guard generation == attempt, !(error is CancellationError) else { return }
+        guard generation == attempt, !isCancellation(error) else { return }
         errorMessage = error.localizedDescription
         if let error = error as? ClientError, error.requiresPairing {
             synchronizationTask?.cancel(); synchronizationTask = nil

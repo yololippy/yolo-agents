@@ -27,11 +27,13 @@ private actor UIHTTP: HTTPTransport {
     let catalogError: Bool
     let rejectModel: Bool
     private var missedEvent: ServerEvent?
+    private var messageErrorCode: URLError.Code?
     private(set) var cursors: [Int64] = []
     init(catalogError: Bool = false, rejectModel: Bool = false) {
         self.catalogError = catalogError; self.rejectModel = rejectModel
     }
     func setMissed(_ event: ServerEvent) { missedEvent = event }
+    func setMessageError(_ code: URLError.Code?) { messageErrorCode = code }
     func send(_ request: URLRequest) async throws -> HTTPResult {
         let path = request.url!.path
         let json: String
@@ -43,6 +45,7 @@ private actor UIHTTP: HTTPTransport {
         } else if path == "/v1/conversations" {
             json = "{\"conversations\":[\(conversationJSON)]}"
         } else if path.hasSuffix("/messages") {
+            if let messageErrorCode { throw URLError(messageErrorCode) }
             json = "{\"messages\":[]}"
         } else if path == "/v1/events" {
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
@@ -154,6 +157,36 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     #expect(model.selectedConversation?.model == "model-a")
     #expect(model.errorMessage?.contains("服务端拒绝此模型") == true)
     #expect(model.isOnline)
+}
+
+@Test @MainActor func cancelledConversationLoadDoesNotShowAnErrorAlert() async throws {
+    let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+    let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
+    let http = UIHTTP()
+    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = ChatModel(repository: repository, transport: http, streamTransport: streams)
+    defer { model.setActive(false) }
+    await model.start()
+    try await waitUntil { model.isOnline }
+    await http.setMessageError(.cancelled)
+    await model.loadSelectedMessages()
+    #expect(model.errorMessage == nil)
+    #expect(model.isOnline)
+}
+
+@Test @MainActor func failedConversationLoadStillShowsTheRealError() async throws {
+    let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+    let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
+    let http = UIHTTP()
+    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = ChatModel(repository: repository, transport: http, streamTransport: streams)
+    defer { model.setActive(false) }
+    await model.start()
+    try await waitUntil { model.isOnline }
+    await http.setMessageError(.notConnectedToInternet)
+    await model.loadSelectedMessages()
+    #expect(model.errorMessage != nil)
+    #expect(model.errorMessage != URLError(.cancelled).localizedDescription)
 }
 
 @Test @MainActor func inactiveStartupRestoresHistoryWithoutOpeningAStream() async throws {
