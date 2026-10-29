@@ -5,6 +5,17 @@ import YoloAgentsSDK
 // exports a same-named macro whose plugin is absent from Command Line Tools.
 private typealias ViewState<Value> = SwiftUI.State<Value>
 
+struct ConversationRenameRequest: Identifiable, Equatable {
+    let id = UUID()
+    let conversation: Conversation
+    let initialTitle: String
+
+    init(_ conversation: Conversation) {
+        self.conversation = conversation
+        initialTitle = conversation.title
+    }
+}
+
 public struct YoloAgentsRootView: View {
     @StateObject private var model: ChatModel
     @Environment(\.scenePhase) private var scenePhase
@@ -173,8 +184,7 @@ private struct ChatShell: View {
     @ViewState private var showSettings = false
     @ViewState private var showAccount = false
     @ViewState private var selectedFeature: ChatFeature?
-    @ViewState private var renaming: Conversation? = nil
-    @ViewState private var newTitle = ""
+    @ViewState private var renameRequest: ConversationRenameRequest? = nil
     @ViewState private var drafts = ComposerDrafts()
     private var conversations: [Conversation] {
         model.state.conversations.filter {
@@ -200,7 +210,7 @@ private struct ChatShell: View {
                             }.padding(.vertical, 4)
                         }
                         .contextMenu {
-                            Button("重命名") { newTitle = conversation.title; renaming = conversation }
+                            Button("重命名") { renameRequest = ConversationRenameRequest(conversation) }
                                 .disabled(!model.isOnline)
                             Button(conversation.archived ? "取消归档" : "归档") {
                                 Task { await model.updateConversation(conversation, archived: !conversation.archived) }
@@ -241,16 +251,63 @@ private struct ChatShell: View {
                 ChatGPTAccountView(connection: connection, identity: model.identity) { Task { await model.refreshModels() } }
             }
         }
-        .alert("重命名会话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-            TextField("会话名称", text: $newTitle)
-            Button("保存") {
-                if let conversation = renaming {
-                    Task { await model.updateConversation(conversation, title: newTitle.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                }
-                renaming = nil
-            }.disabled(newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("取消", role: .cancel) { renaming = nil }
+        .sheet(item: $renameRequest) { request in
+            ConversationRenameView(request: request) { title in
+                renameRequest = nil
+                Task { await model.updateConversation(request.conversation, title: title) }
+            } onCancel: {
+                renameRequest = nil
+            }
         }
+    }
+}
+
+private struct ConversationRenameView: View {
+    let request: ConversationRenameRequest
+    let onSave: (String) -> Void
+    let onCancel: () -> Void
+    @ViewState private var title: String
+    @FocusState private var titleFocused: Bool
+
+    init(request: ConversationRenameRequest, onSave: @escaping (String) -> Void,
+         onCancel: @escaping () -> Void) {
+        self.request = request
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _title = ViewState(initialValue: request.initialTitle)
+    }
+
+    private var normalizedTitle: String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("会话名称", text: $title)
+                    .focused($titleFocused)
+                    .onSubmit(save)
+            }
+            .formStyle(.grouped)
+            .navigationTitle("重命名会话")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消", action: onCancel) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存", action: save).disabled(normalizedTitle.isEmpty)
+                }
+            }
+        }
+        .onAppear { titleFocused = true }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 180)
+        #else
+        .presentationDetents([.medium])
+        #endif
+    }
+
+    private func save() {
+        guard !normalizedTitle.isEmpty else { return }
+        onSave(normalizedTitle)
     }
 }
 

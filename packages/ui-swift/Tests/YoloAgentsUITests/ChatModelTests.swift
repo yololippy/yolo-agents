@@ -10,6 +10,18 @@ private let conversationJSON = """
 {"id":"\(testConversationID)","title":"Fixture","model":"model-a","archived":false,
 "created_at":"2026-10-27T00:00:00Z","updated_at":"2026-10-27T00:00:00Z"}
 """
+
+@Test func everyRenameRequestStartsWithTheLatestConversationTitle() {
+    let now = Date()
+    var conversation = Conversation(id: testConversationID, title: "第一次名称", createdAt: now, updatedAt: now)
+    let first = ConversationRenameRequest(conversation)
+    conversation.title = "第二次名称"
+    let second = ConversationRenameRequest(conversation)
+
+    #expect(first.initialTitle == "第一次名称")
+    #expect(second.initialTitle == "第二次名称")
+    #expect(first.id != second.id)
+}
 private final class UIStore: SecureStore, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]
