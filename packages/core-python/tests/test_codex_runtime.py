@@ -393,10 +393,12 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual("".join(trading.stream_reply(second, self.cid)), "Hello world")
         new = json.loads(self.store.get_agent_state(self.cid))
         self.assertEqual(len(self.requests("thread/start")), 2)
-        self.assertEqual(self.requests("thread/start")[-1]["params"]["dynamicTools"], [])
+        self.assertEqual({tool["name"] for tool in self.requests("thread/start")[-1]["params"]["dynamicTools"]},
+                         {"create_paper_order_draft", "get_market_quote", "list_positions",
+                          "list_open_orders", "get_open_order"})
         self.assertIn("paper-order-proposal",
                       self.requests("thread/start")[-1]["params"]["developerInstructions"])
-        self.assertEqual(new["tool_schema_version"], 3)
+        self.assertEqual(new["tool_schema_version"], 4)
         rebuilt = [e for e in self.store.list_events() if e["type"] == "agent.thread.rebuilt"]
         self.assertEqual(rebuilt[-1]["payload"]["reason"], "tool_schema_changed")
 
@@ -489,7 +491,9 @@ class CodexRuntimeTests(unittest.TestCase):
         })
         self.assertEqual(calls[0]["proposal"]["limit_price"], "250")
         start = self.requests("thread/start")[-1]["params"]
-        self.assertEqual(start["dynamicTools"], [])
+        self.assertEqual({tool["name"] for tool in start["dynamicTools"]},
+                         {"create_paper_order_draft", "get_market_quote", "list_positions",
+                          "list_open_orders", "get_open_order"})
         self.assertIn("paper-order-proposal", start["developerInstructions"])
         self.assertNotIn("tool_response", json.dumps(self.requests()))
 

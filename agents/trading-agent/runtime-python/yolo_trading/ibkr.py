@@ -7,7 +7,7 @@ must explicitly await connect(). Execution is opt-in Paper only; no live orders.
 import argparse
 import asyncio
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from datetime import datetime, timezone
 import importlib
 import importlib.util
@@ -63,6 +63,29 @@ def _intent(value):
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value) is None:
         raise IBKROperationError("invalid_intent_id", "需要稳定的 1～64 位 ASCII intent_id。")
     return value
+
+
+def _symbol(value):
+    if not isinstance(value, str):
+        raise IBKROperationError("invalid_symbol", "股票代码必须是明确的 ASCII 股票标识。")
+    result = value.strip().upper()
+    if re.fullmatch(r"[A-Z][A-Z0-9.]{0,14}", result) is None:
+        raise IBKROperationError("invalid_symbol", "股票代码必须是明确的 ASCII 股票标识。")
+    return result
+
+
+def _decimal_text(value, *, positive=False, nonnegative=False):
+    number = _number(value)
+    if number is None or (positive and number <= 0) or (nonnegative and number < 0):
+        return None
+    return format(number.normalize(), "f")
+
+
+def _broker_amount_text(value):
+    """Keep broker decimal spelling unless a binary float leaked extra noise."""
+    if value.as_tuple().exponent < -8:
+        value = value.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN).normalize()
+    return format(value, "f")
 
 
 def _is_supported_paper_account(account):
@@ -126,7 +149,8 @@ class IBKRAdapter:
         self._events = []
         self._session_id = None
         self._environment_verified = False
-        self._reads = {name: False for name in ("account", "positions", "open_orders", "executions", "account_summary")}
+        self._reads = {name: False for name in (
+            "account", "positions", "open_orders", "completed_orders", "executions", "account_summary")}
         self._positions = []
         self._previews = {}
         self._connection_generation = 0
@@ -485,7 +509,7 @@ class IBKRAdapter:
             self._fail("gateway_unavailable", "connection_lost", "Gateway 在启动对账完成前断开。")
             return False
         values = {name: value for name, _, value, _ in results}
-        self._reconcile_tracked_orders(values["open_orders"], values["executions"])
+        self._reconcile_tracked_orders(values["open_orders"], values["completed_orders"], values["executions"])
         positions = next(value for name, _, value, _ in results if name == "positions")
         self._positions = [row for row in positions if getattr(row, "account", None) == self._config.account]
         self._ready_generation = reconciliation_generation
@@ -499,6 +523,7 @@ class IBKRAdapter:
     async def _reconcile(self, client, connection_generation, reconciliation_generation):
         methods = (("positions", "reqPositionsAsync", ()),
                    ("open_orders", "reqAllOpenOrdersAsync", ()),
+                   ("completed_orders", "reqCompletedOrdersAsync", (False,)),
                    ("executions", "reqExecutionsAsync", ()),
                    ("account_summary", "accountSummaryAsync", (self._config.account,)))
         async def read(name, method, args):
@@ -535,6 +560,151 @@ class IBKRAdapter:
             self._state, self._error = "reconciling", None
             await self._verify_and_reconcile(client, connection_generation)
             return self.health()
+
+    def _read_guard(self):
+        self._assert_owner()
+        health = self.health()
+        if (self._client is None or not health.get("connected") or not health.get("ready")
+                or not health.get("data_complete") or not self._account_verified):
+            raise IBKROperationError("broker_not_ready", "IBKR 连接或启动对账尚未就绪。")
+        if self.config.account not in self._client.managedAccounts():
+            self._account_verified = False
+            raise IBKROperationError("account_mismatch", "当前连接不再包含目标账户。")
+
+    @staticmethod
+    def _position_row(row):
+        contract = getattr(row, "contract", None)
+        quantity = _decimal_text(getattr(row, "position", None))
+        average_cost = _decimal_text(getattr(row, "avgCost", None), nonnegative=True)
+        symbol = getattr(contract, "symbol", None)
+        con_id = getattr(contract, "conId", None)
+        sec_type = getattr(contract, "secType", None)
+        currency = getattr(contract, "currency", None)
+        exchange = getattr(contract, "exchange", None) or getattr(contract, "primaryExchange", None)
+        if (not isinstance(symbol, str) or not symbol or type(con_id) is not int or con_id <= 0
+                or not isinstance(sec_type, str) or not sec_type or not isinstance(currency, str)
+                or not currency or quantity is None or average_cost is None):
+            return None
+        return {"symbol": symbol[:32], "con_id": con_id, "sec_type": sec_type[:12],
+                "exchange": exchange[:24] if isinstance(exchange, str) and exchange else None,
+                "currency": currency[:8], "quantity": quantity, "average_cost": average_cost}
+
+    @staticmethod
+    def _open_order_row(trade):
+        contract, order = getattr(trade, "contract", None), getattr(trade, "order", None)
+        status = getattr(trade, "orderStatus", None)
+        broker_id = getattr(order, "orderId", None)
+        symbol = getattr(contract, "symbol", None)
+        side = getattr(order, "action", None)
+        quantity = _decimal_text(getattr(order, "totalQuantity", None), positive=True)
+        limit_price = _decimal_text(getattr(order, "lmtPrice", None), positive=True)
+        filled = _decimal_text(getattr(status, "filled", 0), nonnegative=True)
+        remaining = _decimal_text(getattr(status, "remaining", None), nonnegative=True)
+        average = _decimal_text(getattr(status, "avgFillPrice", None), nonnegative=True)
+        if (type(broker_id) is not int or broker_id <= 0 or not isinstance(symbol, str) or not symbol
+                or side not in ("BUY", "SELL") or quantity is None or limit_price is None
+                or filled is None):
+            return None
+        return {
+            "broker_order_id": str(broker_id), "symbol": symbol[:32], "side": side,
+            "quantity": quantity, "filled_quantity": filled, "remaining_quantity": remaining,
+            "limit_price": limit_price, "average_fill_price": average,
+            "status": str(getattr(status, "status", "Unknown"))[:32],
+            "order_type": str(getattr(order, "orderType", ""))[:12],
+            "tif": str(getattr(order, "tif", ""))[:12],
+            "outside_rth": getattr(order, "outsideRth", None) is True,
+            "con_id": getattr(contract, "conId", None) if type(getattr(contract, "conId", None)) is int else None,
+            "exchange": (getattr(contract, "exchange", None) or None),
+            "currency": (getattr(contract, "currency", None) or None),
+        }
+
+    async def market_quote(self, symbol, *, timeout=5.0):
+        """Return entitlement-aware top-of-book data without paid snapshots."""
+        self._assert_owner()
+        symbol, timeout = _symbol(symbol), _timeout(timeout)
+        async with self._lock:
+            self._read_guard()
+            contract = await self._qualify({"symbol": symbol}, timeout)
+            self._read_guard()
+            ticker = None
+            try:
+                # Delayed mode is free where IBKR offers it.  Subscribed symbols
+                # still return live data and identify themselves as type 1.
+                self._client.reqMarketDataType(3)
+                ticker = self._client.reqMktData(contract, "", False, False)
+                deadline = asyncio.get_running_loop().time() + timeout
+                values = None
+                while asyncio.get_running_loop().time() < deadline:
+                    data_type = getattr(ticker, "marketDataType", None)
+                    values = {name: _decimal_text(getattr(ticker, name, None), positive=True)
+                              for name in ("bid", "ask", "last", "close")}
+                    if data_type in (1, 2, 3, 4) and any(values.values()):
+                        break
+                    await asyncio.sleep(min(0.05, max(0.001, deadline - asyncio.get_running_loop().time())))
+                else:
+                    raise IBKROperationError("market_data_unavailable", "在时限内未收到可用行情。")
+                labels = {1: "live", 2: "frozen", 3: "delayed", 4: "delayed_frozen"}
+                return {"symbol": symbol, "con_id": contract.conId, "exchange": contract.exchange,
+                        "currency": contract.currency, "data_type": labels[data_type], **values,
+                        "as_of": datetime.now(timezone.utc).isoformat()}
+            except IBKROperationError:
+                raise
+            except Exception:
+                raise IBKROperationError("market_data_unavailable", "行情请求失败；未产生付费快照。") from None
+            finally:
+                if ticker is not None:
+                    try:
+                        self._client.cancelMktData(contract)
+                    except Exception:
+                        pass
+
+    async def positions_detail(self, *, timeout=5.0):
+        self._assert_owner()
+        timeout = _timeout(timeout)
+        async with self._lock:
+            self._read_guard()
+            try:
+                rows = await asyncio.wait_for(self._client.reqPositionsAsync(), timeout)
+            except Exception:
+                raise IBKROperationError("positions_unavailable", "持仓读取失败或超时。") from None
+            if not isinstance(rows, (list, tuple)):
+                raise IBKROperationError("positions_unavailable", "持仓返回格式无效。")
+            result = [self._position_row(row) for row in rows
+                      if getattr(row, "account", None) == self.config.account]
+            result = sorted((row for row in result if row is not None), key=lambda row: (row["symbol"], row["con_id"]))[:500]
+            return {"positions": result, "count": len(result), "as_of": datetime.now(timezone.utc).isoformat()}
+
+    async def open_orders_detail(self, *, broker_order_id=None, timeout=5.0):
+        self._assert_owner()
+        timeout = _timeout(timeout)
+        if broker_order_id is not None:
+            if (not isinstance(broker_order_id, str) or not broker_order_id.isascii()
+                    or not broker_order_id.isdecimal() or str(int(broker_order_id)) != broker_order_id):
+                raise IBKROperationError("invalid_broker_order_id", "券商订单 ID 必须是正整数字符串。")
+        async with self._lock:
+            self._read_guard()
+            try:
+                rows = await asyncio.wait_for(self._client.reqAllOpenOrdersAsync(), timeout)
+            except Exception:
+                raise IBKROperationError("open_orders_unavailable", "挂单读取失败或超时。") from None
+            if not isinstance(rows, (list, tuple)):
+                raise IBKROperationError("open_orders_unavailable", "挂单返回格式无效。")
+            normalized = []
+            for trade in rows:
+                if getattr(getattr(trade, "order", None), "account", None) != self.config.account:
+                    continue
+                row = self._open_order_row(trade)
+                if row is not None:
+                    normalized.append(row)
+            normalized.sort(key=lambda row: int(row["broker_order_id"]))
+            normalized = normalized[:500]
+            now = datetime.now(timezone.utc).isoformat()
+            if broker_order_id is not None:
+                order = next((row for row in normalized if row["broker_order_id"] == broker_order_id), None)
+                if order is None:
+                    raise IBKROperationError("open_order_not_found", "未找到该账户当前有效的挂单。")
+                return {"order": order, "as_of": now}
+            return {"orders": normalized, "count": len(normalized), "as_of": now}
 
     async def disconnect(self):
         self._assert_owner()
@@ -652,7 +822,8 @@ class IBKRAdapter:
                         and getattr(state, "status", "") not in ("Inactive", "Cancelled", "ApiCancelled"))
             result = {"qualified_contract": self._contract_snapshot(contract), "context": dict(context),
                       "what_if": {"complete": complete, "accepted": bool(accepted), "currency": currency if currency == "USD" else None,
-                                  **{key: format(value, "f") if value is not None else None for key, value in numbers.items()}}}
+                                  **{key: _broker_amount_text(value) if value is not None else None
+                                     for key, value in numbers.items()}}}
             if not accepted:
                 raise IBKROperationError("what_if_incomplete", "What-if 不完整、有警告或未获接受，禁止提交。")
             self._previews[reference] = {"request": request, "contract": contract, "result": deepcopy(result),
@@ -1025,10 +1196,12 @@ class IBKRAdapter:
             record["executions"][exec_id]["commission"] = format(commission, "f")
             self._record_event(record, kind)
 
-    def _reconcile_tracked_orders(self, open_orders, executions):
+    def _reconcile_tracked_orders(self, open_orders, completed_orders, executions):
         """Normalize active-query facts through the same order state machine as events."""
         for trade in open_orders:
             self._observe_open_order(trade, "reconcile_open_order")
+        for trade in completed_orders:
+            self._observe_open_order(trade, "reconcile_completed_order")
         for fill in executions:
             record = self._record_for_execution(fill)
             if record is not None:

@@ -79,7 +79,11 @@ class ExecutionClient(Client):
         self.read_failure = None
         self.place_mode = "ack"
         self.open_orders, self.execution_rows = [], []
+        self.positions = []
         self.placed, self.cancelled, self.whatifs, self.qualifications = [], [], [], []
+        self.market_data_types, self.market_requests, self.market_cancellations = [], [], []
+        self.ticker = NS(marketDataType=1, bid=Decimal("99.90"), ask=Decimal("100.10"),
+                         last=Decimal("100"), close=Decimal("98.50"))
 
     def touch(self):
         self.access_threads.append(threading.get_ident())
@@ -110,10 +114,15 @@ class ExecutionClient(Client):
         return result
 
     async def reqPositionsAsync(self):
-        return await self.rows("positions", [])
+        return await self.rows("positions", self.positions)
 
     async def reqAllOpenOrdersAsync(self):
         return await self.rows("open_orders", self.open_orders)
+
+    async def reqCompletedOrdersAsync(self, api_only):
+        if api_only is not False:
+            raise AssertionError("completed-order reconciliation must include all API clients")
+        return await self.rows("completed_orders", self.completed_orders)
 
     async def reqExecutionsAsync(self):
         return await self.rows("executions", self.execution_rows)
@@ -125,6 +134,16 @@ class ExecutionClient(Client):
         self.touch()
         self.qualifications.append(query)
         return self.details
+
+    def reqMarketDataType(self, value):
+        self.touch(); self.market_data_types.append(value)
+
+    def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
+        self.touch(); self.market_requests.append((contract, genericTickList, snapshot, regulatorySnapshot))
+        return self.ticker
+
+    def cancelMktData(self, contract):
+        self.touch(); self.market_cancellations.append(contract)
 
     async def whatIfOrderAsync(self, contract, order):
         self.touch()
@@ -211,6 +230,40 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.calls[0][1]["readonly"])
         self.assertNotIn("DU123456", json.dumps(value))
 
+    async def test_market_quote_reports_entitlement_type_and_never_requests_paid_snapshot(self):
+        quote = await self.broker.market_quote("aapl")
+        self.assertEqual(quote["symbol"], "AAPL")
+        self.assertEqual((quote["bid"], quote["ask"], quote["last"]), ("99.9", "100.1", "100"))
+        self.assertEqual(quote["data_type"], "live")
+        self.assertEqual(self.client.market_data_types, [3])
+        self.assertEqual(self.client.market_requests[0][1:], ("", False, False))
+        self.assertEqual(len(self.client.market_cancellations), 1)
+        self.assertNotIn("DU123456", json.dumps(quote))
+
+    async def test_position_details_are_target_scoped_and_account_redacted(self):
+        self.client.positions = [
+            NS(account="DU123456", contract=self.client.contract, position=Decimal("2"), avgCost=Decimal("101.25")),
+            NS(account="DU654321", contract=self.client.contract, position=Decimal("9"), avgCost=Decimal("1")),
+        ]
+        result = await self.broker.positions_detail()
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["positions"][0]["quantity"], "2")
+        self.assertEqual(result["positions"][0]["average_cost"], "101.25")
+        self.assertNotIn("DU123456", json.dumps(result))
+
+    async def test_open_order_list_and_detail_are_target_scoped_and_normalized(self):
+        own = open_trade(self.client, self.config, "order-ref", order_id=321)
+        own.orderStatus.remaining = 10
+        foreign = open_trade(self.client, self.config, "foreign", order_id=322, account="DU654321")
+        foreign.orderStatus.remaining = 10
+        self.client.open_orders = [foreign, own]
+        listing = await self.broker.open_orders_detail()
+        detail = await self.broker.open_orders_detail(broker_order_id="321")
+        self.assertEqual(listing["count"], 1)
+        self.assertEqual(listing["orders"][0]["broker_order_id"], "321")
+        self.assertEqual(detail["order"], listing["orders"][0])
+        self.assertNotIn("DU123456", json.dumps(listing))
+
     async def test_what_if_uses_complete_contract_but_never_submits(self):
         result = await self.preview()
         contract, order = self.client.whatifs[0]
@@ -220,6 +273,12 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(order.transmit)
         self.assertEqual(result["what_if"]["commission"], "1.00")
         self.assertEqual(self.client.placed, [])
+
+    async def test_what_if_rounds_only_binary_float_noise_to_bounded_decimal_text(self):
+        self.client.state.initMarginChange = 133.22999999999996
+        result = await self.preview("float-noise")
+        self.assertEqual(result["what_if"]["initial_margin_change"], "133.23")
+        self.assertEqual(result["what_if"]["commission"], "1.00")
 
     async def test_submit_once_binds_order_ref_and_returns_broker_ack(self):
         preview = await self.preview()
@@ -387,7 +446,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         row = self.broker.orders_snapshot()[0]
         self.assertEqual(self.client.read_calls[before_reads:],
-                         ["positions", "open_orders", "executions", "account_summary"])
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"])
         self.assertEqual((row["status"], row["filled_quantity"], row["average_fill_price"]),
                          ("filled", 10, "101.2"))
         self.assertEqual(row["executions"]["recover-1"]["commission"], "0.4")
@@ -418,6 +477,22 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                                                  preview=preview, context=self.ctx)
         self.assertEqual(failure.exception.code, "unresolved_order")
         self.assertEqual(len(self.client.placed), 1)
+
+    async def test_completed_order_reconciliation_resolves_unknown_before_next_submit(self):
+        await self.submit()
+        completed = deepcopy(self.client.placed[0])
+        completed.orderStatus = NS(status="Cancelled", filled=0, remaining=10, avgFillPrice=0,
+                                   permId=completed.order.permId)
+        await self.broker.disconnect()
+        self.client.open_orders = []
+        self.client.execution_rows = []
+        self.client.completed_orders = [completed]
+        await self.broker.connect()
+        self.ctx = context(self.broker)
+        self.assertEqual(self.broker.orders_snapshot()[0]["status"], "cancelled")
+        result = await self.submit("after-completed-reconciliation")
+        self.assertEqual(result["status"], "working")
+        self.assertEqual(len(self.client.placed), 2)
 
     async def test_process_restart_learns_missing_broker_id_only_from_exact_open_order(self):
         reference = str(uuid4())
@@ -701,7 +776,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             await self.preview("new-intent")
 
     async def test_each_failed_startup_read_blocks_preview_and_submission(self):
-        for read in ("positions", "open_orders", "executions", "account_summary"):
+        for read in ("positions", "open_orders", "completed_orders", "executions", "account_summary"):
             await self.broker.disconnect()
             self.client.read_failure = read
             await self.broker.connect()

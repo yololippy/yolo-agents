@@ -204,7 +204,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(lifecycle.health()))
         self.assertGreaterEqual(len(clients), 2)
         self.assertEqual(clients[1].read_calls,
-                         ["positions", "open_orders", "executions", "account_summary"])
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"])
         self.assertGreaterEqual(lifecycle.health()["lifecycle"]["recovery_attempts"], 2)
         self.assertTrue(lifecycle.close())
 
@@ -244,7 +244,7 @@ class LifecycleTests(unittest.TestCase):
         recovered = lifecycle.health()
         self.assertNotEqual(recovered["session_id"], first["session_id"])
         self.assertEqual(second.read_calls,
-                         ["positions", "open_orders", "executions", "account_summary"])
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"])
         generation = recovered["reconciliation_status"]["generation"]
         second.loop.call_soon_threadsafe(old_error_handler, -1, 1100, "late private event")
         time.sleep(0.03)
@@ -260,7 +260,7 @@ class LifecycleTests(unittest.TestCase):
         client = clients[0]
         initial = lifecycle.health()
         self.assertEqual(client.read_calls,
-                         ["positions", "open_orders", "executions", "account_summary"])
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"])
 
         client.loop.call_soon_threadsafe(client.errorEvent.emit, -1, 1100, "private outage")
         self.wait(lambda: lifecycle.health()["state"] == "broker_unavailable")
@@ -282,7 +282,7 @@ class LifecycleTests(unittest.TestCase):
         self.wait(lambda: lifecycle.health()["execution_enabled"])
         recovered = lifecycle.health()
         self.assertEqual(client.read_calls,
-                         ["positions", "open_orders", "executions", "account_summary"] * 2)
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"] * 2)
         self.assertGreater(recovered["reconciliation_status"]["generation"],
                            initial["reconciliation_status"]["generation"])
         self.assertNotEqual(recovered["session_id"], initial["session_id"])
@@ -300,7 +300,7 @@ class LifecycleTests(unittest.TestCase):
         self.wait(lambda: lifecycle.health()["ready"])
         self.assertGreaterEqual(len(clients), 2)
         self.assertEqual(clients[1].read_calls,
-                         ["positions", "open_orders", "executions", "account_summary"])
+                         ["positions", "open_orders", "completed_orders", "executions", "account_summary"])
         self.assertNotIn("sensitive", json.dumps(lifecycle.health()))
 
     def test_close_cancels_pending_connect_without_waiting_for_connect_timeout(self):

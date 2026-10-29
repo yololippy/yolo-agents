@@ -37,6 +37,7 @@ class Client:
         self.read_failure = None
         self.read_release = {}
         self.read_calls = []
+        self.completed_orders = []
 
     async def connectAsync(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -74,6 +75,11 @@ class Client:
 
     async def reqAllOpenOrdersAsync(self):
         return await self._rows("open_orders", [])
+
+    async def reqCompletedOrdersAsync(self, api_only):
+        if api_only is not False:
+            raise AssertionError("completed-order reconciliation must include all API clients")
+        return await self._rows("completed_orders", self.completed_orders)
 
     async def reqExecutionsAsync(self):
         return await self._rows("executions", [])

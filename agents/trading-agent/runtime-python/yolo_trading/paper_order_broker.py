@@ -9,6 +9,15 @@ from typing import Protocol
 
 
 class PaperOrderBroker(Protocol):
+    def market_quote(self, symbol: str) -> dict:
+        """Return an account-redacted, entitlement-labelled top-of-book quote."""
+
+    def positions_detail(self) -> dict:
+        """Return only the configured account's normalized positions."""
+
+    def open_orders_detail(self, *, broker_order_id: str | None = None) -> dict:
+        """Return the configured account's open orders or one normalized detail."""
+
     def paper_order_snapshot(self) -> dict:
         """Return environment, config_id, session_id, account_verified,
         permissions_verified, environment_verified, execution_enabled,

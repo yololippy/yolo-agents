@@ -445,6 +445,7 @@ class FakePaperLifecycle:
         self.recovery_plans = []
         self.snapshot_hook = self.submit_hook = self.cancel_hook = None
         self.store_path = None
+        self.read_calls = []
 
     def stage_order_recovery(self, plan):
         self.recovery_plans.append(deepcopy(plan))
@@ -458,6 +459,23 @@ class FakePaperLifecycle:
         if self.snapshot_hook:
             self.snapshot_hook()
         return deepcopy(self.facts)
+
+    def market_quote(self, symbol):
+        self.read_calls.append(("quote", symbol))
+        return {"symbol": symbol, "data_type": "delayed", "bid": "99", "ask": "101",
+                "last": "100", "close": "98", "as_of": "2026-10-29T00:00:00+00:00"}
+
+    def positions_detail(self):
+        self.read_calls.append(("positions", None))
+        return {"count": 1, "positions": [{"symbol": "AAPL", "quantity": "2",
+                "average_cost": "100", "currency": "USD"}], "as_of": "2026-10-29T00:00:00+00:00"}
+
+    def open_orders_detail(self, *, broker_order_id=None):
+        self.read_calls.append(("open_orders", broker_order_id))
+        row = {"broker_order_id": "123", "symbol": "AAPL", "side": "BUY", "quantity": "2",
+               "filled_quantity": "0", "limit_price": "90", "status": "Submitted"}
+        return ({"order": row, "as_of": "2026-10-29T00:00:00+00:00"} if broker_order_id
+                else {"count": 1, "orders": [row], "as_of": "2026-10-29T00:00:00+00:00"})
 
     def orders_snapshot(self):
         return deepcopy(self.updates)
@@ -626,6 +644,27 @@ class PaperOrderAPITests(unittest.TestCase):
                                "AND type='order.model_draft_created'", (run_id,)).fetchone()
             self.assertEqual(json.loads(event[0]), {"conversation_id": conversation["id"],
                 "user_message_id": message["id"], "run_id": run_id})
+
+    def test_model_read_tools_use_fresh_device_auth_and_redact_account_identity(self):
+        reauthorize = lambda: self.auth.authenticate("Bearer " + self.ios["token"])
+        caller = self.ios["device"]
+        results = [
+            self.extension.read_model_trading_data(tool="get_market_quote", arguments={"symbol": "AAPL"},
+                                                   caller=caller, reauthorize=reauthorize),
+            self.extension.read_model_trading_data(tool="list_positions", arguments={},
+                                                   caller=caller, reauthorize=reauthorize),
+            self.extension.read_model_trading_data(tool="list_open_orders", arguments={},
+                                                   caller=caller, reauthorize=reauthorize),
+            self.extension.read_model_trading_data(tool="get_open_order", arguments={"broker_order_id": "123"},
+                                                   caller=caller, reauthorize=reauthorize),
+        ]
+        self.assertEqual(self.broker.read_calls, [
+            ("quote", "AAPL"), ("positions", None), ("open_orders", None), ("open_orders", "123")])
+        self.assertNotIn("DU", json.dumps(results))
+        revoked = deepcopy(caller); revoked["id"] = str(uuid4())
+        with self.assertRaises(OrderError):
+            self.extension.read_model_trading_data(tool="list_positions", arguments={},
+                                                   caller=revoked, reauthorize=reauthorize)
 
     def test_model_draft_rejects_unsafe_schema_source_and_non_mac_caller(self):
         self.extension.bind_chat_service(self.app, self.auth)

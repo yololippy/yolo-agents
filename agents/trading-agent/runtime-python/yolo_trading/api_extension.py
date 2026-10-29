@@ -6,6 +6,7 @@ import threading
 from uuid import UUID
 
 from yolo_agents.api import APIError, identifier
+from yolo_agents.runtime_tools import MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, POSITIONS_TOOL
 
 from .paper_order_store import PaperOrderStore
 from .paper_order_broker import BrokerBoundaryError, snapshot
@@ -75,11 +76,11 @@ class TradingAPIExtension:
                     or (self._auth is not None and self._auth is not auth)):
                 raise RuntimeError("Trading extension is already bound to another Host")
             if bind_runtime_tool and not self._tool_bound:
-                bind_tool = getattr(service, "bind_paper_draft_tool", None)
+                bind_tool = getattr(service, "bind_trading_tools", None)
                 reauthorize = getattr(auth, "reauthorize", None)
                 if not callable(bind_tool) or not callable(reauthorize):
-                    raise RuntimeError("Trading Host does not support the draft-only tool boundary")
-                bind_tool(self.create_model_paper_draft, reauthorize)
+                    raise RuntimeError("Trading Host does not support the model tool boundary")
+                bind_tool(self.create_model_paper_draft, self.read_model_trading_data, reauthorize)
                 self._tool_bound = True
             self._chat_service, self._auth = service, auth
             if self._orders is None:
@@ -198,6 +199,37 @@ class TradingAPIExtension:
                     self._orders.store.event(db, row, "order.model_draft_created", self._orders.now(), run_id,
                         {"conversation_id": conversation_id, "user_message_id": user_message_id, "run_id": run_id})
             return {"status": "draft_created", "order_id": order["id"], "state": "draft"}
+
+    @staticmethod
+    def _model_read_caller(caller, reauthorize):
+        try:
+            if not isinstance(caller, dict) or not isinstance(caller.get("id"), str):
+                raise ValueError()
+            current = reauthorize()
+            if (not isinstance(current, dict) or current.get("id") != caller["id"]
+                    or current.get("revoked_at") is not None
+                    or current.get("platform") not in ("macos", "ios")):
+                raise ValueError()
+            return current
+        except Exception:
+            raise OrderError("permission_revoked", 403) from None
+
+    def read_model_trading_data(self, *, tool, arguments, caller, reauthorize):
+        """Run bounded, account-redacted IBKR reads for the current chat turn."""
+        if not callable(reauthorize):
+            raise OrderError("permission_revoked", 403)
+        self._model_read_caller(caller, reauthorize)
+        if self.broker is None or not isinstance(arguments, dict):
+            raise OrderError("broker_not_ready")
+        if tool == MARKET_QUOTE_TOOL and set(arguments) == {"symbol"}:
+            return self.broker.market_quote(arguments["symbol"])
+        if tool == POSITIONS_TOOL and not arguments:
+            return self.broker.positions_detail()
+        if tool == OPEN_ORDERS_TOOL and not arguments:
+            return self.broker.open_orders_detail()
+        if tool == OPEN_ORDER_TOOL and set(arguments) == {"broker_order_id"}:
+            return self.broker.open_orders_detail(broker_order_id=arguments["broker_order_id"])
+        raise OrderError("invalid_order", 400)
 
     @staticmethod
     def order_admin(handler):

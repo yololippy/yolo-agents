@@ -26,7 +26,8 @@ from .agent_runtime import (
 from .store import validate_model_id
 from .runtime_tools import (
     CODEX_TRADING_PROPOSAL_INSTRUCTIONS, PAPER_DRAFT_TOOL, PAPER_DRAFT_TOOL_SCHEMA_VERSION,
-    PaperOrderStreamFilter, RuntimeToolContext, finish_trading_reply,
+    READ_TOOL_NAMES, PaperOrderStreamFilter, RuntimeToolContext, finish_trading_reply,
+    trading_dynamic_tools,
 )
 
 
@@ -609,7 +610,8 @@ class CodexRuntime(_Runtime):
             )
             if state is None or rebuild:
                 params = self._thread_params(model)
-                params.update({"dynamicTools": [],
+                params.update({"dynamicTools": (trading_dynamic_tools()
+                                                if self.agent_id == "trading-agent" else []),
                                "environments": [], "selectedCapabilityRoots": [],
                                "ephemeral": False, "allowProviderModelFallback": False})
                 result = client.call("thread/start", params)
@@ -641,7 +643,8 @@ class CodexRuntime(_Runtime):
                 if (not isinstance(runtime_tools, RuntimeToolContext)
                         or set(params) != {"threadId", "turnId", "callId", "namespace", "tool", "arguments"}
                         or params.get("threadId") != thread_id or not isinstance(params.get("turnId"), str)
-                        or params.get("namespace") is not None or params.get("tool") != PAPER_DRAFT_TOOL
+                        or params.get("namespace") is not None
+                        or params.get("tool") not in ({PAPER_DRAFT_TOOL} | READ_TOOL_NAMES)
                         or not isinstance(params.get("callId"), str)):
                     raise ValueError("invalid dynamic tool call")
                 if expected_turn["id"] is None:

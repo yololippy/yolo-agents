@@ -8,11 +8,16 @@ import time
 from uuid import uuid4
 
 from yolo_agents.runtime_tools import (
+    MARKET_QUOTE_TOOL,
+    OPEN_ORDER_TOOL,
+    OPEN_ORDERS_TOOL,
     PAPER_DRAFT_SCHEMA,
     PAPER_DRAFT_TOOL,
+    POSITIONS_TOOL,
     RuntimeToolContext,
     finalize_trading_reply,
     paper_draft_dynamic_tool,
+    trading_dynamic_tools,
     validate_paper_draft_arguments,
 )
 from yolo_agents.service import ChatService
@@ -37,6 +42,23 @@ class RuntimeToolTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
         with self.assertRaises(ValueError):
             validate_paper_draft_arguments({"symbol": "TSLA", "side": "BUY", "quantity": 2})
+
+    def test_read_tools_are_bounded_and_never_expose_execution_actions(self):
+        specs = trading_dynamic_tools()
+        self.assertEqual({spec["name"] for spec in specs}, {
+            PAPER_DRAFT_TOOL, MARKET_QUOTE_TOOL, POSITIONS_TOOL, OPEN_ORDERS_TOOL, OPEN_ORDER_TOOL})
+        encoded = json.dumps(specs)
+        for forbidden in ("confirm_paper_order", "submit_paper_order", "cancel_paper_order"):
+            self.assertNotIn(forbidden, encoded)
+        calls = []
+        context = self.context(lambda **_: {})
+        context.read_trading_data = lambda **kwargs: calls.append(kwargs) or {
+            "symbol": "TSLA", "data_type": "delayed", "last": "250", "as_of": "now"}
+        result = context.invoke(MARKET_QUOTE_TOOL, {"symbol": "TSLA"})
+        self.assertEqual(result["data_type"], "delayed")
+        self.assertEqual(calls[0]["tool"], MARKET_QUOTE_TOOL)
+        with self.assertRaises(ValueError):
+            context.invoke(OPEN_ORDER_TOOL, {"broker_order_id": "not-an-id"})
 
     def test_valid_proposal_reaches_callback_with_trusted_context_only(self):
         calls = []

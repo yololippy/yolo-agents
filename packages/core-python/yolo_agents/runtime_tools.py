@@ -17,7 +17,11 @@ from uuid import UUID
 
 
 PAPER_DRAFT_TOOL = "create_paper_order_draft"
-PAPER_DRAFT_TOOL_SCHEMA_VERSION = 3
+MARKET_QUOTE_TOOL = "get_market_quote"
+POSITIONS_TOOL = "list_positions"
+OPEN_ORDERS_TOOL = "list_open_orders"
+OPEN_ORDER_TOOL = "get_open_order"
+PAPER_DRAFT_TOOL_SCHEMA_VERSION = 4
 PAPER_DRAFT_DESCRIPTION = (
     "Create a non-executable Paper stock limit-order draft for review in the Mac app. "
     "Call this tool whenever the user asks to create a Paper draft and explicitly supplied an "
@@ -38,8 +42,33 @@ PAPER_DRAFT_SCHEMA = {
     "additionalProperties": False,
 }
 
+READ_TOOL_SPECS = (
+    {"type": "function", "name": MARKET_QUOTE_TOOL,
+     "description": "Read the current IBKR Paper top-of-book quote for one US stock. The result explicitly says live, frozen, delayed, or delayed_frozen. This never purchases a regulatory snapshot.",
+     "inputSchema": {"type": "object", "properties": {
+         "symbol": {"type": "string", "pattern": r"^[A-Z][A-Z0-9.]{0,14}$"}},
+         "required": ["symbol"], "additionalProperties": False}},
+    {"type": "function", "name": POSITIONS_TOOL,
+     "description": "List current IBKR Paper positions with symbol, quantity, average cost, currency, and contract details. Account identifiers are never returned.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"type": "function", "name": OPEN_ORDERS_TOOL,
+     "description": "List current open IBKR Paper orders with broker order ID, status, contract, side, quantity, fills, and limit price.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"type": "function", "name": OPEN_ORDER_TOOL,
+     "description": "Get details for one current open IBKR Paper order by the broker order ID returned by list_open_orders.",
+     "inputSchema": {"type": "object", "properties": {
+         "broker_order_id": {"type": "string", "pattern": r"^[1-9][0-9]{0,9}$"}},
+         "required": ["broker_order_id"], "additionalProperties": False}},
+)
+READ_TOOL_NAMES = frozenset(spec["name"] for spec in READ_TOOL_SPECS)
+
 TRADING_TOOL_INSTRUCTIONS = (
-    "The create_paper_order_draft dynamic tool is available in this conversation. You MUST call it "
+    "IBKR Paper read tools and create_paper_order_draft are available in this conversation. Use "
+    "get_market_quote for current quote questions and always state its data_type; delayed data must never be "
+    "described as live. Use list_positions for current holdings, list_open_orders for the current open-order "
+    "list, and get_open_order only with an ID returned by list_open_orders. Do not claim current broker facts "
+    "without the corresponding successful tool result. The read tools never expose account identifiers. "
+    "You MUST call create_paper_order_draft "
     "when the current user asks to create a Paper draft and explicitly supplies all four required "
     "fields. Do not say the tool is unavailable unless a tool call actually returns a failure. "
     "Use create_paper_order_draft only to create a non-executable Paper LMT/DAY stock draft. "
@@ -47,21 +76,22 @@ TRADING_TOOL_INSTRUCTIONS = (
     "company name, BUY/SELL intent, whole-share quantity, and limit price. Never obtain or invent a "
     "price from model knowledge. If the user says, for example, 'buy two shares of Tesla' without a "
     "limit price, ask for the limit price and do not call the tool. After a successful call, state that "
-    "only a draft was created and that What-if, confirmation, and submission remain separate explicit "
-    "actions in the Mac Paper Orders screen. The application will append the trusted paper-order "
+    "only a draft was created and that the Mac app will obtain What-if and require one explicit confirmation "
+    "before it continues through confirmation and Paper submission. The application will append the trusted paper-order "
     "artifact after a successful call; never write, copy, or invent a paper-order fenced block or "
     "order_id yourself. If the tool is unavailable or fails, do not claim a draft exists. You cannot "
     "confirm, submit, cancel, or place any order."
 )
 CODEX_TRADING_PROPOSAL_INSTRUCTIONS = (
-    "Do not call a tool for Paper drafts. When the current user asks to create a Paper draft and "
+    TRADING_TOOL_INSTRUCTIONS + " When the current user asks to create a Paper draft and "
     "explicitly supplies ticker, BUY/SELL side, whole-share quantity, and limit price, end your "
     "response with exactly one fenced paper-order-proposal JSON block containing only type, symbol, "
     "side, quantity, and limit_price. The type must be paper_order_proposal, quantity must be an "
     "integer, and limit_price must be a string copied from the current user's message. Example: "
     "```paper-order-proposal\n{\"type\":\"paper_order_proposal\",\"symbol\":\"TSLA\","
     "\"side\":\"BUY\",\"quantity\":2,\"limit_price\":\"1\"}\n```. "
-    "Do not claim the draft exists; say only that the request is being prepared. The application "
+    "If create_paper_order_draft is exposed, call it instead of emitting a proposal block. Otherwise, do not claim "
+    "the draft exists; say only that the request is being prepared. The application "
     "validates the proposal and may append a trusted draft card. If any required field is missing, "
     "ask for it and do not emit the block. Never emit a paper-order block or order_id."
 )
@@ -77,6 +107,10 @@ def paper_draft_dynamic_tool() -> dict[str, Any]:
         "description": PAPER_DRAFT_DESCRIPTION,
         "inputSchema": PAPER_DRAFT_SCHEMA,
     }
+
+
+def trading_dynamic_tools() -> list[dict[str, Any]]:
+    return [paper_draft_dynamic_tool(), *(dict(spec) for spec in READ_TOOL_SPECS)]
 
 
 def validate_paper_draft_arguments(arguments: object) -> dict[str, Any]:
@@ -140,11 +174,14 @@ class RuntimeToolContext:
     trusted_messages: tuple[Mapping[str, Any], ...]
     create_paper_draft: Callable[..., Mapping[str, Any]]
     reauthorize: Callable[[], Mapping[str, Any]]
+    read_trading_data: Callable[..., Mapping[str, Any]] | None = None
     _guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _artifact: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
 
     def invoke(self, tool: str, arguments: object) -> dict[str, str]:
+        if tool in READ_TOOL_NAMES:
+            return self._invoke_read(tool, arguments)
         if tool != PAPER_DRAFT_TOOL:
             raise ValueError("unknown runtime tool")
         proposal = validate_paper_draft_arguments(arguments)
@@ -203,6 +240,53 @@ class RuntimeToolContext:
             }
             return {"status": "draft_created", "order_id": order_id, "state": "draft"}
 
+    def _invoke_read(self, tool: str, arguments: object) -> dict[str, Any]:
+        if tool == MARKET_QUOTE_TOOL:
+            if (not isinstance(arguments, dict) or set(arguments) != {"symbol"}
+                    or not isinstance(arguments["symbol"], str)
+                    or re.fullmatch(r"[A-Z][A-Z0-9.]{0,14}", arguments["symbol"]) is None):
+                raise ValueError("invalid quote arguments")
+            value = {"symbol": arguments["symbol"]}
+        elif tool == OPEN_ORDER_TOOL:
+            if (not isinstance(arguments, dict) or set(arguments) != {"broker_order_id"}
+                    or not isinstance(arguments["broker_order_id"], str)
+                    or re.fullmatch(r"[1-9][0-9]{0,9}", arguments["broker_order_id"]) is None):
+                raise ValueError("invalid open-order arguments")
+            value = {"broker_order_id": arguments["broker_order_id"]}
+        elif tool in (POSITIONS_TOOL, OPEN_ORDERS_TOOL):
+            if not isinstance(arguments, dict) or arguments:
+                raise ValueError("invalid list arguments")
+            value = {}
+        else:
+            raise ValueError("unknown runtime tool")
+        if self.read_trading_data is None:
+            return {"status": "unavailable", "error_code": "broker_read_unavailable"}
+        try:
+            result = self.read_trading_data(
+                tool=tool, arguments=value, caller=dict(self.caller), reauthorize=self.reauthorize,
+            )
+            if not isinstance(result, Mapping):
+                raise ValueError
+            # A bounded JSON round-trip strips custom mappings and prevents SDK
+            # objects or non-finite numbers from crossing the model boundary.
+            encoded = json.dumps(dict(result), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > 262_144:
+                raise ValueError
+            clean = json.loads(encoded)
+            if not isinstance(clean, dict):
+                raise ValueError
+            return clean
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            safe_codes = {
+                "account_mismatch", "broker_not_ready", "broker_read_timeout", "invalid_broker_order_id",
+                "market_data_unavailable", "open_order_not_found", "open_orders_unavailable",
+                "permission_revoked", "positions_unavailable",
+            }
+            result = {"status": "unavailable", "error_code": code if code in safe_codes else "broker_read_unavailable"}
+            _LOGGER.warning("Trading read callback failed (%s)", result["error_code"])
+            return result
+
     def trusted_artifact(self) -> dict[str, Any] | None:
         with self._guard:
             return None if self._artifact is None else dict(self._artifact)
@@ -215,7 +299,7 @@ class RuntimeToolContext:
         result = self.invoke(tool, arguments)
         return {
             "contentItems": [{"type": "inputText", "text": json.dumps(result, ensure_ascii=False)}],
-            "success": result["status"] == "draft_created",
+            "success": result.get("status") not in ("draft_unavailable", "needs_information", "unavailable"),
         }
 
 
@@ -366,3 +450,48 @@ def pydantic_paper_draft_tool():
         require_parameter_descriptions=False,
         sequential=True,
     )
+
+
+def pydantic_trading_tools():
+    """Build the Trading Agent's application-owned tools lazily."""
+    from pydantic_ai import Tool
+
+    def context(ctx):
+        tools = getattr(ctx.deps, "runtime_tools", None)
+        return tools if isinstance(tools, RuntimeToolContext) else None
+
+    def get_market_quote(ctx, symbol: str) -> dict[str, Any]:
+        """Read an entitlement-aware IBKR Paper quote for one US stock ticker."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(MARKET_QUOTE_TOOL, {"symbol": symbol}))
+
+    def list_positions(ctx) -> dict[str, Any]:
+        """List current IBKR Paper positions without account identifiers."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(POSITIONS_TOOL, {}))
+
+    def list_open_orders(ctx) -> dict[str, Any]:
+        """List current open IBKR Paper orders."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(OPEN_ORDERS_TOOL, {}))
+
+    def get_open_order(ctx, broker_order_id: str) -> dict[str, Any]:
+        """Read one current open IBKR Paper order by broker order ID."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(OPEN_ORDER_TOOL, {"broker_order_id": broker_order_id}))
+
+    read_tools = [
+        (get_market_quote, MARKET_QUOTE_TOOL, READ_TOOL_SPECS[0]["description"]),
+        (list_positions, POSITIONS_TOOL, READ_TOOL_SPECS[1]["description"]),
+        (list_open_orders, OPEN_ORDERS_TOOL, READ_TOOL_SPECS[2]["description"]),
+        (get_open_order, OPEN_ORDER_TOOL, READ_TOOL_SPECS[3]["description"]),
+    ]
+    return [pydantic_paper_draft_tool(), *[
+        Tool(function, takes_ctx=True, name=name, description=description,
+             require_parameter_descriptions=False, sequential=True)
+        for function, name, description in read_tools
+    ]]

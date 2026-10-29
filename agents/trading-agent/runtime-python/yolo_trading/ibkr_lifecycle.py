@@ -249,10 +249,21 @@ class IBKRBrokerLifecycle:
             if method in ("submit_paper_order", "cancel_paper_order"):
                 return {"order_ref": kwargs["order_ref"], "status": "unknown",
                         "broker_order_id": kwargs.get("broker_order_id"), "filled_quantity": 0}
+            if method in ("market_quote", "positions_detail", "open_orders_detail"):
+                raise IBKROperationError("broker_read_timeout", "券商只读查询超时。") from None
             raise IBKROperationError("preview_timeout", "预览超时，不能提交订单。") from None
 
     def preview_paper_order(self, intent, *, order_ref, context, timeout=5.0):
         return self._call("preview_paper_order", (intent,), {"order_ref": order_ref, "context": context}, timeout)
+
+    def market_quote(self, symbol, *, timeout=5.0):
+        return self._call("market_quote", (symbol,), {}, timeout)
+
+    def positions_detail(self, *, timeout=5.0):
+        return self._call("positions_detail", (), {}, timeout)
+
+    def open_orders_detail(self, *, broker_order_id=None, timeout=5.0):
+        return self._call("open_orders_detail", (), {"broker_order_id": broker_order_id}, timeout)
 
     def submit_paper_order(self, intent, *, order_ref, preview, context, timeout=5.0):
         return self._call("submit_paper_order", (intent,),
