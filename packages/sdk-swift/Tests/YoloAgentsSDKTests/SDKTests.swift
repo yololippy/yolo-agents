@@ -22,6 +22,17 @@ private func page(_ events: [ServerEvent], cursor: Int64? = nil, more: Bool = fa
 private func encoded<T: Encodable>(_ value: T, status: Int = 200) throws -> HTTPResult {
     HTTPResult(data: try WireJSON.encoder().encode(value), status: status)
 }
+
+@Test func agentSessionsBypassSystemProxies() {
+    let configuration = directSessionConfiguration(requestTimeout: 12, resourceTimeout: 34)
+    #expect(configuration.connectionProxyDictionary?.isEmpty == true)
+    #expect(configuration.urlCache == nil)
+    #expect(configuration.urlCredentialStorage == nil)
+    #expect(configuration.httpCookieStorage == nil)
+    #expect(configuration.httpShouldSetCookies == false)
+    #expect(configuration.timeoutIntervalForRequest == 12)
+    #expect(configuration.timeoutIntervalForResource == 34)
+}
 private actor RecordingTransport: HTTPTransport {
     private var responses: [HTTPResult]
     private(set) var requests: [URLRequest] = []

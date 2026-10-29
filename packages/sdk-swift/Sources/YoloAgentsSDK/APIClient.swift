@@ -102,18 +102,28 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// Agent traffic carries a device bearer credential and may target a Tailnet
+/// address that the system proxy cannot route.  Keep it on the device's direct
+/// network path instead of disclosing it to HTTP(S) proxy software.
+func directSessionConfiguration(requestTimeout: TimeInterval,
+                                resourceTimeout: TimeInterval) -> URLSessionConfiguration {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.urlCache = nil
+    configuration.urlCredentialStorage = nil
+    configuration.httpCookieStorage = nil
+    configuration.httpShouldSetCookies = false
+    configuration.connectionProxyDictionary = [:]
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.timeoutIntervalForRequest = requestTimeout
+    configuration.timeoutIntervalForResource = resourceTimeout
+    return configuration
+}
+
 /// No persistent HTTP cache, cookies, credential store, redirects, or TLS bypass.
 public struct URLSessionTransport: HTTPTransport {
     private let session: URLSession
     public init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 45
+        let configuration = directSessionConfiguration(requestTimeout: 30, resourceTimeout: 45)
         self.session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
     }
     public func send(_ request: URLRequest) async throws -> HTTPResult {

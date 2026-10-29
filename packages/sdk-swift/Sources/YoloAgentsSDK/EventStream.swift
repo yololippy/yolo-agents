@@ -93,14 +93,7 @@ public struct ServerEventStream: AsyncSequence, Sendable {
 public struct URLSessionSSETransport: SSETransport {
     public init() {}
     public func open(_ request: URLRequest) async throws -> SSEConnection {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 3_600
+        let configuration = directSessionConfiguration(requestTimeout: 60, resourceTimeout: 3_600)
         let session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
