@@ -1,10 +1,11 @@
 """Offline tests for official credential patterns and stream boundaries."""
 import unittest
+from decimal import Decimal
 from types import SimpleNamespace
 
 from yolo_agents.agent_runtime import RuntimeGuardrailError
 from yolo_agents.guardrails import (
-    CredentialStreamFilter, check_text, _tool_args, _tool_result, is_guardrail_error,
+    CredentialStreamFilter, check_text, check_value, _tool_args, _tool_result, is_guardrail_error,
 )
 from pydantic_ai_harness.guardrails import InputBlocked, ToolBlocked
 from pydantic_ai.messages import ToolReturn
@@ -44,6 +45,9 @@ class GuardrailTests(unittest.TestCase):
         rest = ''.join(guard.feed(text[20:])) + guard.finish()
         self.assertEqual(first + rest, text)
         check_text(text)
+
+    def test_decimal_provider_metadata_is_a_safe_scalar(self):
+        check_value({"usage": {"cost": Decimal("0.003396")}})
 
     def test_structured_tool_args_and_result_block(self):
         secret = 'ghp_' + 'Q' * 32

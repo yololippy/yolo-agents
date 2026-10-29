@@ -116,7 +116,7 @@ def _explicit_limit_price(messages: tuple[Mapping[str, Any], ...], limit_price: 
         after = content[match.end():match.end() + 12].casefold()
         if (re.search(r"(?:limit(?:\s+price)?|price|at|@|\$|usd)\s*$", before)
                 or re.match(r"^\s*(?:usd|美元|美金|元|限价|价格|价位)", after)
-                or re.search(r"(?:限价|价格|价位|按|以)\s*$", before)):
+                or re.search(r"(?:限价|价格|价位|按|以|挂(?:单)?(?:在|到)?)\s*$", before)):
             return True
     sole = re.fullmatch(
         r"\s*(?:\$|usd\s*)?([1-9][0-9]{0,6}(?:\.[0-9]{1,4})?)\s*(?:usd|美元|美金|元)?\s*",

@@ -2,6 +2,7 @@
 from dataclasses import fields, is_dataclass
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 
 import regex
@@ -25,7 +26,7 @@ def _strings(value, seen=None):
         seen = set()
     if isinstance(value, str):
         yield value
-    elif value is None or isinstance(value, (int, float, bool, bytes, date, datetime, Enum)):
+    elif value is None or isinstance(value, (int, float, Decimal, bool, bytes, date, datetime, Enum)):
         return
     elif id(value) not in seen:
         seen.add(id(value))

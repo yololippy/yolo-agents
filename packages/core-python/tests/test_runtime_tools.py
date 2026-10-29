@@ -114,6 +114,23 @@ class RuntimeToolTests(unittest.TestCase):
         })
         self.assertEqual(result["status"], "draft_created")
 
+    def test_chinese_hang_order_phrase_is_an_explicit_limit_price(self):
+        order_id = str(uuid4())
+        context = self.context(lambda **_: {
+            "status": "draft_created", "order_id": order_id, "state": "draft",
+        })
+        context.trusted_messages = (
+            {"role": "user", "content": "帮我下单买两股特斯拉"},
+            {"role": "assistant", "content": "请提供每股限价"},
+            {"role": "user", "content": "挂 403 的单子"},
+        )
+
+        result = context.invoke(PAPER_DRAFT_TOOL, {
+            "symbol": "TSLA", "side": "BUY", "quantity": 2, "limit_price": "403",
+        })
+
+        self.assertEqual(result, {"status": "draft_created", "order_id": order_id, "state": "draft"})
+
     def test_only_trusted_tool_result_can_create_final_draft_artifact(self):
         trusted_id, fake_id = str(uuid4()), str(uuid4())
         context = self.context(lambda **_: {
