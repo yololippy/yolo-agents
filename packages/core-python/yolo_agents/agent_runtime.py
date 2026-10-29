@@ -163,7 +163,7 @@ class DemoRuntime(_Runtime):
     mode = "demo"
     model_name = "demo-local"
 
-    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user") -> Iterator[str]:
+    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user", *, runtime_tools=None) -> Iterator[str]:
         prompt, message_id = _prompt(history, conversation_id)
         with self._lock(conversation_id):
             state = self._load(conversation_id, user_id)
@@ -215,6 +215,7 @@ def _load_pydantic_backend() -> SimpleNamespace:
 @dataclass(frozen=True)
 class _AgentDeps:
     namespace: str
+    runtime_tools: Any = None
 
 
 class PydanticRuntime(_Runtime):
@@ -226,11 +227,12 @@ class PydanticRuntime(_Runtime):
 
     mode = "pydantic"
 
-    def __init__(self, model: str, data_dir: str | Path, store: Store):
+    def __init__(self, model: str, data_dir: str | Path, store: Store, *, agent_name="base"):
         super().__init__(store)
         if not isinstance(model, str) or not model.strip() or ":" not in model:
             raise RuntimeConfigurationError("真实模式需要显式的 provider:model 模型配置。")
         self.model_name = model
+        self.agent_id = agent_name
         self._backend = _load_pydantic_backend()
         self._data_dir = Path(data_dir).expanduser()
         self._agents: dict[tuple[str, int, str], Any] = {}
@@ -253,6 +255,7 @@ class PydanticRuntime(_Runtime):
 
     def _agent(self, namespace: str, model_name: str | None = None) -> Any:
         from .guardrails import capabilities
+        from .runtime_tools import TRADING_TOOL_INSTRUCTIONS, pydantic_paper_draft_tool
         # Keep provider clients on one worker's sync-stream event loop.
         selected = model_name or self.model_name
         key = (namespace, threading.get_ident(), selected)
@@ -276,13 +279,17 @@ class PydanticRuntime(_Runtime):
                 self._agents[key] = backend.Agent(
                     self._model_instance(selected), deps_type=_AgentDeps, output_type=str, retries=self._retry_policy(),
                     instructions=(
-                        "你是个人 AI 助手，当前只开放对话、记忆和历史检索。"
+                        "你是个人 AI 助手，当前只开放对话、记忆、历史检索"
+                        + ("和非执行 Paper 草稿创建。" if self.agent_id == "trading-agent" else "。")
+                        +
                         "本服务尚无账户、行情或交易执行工具；不得声称已经查询账户或执行订单。"
                         "记忆只保存用户明确表达的长期偏好与背景，不保存密钥。"
                         "订单授权、风险限额和实时账户状态不能由记忆或历史确认代替。"
                         "历史检索为词法检索，中文可能漏召回；找不到时说明不确定。"
                         "相关历史可按需检索；请区分过去记录与当前事实。"
+                        + (TRADING_TOOL_INSTRUCTIONS if self.agent_id == "trading-agent" else "")
                     ),
+                    **({"tools": [pydantic_paper_draft_tool()]} if self.agent_id == "trading-agent" else {}),
                     capabilities=[
                         backend.StepPersistence(store=steps, capture_frontier=True),
                         backend.ConversationSearch(backend.SnapshotHistorySource(steps), scope="all", max_matches=5, context_lines=2),
@@ -375,8 +382,9 @@ class PydanticRuntime(_Runtime):
             check_text(reply)
         return reply
 
-    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user") -> Iterator[str]:
+    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user", *, runtime_tools=None) -> Iterator[str]:
         from .guardrails import check_text, check_value, CredentialStreamFilter, is_guardrail_error
+        from .runtime_tools import PaperOrderStreamFilter, finish_trading_reply
         prompt, message_id = _prompt(history, conversation_id)
         check_text(prompt)
         namespace = self._namespace(user_id)
@@ -406,7 +414,7 @@ class PydanticRuntime(_Runtime):
             except Exception:
                 raise RuntimeConfigurationError("真实模型初始化失败，请检查已安装的供应商依赖、模型名称和服务端密钥配置。") from None
             kwargs: dict[str, Any] = {
-                "deps": _AgentDeps(namespace), "timeout": 90,
+                "deps": _AgentDeps(namespace, runtime_tools), "timeout": 90,
                 "model_settings": {"max_tokens": 2048},
                 # Conversation usage is cumulative; these are per-turn increments.
                 "usage_limits": backend.UsageLimits(
@@ -422,7 +430,9 @@ class PydanticRuntime(_Runtime):
             if history[-1].get("run_id"):
                 kwargs["run_id"] = history[-1]["run_id"]
             pieces: list[str] = []
+            safe_pieces: list[str] = []
             output_filter = CredentialStreamFilter()
+            order_filter = PaperOrderStreamFilter() if self.agent_id == "trading-agent" else None
             self._before_model_request(conversation_id, user_id, message_id)
             try:
                 with agent.run_stream_sync(prompt, **kwargs) as response:
@@ -433,7 +443,14 @@ class PydanticRuntime(_Runtime):
                                 raise TypeError("Expected a text delta")
                             if delta:
                                 pieces.append(delta)
-                                yield from output_filter.feed(delta)
+                                safe = output_filter.feed(delta)
+                                if self.agent_id == "trading-agent":
+                                    for fragment in safe:
+                                        for filtered in order_filter.feed(fragment):
+                                            safe_pieces.append(filtered)
+                                            yield filtered
+                                else:
+                                    yield from safe
                     except GeneratorExit:
                         # The pinned SDK's async lifecycle cannot safely receive
                         # GeneratorExit from a synchronous consumer. Close the pump
@@ -463,14 +480,30 @@ class PydanticRuntime(_Runtime):
                 raise RuntimeExecutionError(
                     f"真实模型运行失败（{type(exc).__name__}），本次未自动重试或切换到演示模式。"
                 ) from None
-            if tail:
-                yield tail
+            if self.agent_id == "trading-agent":
+                for filtered in order_filter.feed(tail):
+                    safe_pieces.append(filtered)
+                    yield filtered
+                filtered_tail = order_filter.finish()
+                if filtered_tail:
+                    safe_pieces.append(filtered_tail)
+                    yield filtered_tail
+                cleaned = "".join(safe_pieces)
+                suffix = finish_trading_reply(cleaned, runtime_tools)
+                if suffix:
+                    yield suffix
+                final_output = cleaned + suffix
+                check_text(final_output)
+            else:
+                if tail:
+                    yield tail
+                final_output = output
             # No partial/failed state replaces the last successful official Conversation.
             # Cache the reply to recover the window before the API commits its assistant row.
             self.store.save_agent_state(conversation_id, _encode({
                 "schema_version": 1, "mode": self.mode, "user_id": user_id,
                 "model_name": selected_model, "conversation": json.loads(encoded), **self._state_extra(),
-                "last_user_message_id": message_id, "last_reply": output, "reply_status": "completed",
+                "last_user_message_id": message_id, "last_reply": final_output, "reply_status": "completed",
             }))
             self._after_model_saved(conversation_id, user_id, message_id)
 
@@ -479,10 +512,10 @@ def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: St
     if mode == "demo":
         return DemoRuntime(store)
     if mode == "pydantic":
-        return PydanticRuntime(model, data_dir, store)
+        return PydanticRuntime(model, data_dir, store, agent_name=agent_name)
     if mode == "codex":
         from .codex_runtime import CodexRuntime
-        return CodexRuntime(model, data_dir, store)
+        return CodexRuntime(model, data_dir, store, agent_name=agent_name)
     if mode == "chatgpt":
         from .chatgpt_runtime import ChatGPTRuntime
         return ChatGPTRuntime(model, data_dir, store, agent_name=agent_name, app_name=app_name or agent_name)

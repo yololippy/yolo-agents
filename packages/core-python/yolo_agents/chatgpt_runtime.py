@@ -63,7 +63,7 @@ class ChatGPTRuntime(PydanticRuntime):
     def __init__(self, model, data_dir, store, *, agent_name, app_name):
         validate_model_id(model)
         # Initialize the official Harness and its independent user stores.
-        super().__init__('openai:placeholder', data_dir, store)
+        super().__init__('openai:placeholder', data_dir, store, agent_name=agent_name)
         self.model_name = model
         self.agent_id, self.app_name = agent_name, app_name
         self.account = AccountManager(Path(data_dir) / 'chatgpt-auth', app_name)
@@ -355,7 +355,7 @@ class ChatGPTRuntime(PydanticRuntime):
             # Conversation is the authoritative recovery record.
             pass
 
-    def stream_reply(self, history, conversation_id, user_id='local-user'):
+    def stream_reply(self, history, conversation_id, user_id='local-user', *, runtime_tools=None):
         with self._activity():
             if self.account.generation != self._seen_generation:
                 with self._guard:
@@ -363,7 +363,7 @@ class ChatGPTRuntime(PydanticRuntime):
                 self._seen_generation = self.account.generation
             self._prepare_skills()
             try:
-                yield from super().stream_reply(history, conversation_id, user_id)
+                yield from super().stream_reply(history, conversation_id, user_id, runtime_tools=runtime_tools)
             except RuntimeExecutionError as exc:
                 if 'CredentialsPersistenceError' in str(exc):
                     with self.account._guard:

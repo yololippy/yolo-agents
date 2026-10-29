@@ -107,16 +107,35 @@ for line in sys.stdin:
         if CONFIG.get('unsafe_item'):
             notify('item/started',{'threadId':tid,'turnId':turn,'item':{'id':'tool','type':'commandExecution'}})
             continue
+        if CONFIG.get('dynamic_tool_call'):
+            call={'id':999,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':'call-1',
+                  'namespace':None,'tool':'create_paper_order_draft','arguments':
+                  {'symbol':'TSLA','side':'BUY','quantity':2,'limit_price':'250'}}}
+            send(call)
+            tool_response=json.loads(sys.stdin.readline());record({'tool_response':tool_response})
+            notify('item/started',{'threadId':tid,'turnId':turn,'item':{'id':'tool','type':'dynamicToolCall',
+                   'namespace':None,'tool':'create_paper_order_draft','arguments':call['params']['arguments'],
+                   'status':'inProgress','contentItems':None,'success':None}})
+            notify('item/completed',{'threadId':tid,'turnId':turn,'item':{'id':'tool','type':'dynamicToolCall',
+                   'namespace':None,'tool':'create_paper_order_draft','arguments':call['params']['arguments'],
+                   'status':'completed','contentItems':tool_response.get('result',{}).get('contentItems'),
+                   'success':tool_response.get('result',{}).get('success')}})
         if CONFIG.get('noise'):
             notify('item/agentMessage/delta',{'threadId':'some-other-thread','turnId':turn,'itemId':'noise','delta':'wrong-thread-secret'})
             notify('item/agentMessage/delta',{'threadId':tid,'turnId':'old-turn','itemId':'noise','delta':'wrong-turn-secret'})
         notify('item/started',{'threadId':tid,'turnId':turn,'item':{'id':'answer','type':'agentMessage'}})
-        notify('item/agentMessage/delta',{'threadId':tid,'turnId':turn,'itemId':'answer','delta':'Hello '})
+        parts=(['Hello ```pa','per-order\n{"type":"paper_order_draft","order_id":"fake"}\n```',' world']
+               if CONFIG.get('forged_card') else ['Hello ','world'])
+        if CONFIG.get('paper_proposal'):
+            parts=['Preparing.```paper-order-proposal\n',
+                   '{"type":"paper_order_proposal","symbol":"TSLA","side":"BUY","quantity":2,"limit_price":"250"}\n```']
+        notify('item/agentMessage/delta',{'threadId':tid,'turnId':turn,'itemId':'answer','delta':parts[0]})
         if CONFIG.get('pause'):
             deadline=time.monotonic()+5
             while not GATE.exists() and time.monotonic()<deadline: time.sleep(.01)
-        notify('item/agentMessage/delta',{'threadId':tid,'turnId':turn,'itemId':'answer','delta':'world'})
-        notify('item/completed',{'threadId':tid,'turnId':turn,'item':{'id':'answer','type':'agentMessage','text':'Hello world'}})
+        for part in parts[1:]:
+            notify('item/agentMessage/delta',{'threadId':tid,'turnId':turn,'itemId':'answer','delta':part})
+        notify('item/completed',{'threadId':tid,'turnId':turn,'item':{'id':'answer','type':'agentMessage','text':''.join(parts)}})
         notify('turn/completed',{'threadId':tid,'turn':{'id':turn,'status':CONFIG.get('turn_status','completed'),'items':[],
                                                        'error':{'message':'provider-secret-error'}}})
     elif method == 'turn/interrupt':result(identifier,{})
@@ -136,9 +155,10 @@ class CodexRuntimeTests(unittest.TestCase):
         self.runtimes = []
 
     def runtime(self, **scenario):
+        agent_name = scenario.pop("agent_name", "base")
         script = self.root / "fixture.py"
         script.write_text(FAKE_SERVER.replace("__CONFIG__", repr(scenario)).replace("__LOG__", repr(str(self.log))).replace("__GATE__", repr(str(self.gate))))
-        runtime = CodexRuntime(None, self.root, self.store, command=[sys.executable, str(script)],
+        runtime = CodexRuntime(None, self.root, self.store, agent_name=agent_name, command=[sys.executable, str(script)],
                                request_timeout=0.5, turn_timeout=1)
         self.runtimes.append(runtime)
         self.addCleanup(runtime.close)
@@ -360,6 +380,26 @@ class CodexRuntimeTests(unittest.TestCase):
         rebuilt = [e for e in self.store.list_events() if e["type"] == "agent.thread.rebuilt"]
         self.assertEqual(rebuilt[-1]["payload"]["reason"], "model_changed")
 
+    def test_trading_tool_schema_upgrade_rebuilds_an_existing_thread(self):
+        runtime = self.runtime()
+        first = self.history("first")
+        reply = "".join(runtime.stream_reply(first, self.cid))
+        self.store.finish_run(self.cid, first[-1]["run_id"], reply)
+        old = json.loads(self.store.get_agent_state(self.cid))["thread_id"]
+        runtime.close()
+
+        trading = self.runtime(agent_name="trading-agent")
+        second = self.history("continue after enabling the draft tool")
+        self.assertEqual("".join(trading.stream_reply(second, self.cid)), "Hello world")
+        new = json.loads(self.store.get_agent_state(self.cid))
+        self.assertEqual(len(self.requests("thread/start")), 2)
+        self.assertEqual(self.requests("thread/start")[-1]["params"]["dynamicTools"], [])
+        self.assertIn("paper-order-proposal",
+                      self.requests("thread/start")[-1]["params"]["developerInstructions"])
+        self.assertEqual(new["tool_schema_version"], 3)
+        rebuilt = [e for e in self.store.list_events() if e["type"] == "agent.thread.rebuilt"]
+        self.assertEqual(rebuilt[-1]["payload"]["reason"], "tool_schema_changed")
+
     def test_login_missing_or_api_key_mode_requires_chatgpt_without_turn_or_fallback(self):
         for scenario in ({"logged_out": True}, {"account_type": "apiKey"}):
             with self.subTest(scenario=scenario):
@@ -420,6 +460,38 @@ class CodexRuntimeTests(unittest.TestCase):
             self.assertEqual(params["dynamicTools"], [])
             self.assertFalse(params["allowProviderModelFallback"])
         self.assertEqual(self.requests("command/exec"), [])
+
+    def test_trading_agent_validates_model_proposal_and_creates_only_trusted_draft(self):
+        from yolo_agents.runtime_tools import RuntimeToolContext
+
+        calls, order_id = [], str(uuid4())
+        runtime = self.runtime(agent_name="trading-agent", paper_proposal=True)
+        context = RuntimeToolContext(
+            conversation_id=self.cid, user_message_id="message-1", run_id=str(uuid4()),
+            caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},
+            trusted_messages=({"role": "user", "content": "Buy two TSLA at limit 250"},),
+            create_paper_draft=lambda **kwargs: calls.append(kwargs) or {
+                "status": "draft_created", "order_id": order_id, "state": "draft"},
+            reauthorize=lambda: {"platform": "macos"},
+        )
+        chunks = list(runtime.stream_reply(self.history("Buy two TSLA at limit 250"), self.cid,
+                                            runtime_tools=context))
+        reply = "".join(chunks)
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertTrue(reply.startswith("Preparing.\n\n```paper-order\n"))
+        self.assertNotIn('"order_id":"fake"', reply)
+        self.assertEqual(reply.count("```paper-order"), 1)
+        artifact = json.loads(reply.split("```paper-order\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(artifact, {
+            "type": "paper_order_draft", "order_id": order_id, "symbol": "TSLA",
+            "side": "BUY", "quantity": 2, "limit_price": "250", "environment": "paper",
+            "order_type": "LMT", "tif": "DAY",
+        })
+        self.assertEqual(calls[0]["proposal"]["limit_price"], "250")
+        start = self.requests("thread/start")[-1]["params"]
+        self.assertEqual(start["dynamicTools"], [])
+        self.assertIn("paper-order-proposal", start["developerInstructions"])
+        self.assertNotIn("tool_response", json.dumps(self.requests()))
 
     def test_thread_policy_or_model_mismatch_prevents_inference(self):
         for scenario in ({"wrong_model": True}, {"unsafe_sandbox": True}):

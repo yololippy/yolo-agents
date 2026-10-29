@@ -92,6 +92,12 @@ def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | 
     auth = DeviceAuth(args.data_dir / "devices.sqlite3")
     service = ChatService(store, runtime)
     service.agent_id, service.app_name = agent_name, app_name or agent_name
+    if extension is not None:
+        bind_chat = getattr(extension, "bind_chat_service", None)
+        if bind_chat is not None:
+            if not callable(bind_chat):
+                raise RuntimeError("Agent extension chat binding is invalid")
+            bind_chat(service, auth)
     service.recover_interrupted()
     server = ChatHTTPServer((args.host, args.port), service, auth, extension=extension)
     if args.tls_cert:

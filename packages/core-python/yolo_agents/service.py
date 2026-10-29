@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .agent_runtime import LoginRequiredError, RuntimeConfigurationError, RuntimeGuardrailError, RuntimeStateError
 from .codex_runtime import CodexBusyError
+from .runtime_tools import RuntimeToolContext
 
 
 class ChatService:
@@ -18,12 +19,21 @@ class ChatService:
         self.queues, self.active = {}, set()
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat")
         self.closing = threading.Event()
+        self._paper_draft_tool = None
+        self._paper_draft_reauthorize = None
+
+    def bind_paper_draft_tool(self, handler, reauthorize):
+        """Bind the Trading Agent's draft-only callback; never an execution API."""
+        if not callable(handler) or not callable(reauthorize) or self._paper_draft_tool is not None:
+            raise RuntimeError("Paper draft tool binding is invalid")
+        self._paper_draft_tool = handler
+        self._paper_draft_reauthorize = reauthorize
 
     def conversation_lock(self, collection, conversation_id):
         with self.lock:
             return collection.setdefault(conversation_id, threading.Lock())
 
-    def send(self, conversation_id, content, client_message_id):
+    def send(self, conversation_id, content, client_message_id, *, caller=None):
         if self.closing.is_set():
             raise RuntimeError("service shutting down")
         with self.conversation_lock(self.accept_locks, conversation_id):
@@ -43,7 +53,10 @@ class ChatService:
                 # and marking the queue active must be one admission boundary.
                 message = self.store.append_message(conversation_id, "user", content,
                                                     client_message_id=client_message_id, run_id=run_id)
-                self.queues.setdefault(conversation_id, deque()).append(run_id)
+                public_caller = None if caller is None else {
+                    key: caller.get(key) for key in ("id", "platform", "permissions", "revoked_at")
+                }
+                self.queues.setdefault(conversation_id, deque()).append((run_id, public_caller))
                 start = conversation_id not in self.active
                 self.active.add(conversation_id)
             if start:
@@ -79,8 +92,8 @@ class ChatService:
                     self.active.discard(conversation_id)
                     del self.queues[conversation_id]
                     return
-                run_id = pending.popleft()
-            self.reply(conversation_id, run_id)
+                run_id, caller = pending.popleft()
+            self.reply(conversation_id, run_id, caller)
 
     def history(self, conversation_id, run_id):
         messages = self.store.list_messages(conversation_id)
@@ -97,10 +110,27 @@ class ChatService:
                 result.append(previous)
         return result
 
-    def reply(self, conversation_id, run_id):
+    def reply(self, conversation_id, run_id, caller=None):
         try:
+            history = self.history(conversation_id, run_id)
+            latest = history[-1]
+            runtime_tools = None
+            if self._paper_draft_tool is not None and caller is not None:
+                runtime_tools = RuntimeToolContext(
+                    conversation_id=conversation_id,
+                    user_message_id=latest["id"],
+                    run_id=run_id,
+                    caller=caller,
+                    trusted_messages=tuple({
+                        "role": message.get("role"), "content": message.get("content", ""),
+                    } for message in history),
+                    create_paper_draft=self._paper_draft_tool,
+                    reauthorize=lambda: self._paper_draft_reauthorize(caller),
+                )
             chunks, size = [], 0
-            for delta in self.runtime.stream_reply(self.history(conversation_id, run_id), conversation_id):
+            stream = (self.runtime.stream_reply(history, conversation_id, runtime_tools=runtime_tools)
+                      if runtime_tools is not None else self.runtime.stream_reply(history, conversation_id))
+            for delta in stream:
                 if not isinstance(delta, str):
                     raise TypeError("runtime delta must be text")
                 size += len(delta)

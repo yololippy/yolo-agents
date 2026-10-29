@@ -9,8 +9,11 @@ public struct YoloAgentsRootView: View {
     @StateObject private var model: ChatModel
     @Environment(\.scenePhase) private var scenePhase
     private let features: [ChatFeature]
-    public init(identity: AgentAppIdentity, features: [ChatFeature] = []) {
+    private let messageAccessory: ChatMessageAccessory?
+    public init(identity: AgentAppIdentity, features: [ChatFeature] = [],
+                messageAccessory: ChatMessageAccessory? = nil) {
         self.features = features
+        self.messageAccessory = messageAccessory
         _model = StateObject(wrappedValue: ChatModel(identity: identity))
     }
     public var body: some View {
@@ -20,7 +23,7 @@ public struct YoloAgentsRootView: View {
             } else if model.connection == nil {
                 PairingView(model: model, isSettings: false)
             } else {
-                ChatShell(model: model, features: features)
+                ChatShell(model: model, features: features, messageAccessory: messageAccessory)
             }
         }
         .task { await model.start() }
@@ -164,6 +167,7 @@ private struct PairingView: View {
 private struct ChatShell: View {
     @ObservedObject var model: ChatModel
     let features: [ChatFeature]
+    let messageAccessory: ChatMessageAccessory?
     @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
@@ -225,7 +229,8 @@ private struct ChatShell: View {
             .searchable(text: $query, prompt: "搜索已同步的会话标题")
         } detail: {
             ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true },
-                       openAccount: { showAccount = true }, features: features, openFeature: { selectedFeature = $0 })
+                       openAccount: { showAccount = true }, features: features,
+                       messageAccessory: messageAccessory, openFeature: { selectedFeature = $0 })
         }
         .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
         .sheet(item: $selectedFeature) { feature in
@@ -255,6 +260,7 @@ private struct ChatDetail: View {
     let openSettings: () -> Void
     let openAccount: () -> Void
     let features: [ChatFeature]
+    let messageAccessory: ChatMessageAccessory?
     let openFeature: (ChatFeature) -> Void
     private var composerAvailability: ComposerAvailability {
         ComposerAvailability(hasConversation: model.selectedID != nil,
@@ -280,7 +286,9 @@ private struct ChatDetail: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
-                            ForEach(model.messages) { message in MessageBubble(message: message, model: model) }
+                            ForEach(model.messages) { message in
+                                MessageBubble(message: message, model: model, accessory: messageAccessory)
+                            }
                             ForEach(model.partialReplies) { reply in
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("助手").font(.caption.bold()).foregroundStyle(.secondary)
@@ -457,6 +465,7 @@ private struct AwaitingReplyBubble: View {
 private struct MessageBubble: View {
     let message: Message
     @ObservedObject var model: ChatModel
+    let accessory: ChatMessageAccessory?
     private var outgoing: OutgoingMessage? {
         model.state.outgoing.first { $0.id == message.clientMessageID }
     }
@@ -470,6 +479,9 @@ private struct MessageBubble: View {
                     Text(message.createdAt, style: .time)
                 }.font(.caption).foregroundStyle(.secondary)
                 Text(message.content).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                if let accessory, let connection = model.connection {
+                    accessory.content(message, connection)
+                }
                 if let outgoing {
                     switch outgoing.status {
                     case .submitting: Text("正在发送…").font(.caption).foregroundStyle(.secondary)

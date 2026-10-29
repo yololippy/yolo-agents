@@ -15,3 +15,16 @@ public struct ChatFeature: Identifiable {
         self.content = { AnyView(content($0)) }
     }
 }
+
+/// App-owned content shown under a persisted chat message. The shared chat UI
+/// supplies the message and paired connection, but performs no app action.
+@MainActor
+public struct ChatMessageAccessory {
+    let content: @MainActor (Message, PairedConnection) -> AnyView
+
+    public init<Content: View>(
+        @ViewBuilder content: @escaping @MainActor (Message, PairedConnection) -> Content
+    ) {
+        self.content = { AnyView(content($0, $1)) }
+    }
+}

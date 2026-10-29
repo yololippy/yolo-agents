@@ -114,6 +114,17 @@ class DeviceAuth:
         with self.connect() as db:
             return [self.public(row) for row in db.execute("SELECT * FROM devices ORDER BY created_at")]
 
+    def reauthorize(self, caller):
+        """Refresh a previously authenticated public device identity by ID."""
+        device_id = caller.get("id") if isinstance(caller, dict) else None
+        if not isinstance(device_id, str):
+            raise AuthError("unauthorized", "设备凭据无效。")
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+        if row is None or row["revoked_at"]:
+            raise AuthError("unauthorized", "设备凭据无效或已撤销。")
+        return self.public(row)
+
     @staticmethod
     def require(caller, permission):
         if permission not in caller["permissions"]:

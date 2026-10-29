@@ -450,8 +450,9 @@ class OfficialSDKTests(unittest.TestCase):
                 loop.close()
             asyncio.set_event_loop(self.original_loop)
 
-    def runtime(self, model, *, compact_after=None):
-        runtime = create_runtime("pydantic", "openai:offline-placeholder", self.root, self.store)
+    def runtime(self, model, *, compact_after=None, agent_name="base"):
+        runtime = create_runtime("pydantic", "openai:offline-placeholder", self.root, self.store,
+                                 agent_name=agent_name)
         self.addCleanup(runtime.close)
         runtime._backend.Agent = lambda _model, **kwargs: self.official_agent(model, **kwargs)
         if compact_after is not None:
@@ -550,6 +551,49 @@ class OfficialSDKTests(unittest.TestCase):
         path = next((self.root / 'users').glob('*/memory.sqlite3'))
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM memory_files').fetchone()[0], 0)
+
+    def test_trading_pydantic_tool_creates_only_a_draft(self):
+        from collections import deque
+        from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+        from uuid import uuid4
+        from yolo_agents.runtime_tools import RuntimeToolContext
+
+        actions = deque([
+            ("create_paper_order_draft", {"symbol": "TSLA", "side": "BUY", "quantity": 2,
+                                           "limit_price": "250"}),
+            "Paper draft created for Mac review.",
+        ])
+        async def stream(messages, _info):
+            action = actions.popleft()
+            if isinstance(action, tuple):
+                yield {0: DeltaToolCall(name=action[0], json_args=json.dumps(action[1]))}
+            else:
+                yield action
+
+        calls, order_id = [], str(uuid4())
+        runtime = self.runtime(FunctionModel(stream_function=stream), agent_name="trading-agent")
+        context = RuntimeToolContext(
+            conversation_id=self.cid, user_message_id=str(uuid4()), run_id=str(uuid4()),
+            caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},
+            trusted_messages=({"role": "user", "content": "Buy two TSLA at limit 250"},),
+            create_paper_draft=lambda **kwargs: calls.append(kwargs) or {
+                "status": "draft_created", "order_id": order_id, "state": "draft"},
+            reauthorize=lambda: {"platform": "macos"},
+        )
+        self.store.append_message(self.cid, "user", "Buy two TSLA at limit 250", run_id=context.run_id)
+        reply = "".join(runtime.stream_reply(self.store.list_messages(self.cid), self.cid,
+                                               runtime_tools=context))
+        self.assertTrue(reply.startswith("Paper draft created for Mac review.\n\n```paper-order\n"))
+        self.assertEqual(reply.count("```paper-order"), 1)
+        artifact = json.loads(reply.split("```paper-order\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(artifact, {
+            "type": "paper_order_draft", "order_id": order_id, "symbol": "TSLA",
+            "side": "BUY", "quantity": 2, "limit_price": "250", "environment": "paper",
+            "order_type": "LMT", "tif": "DAY",
+        })
+        self.assertEqual(calls[0]["proposal"], {
+            "symbol": "TSLA", "side": "BUY", "quantity": 2, "limit_price": "250"})
+        self.assertFalse(actions)
 
     def test_guardrail_blocks_injected_existing_memory_before_model(self):
         from pydantic_ai.models.function import FunctionModel

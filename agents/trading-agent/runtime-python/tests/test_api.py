@@ -28,6 +28,7 @@ from yolo_trading.api_extension import TradingAPIExtension
 from yolo_trading.ibkr import IBKRAdapter
 from yolo_trading.ibkr_config import IBKRConfig
 from yolo_trading.paper_order_store import PaperOrderStore
+from yolo_trading.paper_orders import OrderError
 from yolo_agents.service import ChatService
 from yolo_agents.store import Store
 
@@ -439,6 +440,7 @@ class FakePaperLifecycle:
         self.submit_result = {"status": "working", "broker_order_id": "123", "filled_quantity": 0}
         self.cancel_result = {"status": "cancelled", "broker_order_id": "123", "filled_quantity": 0}
         self.preview_complete = True
+        self.preview_commission = "1.00"
         self.updates = []
         self.recovery_plans = []
         self.snapshot_hook = self.submit_hook = self.cancel_hook = None
@@ -472,7 +474,8 @@ class FakePaperLifecycle:
         self._before("preview", order_ref)
         return {"qualified_contract": {**intent["contract"], "con_id": 265598},
                 "what_if": {"complete": self.preview_complete, "accepted": True, "currency": "USD",
-                            "initial_margin_change": "10.00", "maintenance_margin_change": "8.00", "commission": "1.00",
+                            "initial_margin_change": "10.00", "maintenance_margin_change": "8.00",
+                            "commission": self.preview_commission,
                             "account": "DU_SECRET_ACCOUNT"}}
 
     def submit_paper_order(self, intent, *, order_ref, preview, context):
@@ -576,6 +579,103 @@ class PaperOrderAPITests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_requests WHERE status='completed'").fetchone()[0], 5)
         self.assertNotIn(b"DU_SECRET_ACCOUNT", self.path.read_bytes())
 
+    def test_model_tool_creates_only_draft_then_mac_must_preview_confirm_and_submit(self):
+        self.extension.bind_chat_service(self.app, self.auth)
+        conversation = self.store.create_conversation("Paper draft")
+        run_id = str(uuid4())
+        message = self.store.append_message(conversation["id"], "user",
+            "以 10.00 美元限价买入 2 股 AAPL", client_message_id=str(uuid4()), run_id=run_id)
+        reauthorizations = []
+
+        def reauthorize():
+            reauthorizations.append(True)
+            return self.auth.authenticate("Bearer " + self.token)
+
+        result = self.extension.create_model_paper_draft(
+            proposal={"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"},
+            conversation_id=conversation["id"], user_message_id=message["id"], run_id=run_id,
+            caller=self.mac["device"], reauthorize=reauthorize)
+        self.assertEqual(set(result), {"status", "order_id", "state"})
+        self.assertEqual((result["status"], result["state"]), ("draft_created", "draft"))
+        self.assertEqual(len(reauthorizations), 2)
+        self.assertEqual(self.broker.calls, {"preview": 0, "submit": 0, "cancel": 0})
+        replay = self.extension.create_model_paper_draft(
+            proposal={"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"},
+            conversation_id=conversation["id"], user_message_id=message["id"], run_id=run_id,
+            caller=self.mac["device"], reauthorize=reauthorize)
+        self.assertEqual(replay, result)
+        # A replay performs one fresh caller check but no second pre-insert
+        # check because the original durable request is returned unchanged.
+        self.assertEqual(len(reauthorizations), 3)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_events WHERE request_id=? "
+                                        "AND type='order.model_draft_created'", (run_id,)).fetchone()[0], 1)
+
+        status, detail = self.request("GET", "/v1/orders/" + result["order_id"], token=self.ios["token"])
+        self.assertEqual((status, detail["order"]["state"]), (200, "draft"))
+        self.assertEqual(self.action(detail["order"], "submit")[0], 409)
+        proposed = self.action(detail["order"], "preview")[1]["order"]
+        self.assertEqual(self.action(proposed, "submit")[0], 409)
+        confirmed = self.action(proposed, "confirm")[1]["order"]
+        submitted = self.action(confirmed, "submit")[1]["order"]
+        self.assertEqual(submitted["state"], "working")
+        self.assertEqual(self.broker.calls, {"preview": 1, "submit": 1, "cancel": 0})
+        with closing(sqlite3.connect(self.path)) as db:
+            event = db.execute("SELECT payload FROM paper_events WHERE request_id=? "
+                               "AND type='order.model_draft_created'", (run_id,)).fetchone()
+            self.assertEqual(json.loads(event[0]), {"conversation_id": conversation["id"],
+                "user_message_id": message["id"], "run_id": run_id})
+
+    def test_model_draft_rejects_unsafe_schema_source_and_non_mac_caller(self):
+        self.extension.bind_chat_service(self.app, self.auth)
+        conversation = self.store.create_conversation("Paper draft")
+        run_id = str(uuid4())
+        message = self.store.append_message(conversation["id"], "user", "AAPL BUY 2 @ 10.00",
+                                            client_message_id=str(uuid4()), run_id=run_id)
+        proposal = {"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"}
+        mac_auth = lambda: self.auth.authenticate("Bearer " + self.token)
+        ios_auth = lambda: self.auth.authenticate("Bearer " + self.ios["token"])
+        cases = [
+            ({**proposal, "confirm": True}, conversation["id"], message["id"], run_id,
+             self.mac["device"], mac_auth),
+            (proposal, conversation["id"], str(uuid4()), run_id, self.mac["device"], mac_auth),
+            (proposal, conversation["id"], message["id"], str(uuid4()), self.mac["device"], mac_auth),
+            (proposal, conversation["id"], message["id"], run_id, self.ios["device"], ios_auth),
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(OrderError):
+                self.extension.create_model_paper_draft(
+                    proposal=case[0], conversation_id=case[1], user_message_id=case[2], run_id=case[3],
+                    caller=case[4], reauthorize=case[5])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 0)
+        self.assertEqual(self.broker.calls, {"preview": 0, "submit": 0, "cancel": 0})
+
+    def test_model_draft_rechecks_mac_authority_immediately_before_insert(self):
+        self.extension.bind_chat_service(self.app, self.auth)
+        conversation = self.store.create_conversation("Paper draft")
+        run_id = str(uuid4())
+        message = self.store.append_message(conversation["id"], "user", "AAPL BUY 2 @ 10.00",
+                                            client_message_id=str(uuid4()), run_id=run_id)
+        checks = []
+
+        def revoke_before_insert():
+            checks.append(True)
+            if len(checks) == 2:
+                self.auth.revoke(self.mac["device"], self.mac["device"]["id"])
+            return self.auth.authenticate("Bearer " + self.token)
+
+        with self.assertRaises(OrderError) as failure:
+            self.extension.create_model_paper_draft(
+                proposal={"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"},
+                conversation_id=conversation["id"], user_message_id=message["id"], run_id=run_id,
+                caller=self.mac["device"], reauthorize=revoke_before_insert)
+        self.assertEqual(failure.exception.code, "permission_revoked")
+        self.assertEqual(len(checks), 2)
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 0)
+
     def test_ios_chat_only_forged_permissions_and_revoked_device_cannot_operate(self):
         order = self.create()
         with self.auth.connect() as db:
@@ -657,6 +757,19 @@ class PaperOrderAPITests(unittest.TestCase):
         self.extension._orders.broker = object()
         self.assertEqual(self.action(order, "preview")[0], 409)
         self.assertEqual(self.broker.calls["submit"], 0)
+
+    def test_ibkr_six_decimal_commission_is_preserved_in_preview(self):
+        self.broker.preview_commission = "1.000006"
+        order = self.previewed()
+        self.assertEqual(order["preview"]["what_if"]["commission"], "1.000006")
+
+    def test_invalid_broker_amounts_fail_preview_closed(self):
+        for value in ("1.000000001", "1e0", "NaN", "Infinity", "-0.01", 1.0):
+            with self.subTest(value=value):
+                self.broker.preview_commission = value
+                status, body = self.action(self.create(), "preview")
+                self.assertEqual(status, 409)
+                self.assertEqual(body["error"]["code"], "preview_failed")
 
     def test_unknown_prevents_replay_and_same_intent_new_request_after_restart(self):
         order = self.confirmed()

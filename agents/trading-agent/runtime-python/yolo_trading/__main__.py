@@ -23,6 +23,8 @@ def add_trading_arguments(parser) -> None:
     parser.add_argument("--ibkr-port", type=int)
     parser.add_argument("--ibkr-client-id", type=int)
     parser.add_argument("--ibkr-account")
+    parser.add_argument("--ibkr-read-only", choices=("true", "false"))
+    parser.add_argument("--ibkr-execution-enabled", choices=("true", "false"))
     parser.add_argument("--ibkr-connect-timeout", type=float)
 
 
@@ -41,6 +43,8 @@ def load_broker(args, parser):
         "port": args.ibkr_port,
         "client_id": args.ibkr_client_id,
         "account": args.ibkr_account,
+        "read_only": args.ibkr_read_only,
+        "execution_enabled": args.ibkr_execution_enabled,
         "connect_timeout": args.ibkr_connect_timeout,
     }
     overrides = {key: value for key, value in overrides.items() if value is not None}

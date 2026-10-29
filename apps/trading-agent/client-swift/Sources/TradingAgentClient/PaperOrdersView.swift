@@ -5,12 +5,16 @@ private typealias OrderViewState<Value> = SwiftUI.State<Value>
 
 struct PaperOrdersView: View {
     @StateObject private var model: PaperOrdersModel
+    private let proposal: PaperOrderProposal?
+    private let selectedOrderID: UUID?
     @Environment(\.dismiss) private var dismiss
     #if os(macOS)
     @OrderViewState private var reviewing = false
     #endif
 
-    init(connection: PairedConnection) {
+    init(connection: PairedConnection, proposal: PaperOrderProposal? = nil, selectedOrderID: UUID? = nil) {
+        self.proposal = proposal
+        self.selectedOrderID = selectedOrderID
         _model = StateObject(wrappedValue: PaperOrdersModel(connection: connection))
     }
 
@@ -39,9 +43,15 @@ struct PaperOrdersView: View {
                 notices
                 if let order = model.currentOrder {
                     orderDetail(order)
+                } else if model.selectedID != nil {
+                    ContentUnavailableView {
+                        Label("正在读取已有 Paper 草稿", systemImage: "doc.text.magnifyingglass")
+                    } description: {
+                        Text("只会读取服务端已有订单；读取失败时不会创建替代草稿。")
+                    }.accessibilityIdentifier("orders.existing-draft-loading")
                 } else {
                     #if os(macOS)
-                    if model.canManage { PaperOrderTicket(model: model) }
+                    if model.canManage { PaperOrderTicket(model: model, proposal: proposal) }
                     else { readOnlyPlaceholder }
                     #else
                     readOnlyPlaceholder
@@ -61,7 +71,10 @@ struct PaperOrdersView: View {
                 }.disabled(model.isRefreshing || model.isWriting).accessibilityIdentifier("orders.refresh")
             }
         }
-        .task { await model.refresh() }
+        .task {
+            if let selectedOrderID { model.selectedID = selectedOrderID }
+            await model.refresh()
+        }
         .task(id: model.selectedID) { await model.loadSelected() }
         #if os(macOS)
         .frame(minWidth: 860, idealWidth: 1000, minHeight: 660)
@@ -104,6 +117,7 @@ struct PaperOrdersView: View {
 
     private func orderDetail(_ order: PaperOrder) -> some View {
         Form {
+            orderFlow(order)
             Section("订单状态") {
                 LabeledContent("环境", value: "Paper 模拟账户")
                 LabeledContent("状态", value: order.state.label).accessibilityIdentifier("orders.state")
@@ -155,6 +169,32 @@ struct PaperOrdersView: View {
         }.formStyle(.grouped)
     }
 
+    private func orderFlow(_ order: PaperOrder) -> some View {
+        Section("明确确认流程") {
+            flowRow(1, "创建草稿", complete: true, current: order.state == .draft)
+            flowRow(2, "获取 What-if", complete: order.preview != nil, current: [.draft, .previewing].contains(order.state))
+            flowRow(3, "确认已核对预览（不提交）", complete: order.confirmation != nil, current: order.state == .proposed)
+            flowRow(4, "提交 Paper 订单", complete: ![.draft, .previewing, .proposed, .confirmed].contains(order.state), current: order.state == .confirmed)
+            Text("每一步都需要 Mac 上的独立明确操作；聊天模型无法执行这些操作。")
+                .font(.footnote).foregroundStyle(.secondary)
+        }.accessibilityIdentifier("orders.confirmation-flow")
+    }
+
+    @ViewBuilder
+    private func flowRow(_ number: Int, _ title: String, complete: Bool, current: Bool) -> some View {
+        Label {
+            HStack {
+                Text("\(number). \(title)")
+                Spacer()
+                Text(complete ? "已完成" : current ? "当前步骤" : "等待")
+                    .font(.caption).foregroundStyle(current ? .orange : .secondary)
+            }
+        } icon: {
+            Image(systemName: complete ? "checkmark.circle.fill" : current ? "circle.inset.filled" : "circle")
+                .foregroundStyle(complete ? .green : current ? .orange : .secondary)
+        }
+    }
+
     #if os(macOS)
     private func macActions(_ order: PaperOrder) -> some View {
         Section("分步操作") {
@@ -204,14 +244,46 @@ struct PaperOrdersView: View {
 #if os(macOS)
 private struct PaperOrderTicket: View {
     @ObservedObject var model: PaperOrdersModel
+    let proposal: PaperOrderProposal?
     @OrderViewState private var symbol = ""
     @OrderViewState private var side: PaperOrderSide = .buy
-    @OrderViewState private var quantity = "1"
+    @OrderViewState private var quantity = ""
     @OrderViewState private var limitPrice = ""
+
+    init(model: PaperOrdersModel, proposal: PaperOrderProposal?) {
+        self.model = model
+        self.proposal = proposal
+        _symbol = OrderViewState(initialValue: proposal?.symbol ?? "")
+        _side = OrderViewState(initialValue: proposal?.side ?? .buy)
+        _quantity = OrderViewState(initialValue: proposal?.quantity.map(String.init) ?? "")
+        _limitPrice = OrderViewState(initialValue: proposal?.limitPrice ?? "")
+    }
+
+    private var issues: [String] {
+        var values: [String] = []
+        if (try? PaperStockContract(symbol: symbol)) == nil { values.append(symbol.isEmpty ? "请填写股票代码" : "股票代码无效") }
+        if quantity.range(of: #"^[1-9][0-9]{0,5}$"#, options: .regularExpression) == nil || Int(quantity).map({ !(1...100_000).contains($0) }) == true {
+            values.append(quantity.isEmpty ? "请填写股数" : "股数必须是 1–100000 的整数")
+        }
+        if !PaperOrder.validLimitPrice(limitPrice) { values.append(limitPrice.isEmpty ? "请填写限价" : "限价格式无效") }
+        return values
+    }
 
     var body: some View {
         Form {
+            Section("明确确认流程") {
+                Label("1. 创建草稿 · 当前步骤", systemImage: "circle.inset.filled").foregroundStyle(.orange)
+                Label("2. 获取 What-if", systemImage: "circle").foregroundStyle(.secondary)
+                Label("3. 确认已核对预览（不提交）", systemImage: "circle").foregroundStyle(.secondary)
+                Label("4. 提交 Paper 订单", systemImage: "circle").foregroundStyle(.secondary)
+                Text("聊天提案不会自动创建、确认或提交订单。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }.accessibilityIdentifier("orders.confirmation-flow")
             Section("创建 Paper 草稿") {
+                if proposal != nil {
+                    Label("已从聊天提案带入；请逐项核对", systemImage: "text.bubble")
+                        .foregroundStyle(.orange).accessibilityIdentifier("orders.ticket.from-proposal")
+                }
                 LabeledContent("账户", value: model.accountSelection == nil ? "服务端尚未提供 Paper 配置" : "服务端已配置的 Paper 账户")
                 TextField("股票代码，例如 AAPL", text: $symbol).accessibilityIdentifier("orders.ticket.symbol")
                 Picker("方向", selection: $side) {
@@ -222,9 +294,14 @@ private struct PaperOrderTicket: View {
                 TextField("每股限价 USD", text: $limitPrice).accessibilityIdentifier("orders.ticket.limit-price")
                 Text("美股 STK / SMART / USD · 限价 LMT · 当日 DAY")
                     .font(.footnote).foregroundStyle(.secondary)
+                if !issues.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(issues, id: \.self) { Label($0, systemImage: "exclamationmark.circle") }
+                    }.font(.caption).foregroundStyle(.orange).accessibilityIdentifier("orders.ticket.issues")
+                }
                 Button("创建草稿") {
                     Task { await model.createDraft(symbol: symbol, side: side, quantity: quantity, limitPrice: limitPrice) }
-                }.disabled(!model.canCreateDraft).accessibilityIdentifier("orders.ticket.create")
+                }.disabled(!model.canCreateDraft || !issues.isEmpty).accessibilityIdentifier("orders.ticket.create")
                 Text("创建后单独获取 What-if 预览，核对合约、保证金和佣金，再确认及提交。")
                     .font(.footnote).foregroundStyle(.secondary)
             }

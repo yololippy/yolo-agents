@@ -243,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                     content = text_field(data, "content", 16000)
                     client_message_id = identifier(data.get("client_message_id"))
                     self.reauthorize()
-                    self.send_json(202, app.send(conversation_id, content, client_message_id))
+                    self.send_json(202, app.send(conversation_id, content, client_message_id, caller=caller))
                     return
         if path == "/v1/events" and method == "GET":
             try:

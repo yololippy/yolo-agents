@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import logging
 import re
 from uuid import UUID, uuid4
 
@@ -14,6 +15,7 @@ from .paper_order_store import PaperOrderStore, encoded
 ACTIVE = ("submitting", "unknown", "accepted", "working", "partial", "cancel_pending")
 RESULT_STATES = {"accepted", "working", "partial", "filled", "rejected", "cancel_pending", "cancelled", "unknown"}
 TERMINAL = {"filled", "rejected", "cancelled"}
+_LOGGER = logging.getLogger(__name__)
 
 
 class OrderError(Exception):
@@ -66,6 +68,25 @@ def money(value, *, signed=False):
     if not signed and not 0 < number <= Decimal("1000000"):
         raise OrderError("invalid_order", 400)
     return format(number.normalize(), "f")
+
+
+def broker_amount(value):
+    """Validate broker-returned USD amounts without changing their spelling.
+
+    IBKR can return commissions with more precision than an order's price.  The
+    wider precision is accepted only at this broker boundary; user-supplied
+    prices continue to use ``money`` and its four-decimal limit.
+    """
+    if (not isinstance(value, str)
+            or re.fullmatch(r"-?(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,8})?", value) is None):
+        raise OrderError("preview_failed")
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        raise OrderError("preview_failed") from None
+    if not number.is_finite() or abs(number) > Decimal("1000000000000"):
+        raise OrderError("preview_failed")
+    return number
 
 
 def exact(data, fields):
@@ -394,8 +415,16 @@ class PaperOrderService:
                 result = self.broker.submit_paper_order(intent, order_ref=row["id"], preview=preview, context=context)
             else:
                 result = self.broker.cancel_paper_order(order_ref=row["id"], broker_order_id=row["broker_order_id"], context=context)
-        except Exception:
+        except Exception as exc:
             if action == "preview":
+                code = getattr(exc, "code", None)
+                safe_codes = {
+                    "account_mismatch", "account_selection_mismatch", "broker_not_ready",
+                    "contract_lookup_failed", "contract_not_unique", "invalid_qualified_contract",
+                    "preview_timeout", "session_changed", "what_if_failed", "what_if_incomplete",
+                }
+                _LOGGER.warning("Paper preview broker call failed (%s)",
+                                code if code in safe_codes else type(exc).__name__)
                 return self._preview_failure(row["id"], user_id, request_id)
             result = {"order_ref": row["id"], "status": "unknown"}
         with self.store.transaction() as db:
@@ -438,12 +467,11 @@ class PaperOrderService:
                 or what_if.get("accepted") is not True or what_if.get("currency") != "USD"):
             raise OrderError("preview_failed")
         amount_keys = ("initial_margin_change", "maintenance_margin_change", "commission")
-        for key in amount_keys:
-            money(what_if.get(key), signed=True)
+        numbers = {key: broker_amount(what_if.get(key)) for key in amount_keys}
         # Preserve the facade's validated decimal spelling: its owner-loop
         # preview binding may compare these exact values at submission.
         amounts = {key: what_if[key] for key in amount_keys}
-        if Decimal(amounts["commission"]) < 0:
+        if numbers["commission"] < 0:
             raise OrderError("preview_failed")
         return {"id": str(uuid4()), "qualified_contract": {**intent["contract"], "con_id": contract["con_id"]},
                 "what_if": {"complete": True, "accepted": True, "currency": "USD", **amounts}, "context": context,

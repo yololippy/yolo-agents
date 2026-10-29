@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import threading
+from uuid import UUID
 
 from yolo_agents.api import APIError, identifier
 
@@ -57,13 +58,41 @@ class TradingAPIExtension:
         # A migration failure propagates to Host startup; never enables a fallback.
         self._order_store = PaperOrderStore(orders_path) if orders_path is not None else None
         self._orders = None
-        self._order_guard = threading.Lock()
+        self._order_guard = threading.RLock()
+        self._chat_service = None
+        self._auth = None
+        self._tool_bound = False
+
+    def bind_chat_service(self, service, auth, *, bind_runtime_tool=True):
+        """Bind the local product store after the Host owns its process lock."""
+        store = getattr(service, "store", None)
+        if (not callable(getattr(store, "get_conversation", None))
+                or not callable(getattr(store, "list_messages", None))
+                or not isinstance(getattr(auth, "server_id", None), str)):
+            raise TypeError("Trading extension requires the local chat service and device authority")
+        with self._order_guard:
+            if ((self._chat_service is not None and self._chat_service is not service)
+                    or (self._auth is not None and self._auth is not auth)):
+                raise RuntimeError("Trading extension is already bound to another Host")
+            if bind_runtime_tool and not self._tool_bound:
+                bind_tool = getattr(service, "bind_paper_draft_tool", None)
+                reauthorize = getattr(auth, "reauthorize", None)
+                if not callable(bind_tool) or not callable(reauthorize):
+                    raise RuntimeError("Trading Host does not support the draft-only tool boundary")
+                bind_tool(self.create_model_paper_draft, reauthorize)
+                self._tool_bound = True
+            self._chat_service, self._auth = service, auth
+            if self._orders is None:
+                order_store = self._order_store or PaperOrderStore(
+                    Path(service.store.path).parent / "paper-orders.sqlite3")
+                self._initialize_orders(order_store)
+        return self.create_model_paper_draft
 
     def orders(self, handler):
+        # Direct test/embedded servers may replace an extension on one service;
+        # production Host performs the one authoritative tool binding itself.
+        self.bind_chat_service(handler.server.service, handler.server.auth, bind_runtime_tool=False)
         with self._order_guard:
-            if self._orders is None:
-                store = self._order_store or PaperOrderStore(Path(handler.server.service.store.path).parent / "paper-orders.sqlite3")
-                self._initialize_orders(store)
             return self._orders
 
     def _initialize_orders(self, store):
@@ -88,6 +117,87 @@ class TradingAPIExtension:
             if not callable(stage) or stage(plan) is not True:
                 raise RuntimeError("Paper order recovery could not be staged safely")
             return len(plan["active_order_refs"])
+
+    @staticmethod
+    def _model_uuid(value):
+        try:
+            result = str(UUID(value))
+        except (AttributeError, TypeError, ValueError):
+            raise OrderError("invalid_order", 400) from None
+        if result != value:
+            raise OrderError("invalid_order", 400)
+        return result
+
+    @staticmethod
+    def _model_caller(caller, reauthorize):
+        try:
+            PaperOrderService.require_mac(caller)
+            current = reauthorize()
+            PaperOrderService.require_mac(current)
+            if current["id"] != caller["id"]:
+                raise ValueError()
+            return current
+        except Exception:
+            raise OrderError("permission_revoked", 403) from None
+
+    def create_model_paper_draft(self, *, proposal, conversation_id, user_message_id,
+                                 run_id, caller, reauthorize):
+        """Create only a draft from a saved Mac chat run.
+
+        This is the sole model-facing trading capability.  It cannot preview,
+        confirm, submit or cancel, and it never chooses an account or order
+        execution setting from model arguments.
+        """
+        if not callable(reauthorize):
+            raise OrderError("permission_revoked", 403)
+        caller = self._model_caller(caller, reauthorize)
+        if not isinstance(proposal, dict) or set(proposal) != {
+                "symbol", "side", "quantity", "limit_price"}:
+            raise OrderError("invalid_order", 400)
+        conversation_id = self._model_uuid(conversation_id)
+        user_message_id = self._model_uuid(user_message_id)
+        run_id = self._model_uuid(run_id)
+        with self._order_guard:
+            if self._chat_service is None or self._auth is None or self._orders is None:
+                raise OrderError("paper_facade_unavailable", 409)
+            conversation = self._chat_service.store.get_conversation(conversation_id)
+            if conversation is None or conversation.get("archived"):
+                raise OrderError("invalid_order", 400)
+            source = next((message for message in self._chat_service.store.list_messages(conversation_id)
+                           if message.get("id") == user_message_id), None)
+            if (source is None or source.get("role") != "user" or source.get("run_id") != run_id
+                    or not isinstance(source.get("content"), str) or not source["content"].strip()):
+                raise OrderError("invalid_order", 400)
+            try:
+                configuration = self.broker.health()["configuration"]
+                selection = configuration["config_id"]
+            except Exception:
+                raise OrderError("broker_not_ready") from None
+            data = {"client_request_id": run_id, "account_selection": selection,
+                    "contract": {"symbol": proposal["symbol"], "sec_type": "STK",
+                                 "exchange": "SMART", "currency": "USD"},
+                    "side": proposal["side"], "quantity": proposal["quantity"],
+                    "limit_price": proposal["limit_price"], "tif": "DAY", "order_type": "LMT"}
+            status, result = self._orders.operate("create", data, caller, self._auth.server_id,
+                                                  authorize=reauthorize)
+            if status != 201:
+                error = result.get("error") if isinstance(result, dict) else None
+                if isinstance(error, dict) and isinstance(error.get("code"), str):
+                    raise OrderError(error["code"], status)
+                raise OrderError("order_state_conflict")
+            if not isinstance(result, dict) or not isinstance(result.get("order"), dict):
+                raise OrderError("order_state_conflict")
+            order = result["order"]
+            with self._orders.store.transaction() as db:
+                event = db.execute("SELECT 1 FROM paper_events WHERE request_id=? "
+                                   "AND type='order.model_draft_created'", (run_id,)).fetchone()
+                if event is None:
+                    row = self._orders.store.order(db, order["id"], self._auth.server_id)
+                    if row is None or row["state"] != "draft":
+                        raise OrderError("order_state_conflict")
+                    self._orders.store.event(db, row, "order.model_draft_created", self._orders.now(), run_id,
+                        {"conversation_id": conversation_id, "user_message_id": user_message_id, "run_id": run_id})
+            return {"status": "draft_created", "order_id": order["id"], "state": "draft"}
 
     @staticmethod
     def order_admin(handler):

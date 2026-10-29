@@ -72,6 +72,80 @@ private actor PaperRecordingHTTP: HTTPTransport {
     }
 }
 
+@Test func paperChatProposalRequiresExplicitTypedFencedArtifact() throws {
+    let content = """
+    可以考虑以下 Paper 限价单；它仍需要你在 Mac 上逐步确认：
+    ```paper-order
+    {"type":"paper_order_proposal","environment":"paper","symbol":" aapl ","side":"buy","quantity":2,"limit_price":"100.1250","order_type":"LMT","tif":"DAY"}
+    ```
+    """
+    let proposal = try #require(PaperOrderProposal(messageContent: content))
+    #expect(proposal.kind == .proposal)
+    #expect(proposal.symbol == "AAPL")
+    #expect(proposal.side == .buy)
+    #expect(proposal.quantity == 2)
+    #expect(proposal.limitPrice == "100.1250")
+    #expect(proposal.isComplete && proposal.issues.isEmpty)
+    #expect(proposal.destination == .createDraft)
+
+    #expect(PaperOrderProposal(messageContent: "BUY 2 AAPL at 100.1250") == nil)
+    #expect(PaperOrderProposal(messageContent: #"{"type":"paper_order_proposal","symbol":"AAPL"}"#) == nil)
+    #expect(PaperOrderProposal(messageContent: "```json\n{\"symbol\":\"AAPL\"}\n```") == nil)
+}
+
+@Test func paperChatProposalReportsMissingAndUnsupportedFieldsWithoutCreatingAnOrder() throws {
+    let content = """
+    ```json
+    {"type":"paper_order_draft","environment":"live","symbol":"bad symbol","side":"HOLD","quantity":true,"limit_price":100.25,"order_type":"MKT","tif":"GTC"}
+    ```
+    """
+    let proposal = try #require(PaperOrderProposal(messageContent: content))
+    #expect(proposal.kind == .draft)
+    #expect(!proposal.isComplete)
+    #expect(proposal.destination == .unavailable)
+    #expect(proposal.symbol == nil && proposal.side == nil && proposal.quantity == nil && proposal.limitPrice == nil)
+    #expect(proposal.issues.contains("股票代码无效"))
+    #expect(proposal.issues.contains("买卖方向必须是 BUY 或 SELL"))
+    #expect(proposal.issues.contains("股数必须是 1–100000 的整数"))
+    #expect(proposal.issues.contains("限价必须是有效的 USD 十进制字符串"))
+    #expect(proposal.issues.contains("只支持 Paper 模拟环境"))
+    #expect(proposal.issues.contains("只支持 LMT 限价单"))
+    #expect(proposal.issues.contains("只支持 DAY 当日单"))
+
+    let missing = try #require(PaperOrderProposal(messageContent: "```paper-order\n{\"type\":\"paper_order_proposal\"}\n```"))
+    #expect(missing.issues == ["缺少股票代码", "缺少买卖方向", "缺少股数", "缺少限价"])
+}
+
+@Test func paperChatDraftRoutesToExistingOrderAndNeverToDraftCreation() throws {
+    let orderID = UUID(uuidString: "70000000-0000-4000-8000-000000000007")!
+    let content = """
+    Paper 草稿已创建，仍需在 Mac 中逐步操作：
+    ```paper-order
+    {"type":"paper_order_draft","order_id":"\(orderID.uuidString.lowercased())","symbol":"TSLA","side":"BUY","quantity":2,"limit_price":"250.00","environment":"paper","order_type":"LMT","tif":"DAY"}
+    ```
+    """
+    let draft = try #require(PaperOrderProposal(messageContent: content))
+    #expect(draft.kind == .draft && draft.orderID == orderID)
+    #expect(draft.destination == .existingDraft(orderID))
+    #expect(draft.isComplete)
+
+    let proposalWithID = try #require(PaperOrderProposal(messageContent: """
+    ```paper-order
+    {"type":"paper_order_proposal","order_id":"\(orderID.uuidString.lowercased())","symbol":"TSLA","side":"BUY","quantity":2,"limit_price":"250.00"}
+    ```
+    """))
+    #expect(proposalWithID.destination == .unavailable)
+    #expect(proposalWithID.issues.contains("新提案不能包含已有草稿 ID"))
+
+    let missingID = try #require(PaperOrderProposal(messageContent: """
+    ```paper-order
+    {"type":"paper_order_draft","symbol":"TSLA","side":"BUY","quantity":2,"limit_price":"250.00"}
+    ```
+    """))
+    #expect(missingID.destination == .unavailable)
+    #expect(missingID.issues.contains("缺少已有草稿 ID"))
+}
+
 @Test func paperTargetComesOnlyFromConfiguredPaperHealth() throws {
     let health = try paperDecode(PaperHealth.self, paperHealthObject())
     #expect(try PaperAccountSelection(health: health).rawValue == paperConfig)

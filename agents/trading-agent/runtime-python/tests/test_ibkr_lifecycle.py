@@ -1,7 +1,9 @@
 """Persistent owner-loop lifecycle; fake broker clients and local HTTP only."""
 
 import asyncio
+from contextlib import redirect_stderr
 import http.client
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -15,7 +17,7 @@ from yolo_agents.api import ChatHTTPServer
 from yolo_agents.auth import DeviceAuth
 from yolo_agents.service import ChatService
 from yolo_agents.store import Store
-from yolo_trading.__main__ import run_trading_host
+from yolo_trading.__main__ import build_parser, load_broker, run_trading_host
 from yolo_trading.api_extension import TradingAPIExtension
 from yolo_trading.ibkr import IBKRAdapter
 from yolo_trading.ibkr_config import IBKRConfig
@@ -178,6 +180,20 @@ class LifecycleTests(unittest.TestCase):
         with patch("yolo_trading.__main__.run_host", return_value=0) as run:
             self.assertEqual(run_trading_host(object(), None), 0)
         self.assertEqual(run.call_args.kwargs["extension"].broker_health()["state"], "not_configured")
+
+    def test_host_cli_requires_explicit_paper_writable_pair(self):
+        parser = build_parser()
+        with patch.dict("os.environ", {}, clear=True):
+            args = parser.parse_args(["--ibkr-environment", "paper", "--ibkr-account", "DU123456",
+                                      "--ibkr-read-only", "false", "--ibkr-execution-enabled", "true"])
+            broker = load_broker(args, parser)
+        self.assertEqual((broker.config.environment, broker.config.read_only,
+                          broker.config.execution_enabled), ("paper", False, True))
+        self.assertTrue(broker.config.paper_execution_enabled)
+        with patch.dict("os.environ", {}, clear=True), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            args = parser.parse_args(["--ibkr-environment", "live", "--ibkr-account", "U123456",
+                                      "--ibkr-read-only", "false", "--ibkr-execution-enabled", "true"])
+            load_broker(args, parser)
 
     def test_gateway_failure_retries_and_recovers_with_full_reconciliation(self):
         _, lifecycle, clients = self.build(failures=[OSError("secret diagnostic"), None])
