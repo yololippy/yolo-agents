@@ -170,6 +170,21 @@ public final class PaperOrdersModel: ObservableObject {
             apply(updated); armedConfirmation = nil; review = nil; actionError = nil
         } catch { writeFailed(error, operation: "preview", requestID: requestID, orderID: order.id, sent: sent) }
     }
+    /// Obtain What-if if needed, then prepare one explicit confirmation whose
+    /// accepted action continues through confirm and submit without another UI step.
+    public func prepareCompleteSubmission() async {
+        guard !isWriting, uncertainRequest == nil else { return }
+        if let order = currentOrder, canPreview(order) {
+            await previewCurrentOrder()
+        }
+        guard let order = currentOrder, canConfirm(order, now: clock()) else { return }
+        do {
+            review = PaperOrderReview(order: order, action: .confirmAndSubmit(
+                try PaperOrderConfirmRequest(clientRequestID: UUID(), order: order, now: clock())
+            ))
+            actionError = nil
+        } catch { actionError = error.localizedDescription }
+    }
     public func reviewConfirmation() {
         guard let order = currentOrder, canConfirm(order, now: clock()) else { return }
         do { review = PaperOrderReview(order: order, action: .confirm(try PaperOrderConfirmRequest(clientRequestID: UUID(), order: order, now: clock()))) }
@@ -206,6 +221,27 @@ public final class PaperOrdersModel: ObservableObject {
                 _ = try PaperOrderSubmitRequest(clientRequestID: request.clientRequestID, order: pending.order, now: clock())
                 armedConfirmation = nil
                 sent = true; updated = try await writer.submit(pending.order.id, request: request)
+            case .confirmAndSubmit(let request):
+                _ = try PaperOrderConfirmRequest(clientRequestID: request.clientRequestID,
+                                                 order: pending.order, now: clock())
+                sent = true
+                let confirmed = try await writer.confirm(pending.order.id, request: request)
+                guard confirmed.id == pending.order.id, confirmed.state == .confirmed,
+                      let confirmation = confirmed.confirmation,
+                      confirmation.version == confirmed.version,
+                      confirmation.contentHash == confirmed.contentHash,
+                      confirmed.hasValidPreview(at: clock()) else {
+                    throw PaperOrderValidationError.invalidState
+                }
+                apply(confirmed)
+                armedConfirmation = confirmation
+                try await preflight(confirmed)
+                guard currentOrder?.confirmation == armedConfirmation else {
+                    throw PaperOrderValidationError.invalidState
+                }
+                let submit = try PaperOrderSubmitRequest(clientRequestID: UUID(), order: confirmed, now: clock())
+                armedConfirmation = nil
+                updated = try await writer.submit(confirmed.id, request: submit)
             case .cancel(let request):
                 sent = true; updated = try await writer.cancel(pending.order.id, request: request)
             }
@@ -246,20 +282,21 @@ public struct PaperOrderReview: Identifiable, Sendable {
     public let order: PaperOrder
     fileprivate let action: Action
     fileprivate enum Action: Sendable {
-        case confirm(PaperOrderConfirmRequest), submit(PaperOrderSubmitRequest), cancel(PaperOrderCancelRequest)
+        case confirm(PaperOrderConfirmRequest), submit(PaperOrderSubmitRequest)
+        case confirmAndSubmit(PaperOrderConfirmRequest), cancel(PaperOrderCancelRequest)
     }
     fileprivate init(order: PaperOrder, action: Action) { self.order = order; self.action = action }
     public var kind: String {
-        switch action { case .confirm: "confirm"; case .submit: "submit"; case .cancel: "cancel" }
+        switch action { case .confirm: "confirm"; case .submit: "submit"; case .confirmAndSubmit: "confirm-and-submit"; case .cancel: "cancel" }
     }
     public var title: String {
-        switch action { case .confirm: "确认此 Paper 预览？"; case .submit: "提交此 Paper 订单？"; case .cancel: "撤销此 Paper 订单？" }
+        switch action { case .confirm: "确认此 Paper 预览？"; case .submit: "提交此 Paper 订单？"; case .confirmAndSubmit: "确认并提交此 Paper 订单？"; case .cancel: "撤销此 Paper 订单？" }
     }
     public var buttonTitle: String {
-        switch action { case .confirm: "确认预览（不提交）"; case .submit: "提交 Paper 订单"; case .cancel: "确认撤销此单" }
+        switch action { case .confirm: "确认预览（不提交）"; case .submit: "提交 Paper 订单"; case .confirmAndSubmit: "确认并提交 Paper 订单"; case .cancel: "确认撤销此单" }
     }
     fileprivate var requestID: UUID {
-        switch action { case .confirm(let request): request.clientRequestID; case .submit(let request): request.clientRequestID; case .cancel(let request): request.clientRequestID }
+        switch action { case .confirm(let request): request.clientRequestID; case .submit(let request): request.clientRequestID; case .confirmAndSubmit(let request): request.clientRequestID; case .cancel(let request): request.clientRequestID }
     }
     public var summary: String {
         var text = "\(order.side.rawValue) \(order.contract.symbol) · \(order.quantity) 股 · 限价 \(order.limitPrice) USD\nSTK / SMART / USD · DAY / LMT"

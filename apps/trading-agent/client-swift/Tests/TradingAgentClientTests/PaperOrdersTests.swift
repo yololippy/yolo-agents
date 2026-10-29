@@ -182,6 +182,25 @@ private actor OrdersHTTP: HTTPTransport {
 }
 
 #if os(macOS)
+@Test @MainActor func paperOneConfirmationContinuesThroughWhatIfConfirmAndSubmit() async throws {
+    let http = OrdersHTTP(state: "draft")
+    let model = try ordersModel(http)
+    await model.refresh(); await selectOrder(model)
+
+    await model.prepareCompleteSubmission()
+    let review = try #require(model.review)
+    #expect(review.kind == "confirm-and-submit")
+    #expect(review.summary.contains("初始保证金变动：100.25 USD"))
+    #expect(model.currentOrder?.state == .proposed)
+    #expect(await http.actions == ["preview"])
+
+    await model.performReviewedAction(review.id)
+    #expect(model.currentOrder?.state == .accepted)
+    #expect(await http.actions == ["preview", "confirm", "submit"])
+    await model.performReviewedAction(review.id)
+    #expect(await http.actions == ["preview", "confirm", "submit"])
+}
+
 @Test @MainActor func paperStepsRequireSeparateExplicitActionsAndConsumeReviewOnce() async throws {
     let http = OrdersHTTP()
     let model = try ordersModel(http)

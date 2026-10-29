@@ -34,7 +34,7 @@ struct PaperOrderProposalCard: View {
                 }
                 Text(proposal.kind == .proposal
                      ? "模型输出仅是提案，不能确认或提交订单。"
-                     : "这是服务端非执行草稿；What-if、确认和提交仍需在 Mac 上逐步操作。")
+                     : "这是服务端非执行草稿；Mac 获取 What-if 后会请你确认一次，确认后连续提交。")
                     .font(.caption).foregroundStyle(.secondary)
                 #if os(macOS)
                 Group {
@@ -46,7 +46,7 @@ struct PaperOrderProposalCard: View {
                         .buttonStyle(.borderedProminent)
                         .accessibilityIdentifier("paper-proposal.open-draft")
                     case .existingDraft:
-                        Button("打开已有 Paper 草稿") { showingPaperOrders = true }
+                        Button("核对并提交已有 Paper 草稿") { showingPaperOrders = true }
                             .buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("paper-draft.open-existing")
                     case .unavailable:

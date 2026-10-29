@@ -173,9 +173,9 @@ struct PaperOrdersView: View {
         Section("明确确认流程") {
             flowRow(1, "创建草稿", complete: true, current: order.state == .draft)
             flowRow(2, "获取 What-if", complete: order.preview != nil, current: [.draft, .previewing].contains(order.state))
-            flowRow(3, "确认已核对预览（不提交）", complete: order.confirmation != nil, current: order.state == .proposed)
+            flowRow(3, "确认 What-if 并授权提交", complete: order.confirmation != nil, current: order.state == .proposed)
             flowRow(4, "提交 Paper 订单", complete: ![.draft, .previewing, .proposed, .confirmed].contains(order.state), current: order.state == .confirmed)
-            Text("每一步都需要 Mac 上的独立明确操作；聊天模型无法执行这些操作。")
+            Text("Mac 会先获取 What-if；你明确确认一次后，应用会连续完成确认与 Paper 提交。聊天模型无法自行执行。")
                 .font(.footnote).foregroundStyle(.secondary)
         }.accessibilityIdentifier("orders.confirmation-flow")
     }
@@ -208,13 +208,14 @@ struct PaperOrdersView: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 VStack(alignment: .leading, spacing: 12) {
                     if [.draft, .proposed].contains(order.state) {
-                        Button("获取 What-if 预览") { Task { await model.previewCurrentOrder() } }
-                            .disabled(!model.canPreview(order)).accessibilityIdentifier("orders.preview")
-                    }
-                    if order.state == .proposed {
-                        Button("确认已核对预览（不提交）") {
-                            model.reviewConfirmation(); reviewing = model.review != nil
-                        }.disabled(!model.canConfirm(order, now: context.date)).accessibilityIdentifier("orders.confirm")
+                        Button(order.state == .draft ? "获取 What-if 并继续提交" : "核对 What-if 并提交") {
+                            Task {
+                                await model.prepareCompleteSubmission()
+                                reviewing = model.review != nil
+                            }
+                        }
+                        .disabled(order.state == .draft ? !model.canPreview(order) : !model.canConfirm(order, now: context.date))
+                        .accessibilityIdentifier("orders.complete-submit")
                     }
                     if order.state == .confirmed {
                         Button("提交此 Paper 订单") {
@@ -274,7 +275,7 @@ private struct PaperOrderTicket: View {
             Section("明确确认流程") {
                 Label("1. 创建草稿 · 当前步骤", systemImage: "circle.inset.filled").foregroundStyle(.orange)
                 Label("2. 获取 What-if", systemImage: "circle").foregroundStyle(.secondary)
-                Label("3. 确认已核对预览（不提交）", systemImage: "circle").foregroundStyle(.secondary)
+                Label("3. 确认 What-if 并授权提交", systemImage: "circle").foregroundStyle(.secondary)
                 Label("4. 提交 Paper 订单", systemImage: "circle").foregroundStyle(.secondary)
                 Text("聊天提案不会自动创建、确认或提交订单。")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -302,7 +303,7 @@ private struct PaperOrderTicket: View {
                 Button("创建草稿") {
                     Task { await model.createDraft(symbol: symbol, side: side, quantity: quantity, limitPrice: limitPrice) }
                 }.disabled(!model.canCreateDraft || !issues.isEmpty).accessibilityIdentifier("orders.ticket.create")
-                Text("创建后单独获取 What-if 预览，核对合约、保证金和佣金，再确认及提交。")
+                Text("创建后获取 What-if；核对合约、保证金和佣金并确认一次，应用会继续提交。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
