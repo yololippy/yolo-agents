@@ -108,6 +108,20 @@ class _Runtime:
             raise RuntimeStateError("此会话来自不同运行模式，请新建会话，避免混用演示和真实模型状态。")
         return state
 
+    def primary_owner_scope(self, user_id: str = "local-user") -> str:
+        """Opaque identity used only to bind this runtime's primary conversation."""
+        return _scope(user_id)
+
+    def conversation_matches_primary_owner(
+        self, conversation_id: str, user_id: str = "local-user",
+    ) -> bool:
+        """Check migration compatibility without running a model or changing state."""
+        try:
+            self._load(conversation_id, user_id)
+            return True
+        except (LoginRequiredError, RuntimeStateError):
+            return False
+
     def _validate_completed_state(self, state: dict, conversation_id: str) -> None:
         """Additional mode-specific validation; never invokes a model or tools."""
 
@@ -196,6 +210,7 @@ def _load_pydantic_backend() -> SimpleNamespace:
         from pydantic_ai import Agent, Conversation, ConversationTypeAdapter
         from pydantic_ai.usage import UsageLimits
         from pydantic_ai_harness import ConversationSearch, Memory, StepPersistence, SummarizingCompaction
+        from pydantic_ai_harness.compaction import ClearToolResults, TieredCompaction
         from pydantic_ai_harness.conversation_search import SnapshotHistorySource
         from pydantic_ai_harness.memory import SqliteMemoryStore
         from pydantic_ai_harness.step_persistence import SqliteStepStore
@@ -207,6 +222,7 @@ def _load_pydantic_backend() -> SimpleNamespace:
         Agent=Agent, Conversation=Conversation, ConversationTypeAdapter=ConversationTypeAdapter,
         UsageLimits=UsageLimits, ConversationSearch=ConversationSearch, Memory=Memory,
         StepPersistence=StepPersistence, SummarizingCompaction=SummarizingCompaction,
+        ClearToolResults=ClearToolResults, TieredCompaction=TieredCompaction,
         SnapshotHistorySource=SnapshotHistorySource, SqliteMemoryStore=SqliteMemoryStore,
         SqliteStepStore=SqliteStepStore,
     )
@@ -295,7 +311,19 @@ class PydanticRuntime(_Runtime):
                     capabilities=[
                         backend.StepPersistence(store=steps, capture_frontier=True),
                         backend.ConversationSearch(backend.SnapshotHistorySource(steps), scope="all", max_matches=5, context_lines=2),
-                        backend.SummarizingCompaction(max_messages=80, keep_messages=20),
+                        backend.TieredCompaction(
+                            tiers=[
+                                backend.ClearToolResults(
+                                    max_tokens=1, keep_pairs=3, min_clear_tokens=1000,
+                                ),
+                                backend.SummarizingCompaction(
+                                    max_tokens=1,
+                                    keep_messages=20, incremental=True,
+                                    keep_user_messages=True, receipts=True,
+                                ),
+                            ],
+                            target_fraction=0.60,
+                        ),
                         backend.Memory(
                             notes, namespace=lambda ctx: ctx.deps.namespace,
                             max_tokens=1500, max_lines=100,

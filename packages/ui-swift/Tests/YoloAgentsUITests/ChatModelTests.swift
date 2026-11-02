@@ -55,7 +55,7 @@ private actor UIHTTP: HTTPTransport {
             json = catalogError ? "{\"models\":[],\"default_model\":null,\"error\":{\"code\":\"codex_unavailable\",\"message\":\"服务端登录需要处理\"}}" :
                 "{\"models\":[{\"id\":\"model-a\",\"display_name\":\"Model A\"},{\"id\":\"model-b\",\"display_name\":\"Model B\"}],\"default_model\":\"model-a\",\"auth\":{\"status\":\"authenticated\"}}"
         } else if path == "/v1/conversations" {
-            json = "{\"conversations\":[\(conversationJSON)]}"
+            json = "{\"conversations\":[\(conversationJSON)],\"primary_conversation_id\":\"\(testConversationID)\"}"
         } else if request.httpMethod == "POST", path.hasSuffix("/messages") {
             guard let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String],
                   let clientID = body["client_message_id"], let content = body["content"] else {
@@ -262,4 +262,26 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     model.setActive(true)
     try await waitUntil { model.isOnline }
     #expect(await streams.requests.count == 1)
+}
+
+@Test @MainActor func coldStartSelectsCachedPrimaryInsteadOfNewerTaskConversation() async throws {
+    let taskID = UUID(uuidString: "10000000-0000-4000-8000-000000000099")!
+    let streams = UIStreams([])
+    let repository = ClientRepository(store: UIStore())
+    let connection = try fixtureConnection(); try repository.saveConnection(connection)
+    var state = ClientState()
+    state.upsertConversation(Conversation(
+        id: testConversationID, title: "主会话", createdAt: Date(timeIntervalSince1970: 1),
+        updatedAt: Date(timeIntervalSince1970: 1), model: "model-a"))
+    state.upsertConversation(Conversation(
+        id: taskID, title: "较新的任务", createdAt: Date(timeIntervalSince1970: 2),
+        updatedAt: Date(timeIntervalSince1970: 2), model: "model-a"))
+    state.setPrimaryConversation(testConversationID)
+    try repository.saveState(state, for: connection)
+    let model = ChatModel(repository: repository, transport: UIHTTP(), streamTransport: streams)
+    model.setActive(false)
+    await model.start()
+    #expect(model.selectedID == testConversationID)
+    #expect(model.selectedConversation?.title == "主会话")
+    #expect(await streams.requests.isEmpty)
 }

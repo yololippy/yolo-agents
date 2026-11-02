@@ -316,11 +316,13 @@ class ChatGPTRuntimeTests(unittest.TestCase):
 
     def test_account_and_workspace_scope_memory_history_and_saved_state(self):
         first = self.runtime._namespace('local-user')
+        self.assertEqual(self.runtime.primary_owner_scope(), first)
         history = self.user('hello')
         list(self.runtime.stream_reply(history, self.cid))
         self.runtime.account.store.write(credential(subject='subject-b', client='client-b'))
         second = self.runtime._namespace('local-user')
         self.assertNotEqual(first, second)
+        self.assertEqual(self.runtime.primary_owner_scope(), second)
         with self.assertRaises(RuntimeStateError):
             list(self.runtime.stream_reply(self.user('next'), self.cid))
         other = self.store.create_conversation('New', model='model-a')['id']

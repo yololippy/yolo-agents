@@ -95,7 +95,7 @@ def fake_backend():
     backend.Agent = Agent
     backend.Conversation = Conversation
     backend.ConversationTypeAdapter = Adapter
-    for name in ("UsageLimits", "SqliteStepStore", "SqliteMemoryStore", "StepPersistence", "ConversationSearch", "SnapshotHistorySource", "SummarizingCompaction", "Memory"):
+    for name in ("UsageLimits", "SqliteStepStore", "SqliteMemoryStore", "StepPersistence", "ConversationSearch", "SnapshotHistorySource", "ClearToolResults", "SummarizingCompaction", "TieredCompaction", "Memory"):
         setattr(backend, name, component)
     return backend
 
@@ -458,6 +458,8 @@ class OfficialSDKTests(unittest.TestCase):
         if compact_after is not None:
             strategy = runtime._backend.SummarizingCompaction
             runtime._backend.SummarizingCompaction = lambda **_: strategy(max_messages=compact_after, keep_messages=2)
+            tiered = runtime._backend.TieredCompaction
+            runtime._backend.TieredCompaction = lambda tiers, **_: tiered(tiers=tiers, target_tokens=1)
         return runtime
 
     def ask(self, runtime, text, *, conversation_id=None, user_id="local-user"):

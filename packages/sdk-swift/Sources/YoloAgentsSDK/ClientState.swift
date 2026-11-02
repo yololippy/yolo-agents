@@ -34,11 +34,16 @@ public struct AwaitingReply: Equatable, Sendable, Identifiable {
 /// but order, page boundaries, and duplicate events are checked.
 public struct ClientState: Codable, Equatable, Sendable {
     public var conversations: [Conversation] = []
+    public var primaryConversationID: UUID?
     public private(set) var messagesByConversation: [String: [Message]] = [:]
     public private(set) var outgoing: [OutgoingMessage] = []
     public private(set) var partialReplies: [PartialReply] = []
     public private(set) var cursor: Int64 = 0
     public init() {}
+
+    public mutating func setPrimaryConversation(_ id: UUID?) {
+        primaryConversationID = id
+    }
 
     public func messages(in conversationID: UUID) -> [Message] {
         messagesByConversation[conversationID.uuidString] ?? []

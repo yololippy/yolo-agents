@@ -201,13 +201,22 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(self.request("POST", path, {}, token)[0], 403)
 
     def test_conversation_crud_and_unicode_search(self):
-        conversation = self.conversation()
+        primary = self.conversation()
         _, body = self.request("GET", "/v1/conversations?" + urlencode({"query": "中文"}), token=self.token)
         self.assertEqual(len(body["conversations"]), 1)
+        self.assertEqual(body["primary_conversation_id"], primary)
+        self.assertEqual(self.request("PATCH", "/v1/conversations/" + primary,
+                                      {"archived": True}, self.token)[0], 409)
+        status, created = self.request(
+            "POST", "/v1/conversations", {"title": "普通任务"}, self.token,
+        )
+        self.assertEqual(status, 201)
+        conversation = created["conversation"]["id"]
         path = "/v1/conversations/" + conversation
         self.assertEqual(self.request("PATCH", path, {"title": "改名", "archived": True}, self.token)[0], 200)
-        self.assertEqual(self.request("GET", "/v1/conversations", token=self.token)[1]["conversations"], [])
-        self.assertEqual(len(self.request("GET", "/v1/conversations?include_archived=true", token=self.token)[1]["conversations"]), 1)
+        self.assertEqual([item["id"] for item in self.request(
+            "GET", "/v1/conversations", token=self.token)[1]["conversations"]], [primary])
+        self.assertEqual(len(self.request("GET", "/v1/conversations?include_archived=true", token=self.token)[1]["conversations"]), 2)
         self.assertEqual(self.send(conversation)[0], 409)
 
     def test_duplicate_concurrent_sends_create_only_one_reply(self):
@@ -415,7 +424,10 @@ extendedKeyUsage=serverAuth
                 connection.request("GET", "/v1/conversations", headers={"Authorization": "Bearer " + pair["token"]})
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
-                self.assertEqual(json.loads(response.read()), {"conversations": []})
+                payload = json.loads(response.read())
+                self.assertEqual(len(payload["conversations"]), 1)
+                self.assertEqual(payload["conversations"][0]["id"], payload["primary_conversation_id"])
+                self.assertEqual(payload["conversations"][0]["title"], "主会话")
                 self.assertTrue(client_context.check_hostname)
                 self.assertEqual(client_context.verify_mode, ssl.CERT_REQUIRED)
             finally:

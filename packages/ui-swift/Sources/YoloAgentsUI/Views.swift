@@ -205,6 +205,10 @@ private struct ChatShell: View {
                                 Text(conversation.title).lineLimit(1)
                                 HStack {
                                     Text(conversation.updatedAt, style: .date)
+                                    if model.isPrimaryConversation(conversation) {
+                                        Label("主会话", systemImage: "pin.fill")
+                                            .labelStyle(.titleAndIcon)
+                                    }
                                     if conversation.archived { Image(systemName: "archivebox") }
                                 }.font(.caption).foregroundStyle(.secondary)
                             }.padding(.vertical, 4)
@@ -214,7 +218,7 @@ private struct ChatShell: View {
                                 .disabled(!model.isOnline)
                             Button(conversation.archived ? "取消归档" : "归档") {
                                 Task { await model.updateConversation(conversation, archived: !conversation.archived) }
-                            }.disabled(!model.isOnline)
+                            }.disabled(!model.isOnline || model.isPrimaryConversation(conversation))
                         }
                     }
                 }
@@ -248,7 +252,9 @@ private struct ChatShell: View {
         }
         .sheet(isPresented: $showAccount) {
             if let connection = model.connection {
-                ChatGPTAccountView(connection: connection, identity: model.identity) { Task { await model.refreshModels() } }
+                ChatGPTAccountView(connection: connection, identity: model.identity) {
+                    Task { await model.refreshAccountContext() }
+                }
             }
         }
         .sheet(item: $renameRequest) { request in

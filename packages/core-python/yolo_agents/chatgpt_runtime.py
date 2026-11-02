@@ -318,6 +318,13 @@ class ChatGPTRuntime(PydanticRuntime):
             raise LoginRequiredError('请先完成本 Agent 的 ChatGPT 登录及套餐授权。')
         return _scope(user_id + '\0' + principal)
 
+    def primary_owner_scope(self, user_id='local-user'):
+        # Listing conversations must continue to work before login. Once an
+        # account is authorized its opaque principal receives an independent
+        # primary conversation and Harness namespace.
+        principal = self.account.principal() or 'unauthenticated'
+        return _scope(user_id + '\0' + principal)
+
     def _prepare_run(self, history, state, conversation_id, prompt, previous, selected_model):
         if state is None or state.get('model_name') == selected_model:
             return prompt, previous

@@ -1,6 +1,6 @@
 # IBKR AI 助手：开发任务与验收
 
-更新日期：2026-10-28
+更新日期：2026-11-02
 
 状态：Agent/产品存储、聊天通信和 Apple 客户端首版已完成本机验收；IBKR Paper 股票限价单的后端状态机、Mac 确认界面、iOS 只读界面和模拟故障测试已实现，Live 执行关闭。本机 Gateway 已安装并登录 Paper，但其 Read-Only API 仍开启，因此真实 What-if、模拟提交/成交/撤单尚未验收。
 
@@ -11,6 +11,9 @@
 按用户最新安排，当前先做 **M1 的 Agent/产品存储与聊天 → M5 的客户端/通信基础**。Agent 已选 PydanticAI Core＋官方 Harness；不再重新选型。IBKR 只读与对账仍独立推进，不把研究/记忆运行时作为其前置条件。
 
 本轮已交付：Mac 后台聊天 API、持久会话、演示/PydanticAI/Codex/独立 ChatGPT Provider 四种明确模式、Apple 通信 SDK/客户端、SSE 流式输出、模型选择与增量同步，以及 Paper 订单独立账本、What-if/确认/提交/单笔撤单接口和 Apple 界面。下一步先关闭 Gateway 的 Read-Only API，完成真实 Paper 启动对账和用户指定订单验收；不会自动选择标的或未经确认提交。
+
+- [x] **主会话形态**：每个 Agent/授权主体惰性迁移一个不可归档的主会话，Mac/iOS 冷启动默认打开，任务会话和前后台当前选择保持独立；会话列表显示主会话标记。
+- [x] **自动上下文压缩**：Harness 先清理旧工具结果，再在上下文超过窗口 60% 时增量总结；产品聊天、订单账本和券商事实不因压缩删除。方案见 [PRIMARY_CONVERSATION.md](PRIMARY_CONVERSATION.md)。
 
 | 阶段 | 交付与依赖 |
 | --- | --- |

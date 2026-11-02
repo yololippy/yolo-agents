@@ -75,6 +75,20 @@ public struct Conversation: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct ConversationList: Codable, Equatable, Sendable {
+    public let conversations: [Conversation]
+    /// Absent only when talking to a pre-primary-conversation v1 service.
+    public let primaryConversationID: UUID?
+    public init(conversations: [Conversation], primaryConversationID: UUID?) {
+        self.conversations = conversations
+        self.primaryConversationID = primaryConversationID
+    }
+    enum CodingKeys: String, CodingKey {
+        case conversations
+        case primaryConversationID = "primary_conversation_id"
+    }
+}
+
 public struct Message: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let conversationID: UUID

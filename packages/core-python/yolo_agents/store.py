@@ -66,7 +66,7 @@ class Store:
     def _initialize(self) -> None:
         with self._transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError("Unsupported product database schema; do not downgrade it")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -100,6 +100,13 @@ class Store:
                     state_json TEXT NOT NULL
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS primary_conversations (
+                    owner_scope TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+                    created_at TEXT NOT NULL
+                )
+            """)
             db.execute("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, seq)")
             db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS assistant_final_run
@@ -108,7 +115,7 @@ class Store:
                 AND status IN ('completed', 'failed')
             """)
             db.execute("CREATE INDEX IF NOT EXISTS events_conversation ON events(conversation_id, seq)")
-            db.execute("PRAGMA user_version = 2")
+            db.execute("PRAGMA user_version = 3")
 
     def _check_open(self) -> None:
         if self._closed:
@@ -176,6 +183,76 @@ class Store:
             self._insert_event(db, "conversation.updated", conversation_id, {"conversation": result})
             return result
 
+    def ensure_primary_conversation(
+        self, owner_scope: str, preferred_conversation_id: str | None = None,
+        *, title: str = "主会话", model: str | None = None,
+    ) -> dict:
+        """Return one durable, unarchived primary conversation for an opaque owner scope.
+
+        ``preferred_conversation_id`` supports a lossless migration of an existing
+        compatible conversation. The unique mapping prevents one conversation from
+        becoming the primary conversation of two authorized accounts.
+        """
+        _text(owner_scope, "owner_scope")
+        _text(title, "title")
+        validate_model_id(model)
+        if preferred_conversation_id is not None:
+            _text(preferred_conversation_id, "preferred_conversation_id")
+        with self._transaction() as db:
+            existing = db.execute(
+                "SELECT conversation_id FROM primary_conversations WHERE owner_scope = ?",
+                (owner_scope,),
+            ).fetchone()
+            if existing is not None:
+                return self._conversation(self._require_conversation(db, existing["conversation_id"]))
+
+            candidate = None
+            if preferred_conversation_id is not None:
+                candidate = db.execute(
+                    """SELECT c.* FROM conversations c
+                       WHERE c.id = ? AND c.archived = 0 AND NOT EXISTS (
+                           SELECT 1 FROM primary_conversations p WHERE p.conversation_id = c.id
+                       )""",
+                    (preferred_conversation_id,),
+                ).fetchone()
+            if candidate is None:
+                timestamp = _now()
+                conversation_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO conversations(id, title, created_at, updated_at, model) VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, title, timestamp, timestamp, model),
+                )
+                candidate = self._require_conversation(db, conversation_id)
+                result = self._conversation(candidate)
+                self._insert_event(db, "conversation.updated", conversation_id, {"conversation": result})
+            result = self._conversation(candidate)
+            db.execute(
+                "INSERT INTO primary_conversations(owner_scope, conversation_id, created_at) VALUES (?, ?, ?)",
+                (owner_scope, result["id"], _now()),
+            )
+            return result
+
+    def primary_conversation(self, owner_scope: str) -> dict | None:
+        _text(owner_scope, "owner_scope")
+        with self._lock:
+            self._check_open()
+            row = self._db.execute(
+                """SELECT c.* FROM primary_conversations p
+                   JOIN conversations c ON c.id = p.conversation_id
+                   WHERE p.owner_scope = ?""",
+                (owner_scope,),
+            ).fetchone()
+            return self._conversation(row) if row is not None else None
+
+    def is_primary_conversation(self, conversation_id: str) -> bool:
+        _text(conversation_id, "conversation_id")
+        with self._lock:
+            self._check_open()
+            return self._db.execute(
+                "SELECT 1 FROM primary_conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone() is not None
+
     def list_conversations(self, query: str = "", include_archived: bool = False) -> list[dict]:
         _text(query, "query", allow_empty=True)
         with self._lock:
@@ -211,6 +288,10 @@ class Store:
             new_title = old["title"] if title is None else title
             new_archived = old["archived"] if archived is None else archived
             new_model = old["model"] if model is UNSET else model
+            if new_archived and not old["archived"] and db.execute(
+                "SELECT 1 FROM primary_conversations WHERE conversation_id = ?", (conversation_id,)
+            ).fetchone() is not None:
+                raise ValueError("primary conversation cannot be archived")
             if (new_title, new_archived, new_model) == (old["title"], old["archived"], old["model"]):
                 return old
             db.execute(

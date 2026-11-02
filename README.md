@@ -20,7 +20,7 @@ apps/                           各 Agent 的用户客户端
 
 ## 本轮可运行内容
 
-- Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE。
+- Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE；每个授权主体有一个不可归档的长期主会话，普通任务会话继续独立创建。
 - Agent：演示、PydanticAI、Codex 兼容及独立 ChatGPT Provider 四种明确模式。Trading Agent 与 B Agent 分别授权、保存记忆与 Skills；新 Provider 的官方 SDK、授权生命周期和流式适配已接入，真实浏览器授权、模型调用和独立记忆/Skills 已在隔离配置中验收。Codex 模式既有模型目录、流式生成、模型切换和重启续聊验收继续保留。
 - Guardrails：PydanticAI / ChatGPT 模式接入官方输入、工具和输出检查，阻断已知格式凭据，并补充流式发送前检查；适用范围与存储边界见 [运行时说明](packages/core-python/README.md#凭据防护)。
 - Apple：共享 Swift 通信 SDK、Keychain 与离线同步状态、SwiftUI macOS / iOS 客户端及 Xcode 工程。本机已用完整 Xcode 27.1 完成 iOS Simulator arm64 构建；Mac 客户端已实测新会话、模型选择、输入和真实 Codex 流式回复。
@@ -62,6 +62,7 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 - [开发任务](docs/TODO.md)
 - [Agent 设计与验证边界](docs/RESEARCH_PYDANTICAI.md)
 - [各 Agent 独立的 ChatGPT Provider 方案](docs/CHATGPT_PROVIDER_PLAN.md)
+- [主会话与自动上下文压缩](docs/PRIMARY_CONVERSATION.md)
 
 ## 验证
 

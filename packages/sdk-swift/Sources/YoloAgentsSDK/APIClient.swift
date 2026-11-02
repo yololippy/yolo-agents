@@ -188,11 +188,12 @@ public struct APIClient: Sendable {
         let _: Response = try await request("DELETE", path: "devices/\(id.uuidString)")
     }
     public func conversations(query: String? = nil, includeArchived: Bool = false) async throws -> [Conversation] {
-        struct Response: Decodable { let conversations: [Conversation] }
+        try await conversationList(query: query, includeArchived: includeArchived).conversations
+    }
+    public func conversationList(query: String? = nil, includeArchived: Bool = false) async throws -> ConversationList {
         var queryItems = [URLQueryItem(name: "include_archived", value: String(includeArchived))]
         if let query, !query.isEmpty { queryItems.append(URLQueryItem(name: "query", value: query)) }
-        let response: Response = try await request("GET", path: "conversations", query: queryItems)
-        return response.conversations
+        return try await request("GET", path: "conversations", query: queryItems)
     }
     public func createConversation(title: String, model: String? = nil) async throws -> Conversation {
         struct Body: Encodable { let title: String; let model: String? }

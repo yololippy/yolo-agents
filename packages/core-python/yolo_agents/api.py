@@ -199,7 +199,11 @@ class Handler(BaseHTTPRequestHandler):
                 search = query.get("query", [""])[0]
                 if len(search) > 200:
                     raise APIError(400, "invalid_input", "搜索文本过长。")
-                self.send_json(200, {"conversations": app.store.list_conversations(search, archived == "true")})
+                primary = app.ensure_primary_conversation()
+                self.send_json(200, {
+                    "conversations": app.store.list_conversations(search, archived == "true"),
+                    "primary_conversation_id": primary["id"],
+                })
                 return
             if method == "POST":
                 data = self.read_json()

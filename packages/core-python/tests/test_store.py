@@ -8,6 +8,8 @@ import tempfile
 import unittest
 
 from yolo_agents.store import Store
+from yolo_agents.agent_runtime import DemoRuntime
+from yolo_agents.service import ChatService
 
 
 class StoreTests(unittest.TestCase):
@@ -109,6 +111,39 @@ class StoreTests(unittest.TestCase):
         self.store.update_conversation(self.cid, title="new", archived=True)
         self.assertEqual(self.store.list_events(after=cursor), [])
         self.assertFalse(self.store.update_conversation(self.cid, archived=False)["archived"])
+
+    def test_primary_conversation_migrates_once_and_cannot_be_archived(self):
+        primary = self.store.ensure_primary_conversation("owner-a", self.cid)
+        self.assertEqual(primary["id"], self.cid)
+        self.assertEqual(self.store.primary_conversation("owner-a"), primary)
+        self.assertTrue(self.store.is_primary_conversation(self.cid))
+        self.assertEqual(
+            self.store.ensure_primary_conversation("owner-a", title="ignored")["id"], self.cid,
+        )
+        renamed = self.store.update_conversation(self.cid, title="每天使用")
+        self.assertEqual(renamed["title"], "每天使用")
+        with self.assertRaises(ValueError):
+            self.store.update_conversation(self.cid, archived=True)
+        self.assertFalse(self.store.get_conversation(self.cid)["archived"])
+
+    def test_primary_conversations_are_unique_per_opaque_owner(self):
+        first = self.store.ensure_primary_conversation("owner-a", self.cid)
+        second = self.store.ensure_primary_conversation("owner-b", self.cid)
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(second["title"], "主会话")
+        self.assertEqual(len(self.store.list_conversations()), 2)
+
+    def test_service_lazily_promotes_latest_compatible_conversation(self):
+        latest = self.store.create_conversation("最近任务")
+        runtime = DemoRuntime(self.store)
+        service = ChatService(self.store, runtime)
+        try:
+            primary = service.ensure_primary_conversation()
+            self.assertEqual(primary["id"], latest["id"])
+            self.assertEqual(service.ensure_primary_conversation()["id"], latest["id"])
+        finally:
+            service.close()
+            runtime.close()
 
     def test_event_pagination_uses_global_cursor_and_conversation_filter(self):
         other = self.store.create_conversation("other")["id"]

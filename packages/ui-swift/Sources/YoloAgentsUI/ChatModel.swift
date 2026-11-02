@@ -34,6 +34,7 @@ public final class ChatModel: ObservableObject {
     private var synchronizationTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = true
+    private var selectPrimaryAfterSnapshot = false
     public let identity: AgentAppIdentity?
     public var appName: String { identity?.appName ?? "Agent" }
     public var defaultServiceAddress: String { identity?.defaultServiceAddress ?? "http://127.0.0.1:8765" }
@@ -55,6 +56,9 @@ public final class ChatModel: ObservableObject {
     }
     public var isOnline: Bool { connectionState == .online }
     public var selectedConversation: Conversation? { state.conversations.first { $0.id == selectedID } }
+    public func isPrimaryConversation(_ conversation: Conversation) -> Bool {
+        state.primaryConversationID == conversation.id
+    }
     public var effectiveModel: String? { selectedConversation?.model ?? modelCatalog?.defaultModel ?? health?.model }
     public var selectedModelName: String {
         guard let id = effectiveModel else { return "默认模型" }
@@ -90,7 +94,10 @@ public final class ChatModel: ObservableObject {
                     connectionState = .authorizationRequired; return
                 }
                 state = restoredState
-                selectedID = state.conversations.first(where: { !$0.archived })?.id
+                selectPrimaryAfterSnapshot = state.primaryConversationID == nil
+                selectedID = state.primaryConversationID.flatMap { primary in
+                    state.conversations.first(where: { $0.id == primary && !$0.archived })?.id
+                } ?? state.conversations.first(where: { !$0.archived })?.id
                 startSynchronizing()
             }
         } catch { errorMessage = error.localizedDescription }
@@ -212,12 +219,16 @@ public final class ChatModel: ObservableObject {
             self.health = health
             await refreshModels()
             try check(attempt)
-            let conversations = try await api.conversations(includeArchived: true)
+            let conversationList = try await api.conversationList(includeArchived: true)
             try check(attempt)
             var next = state
-            conversations.forEach { next.upsertConversation($0) }
+            conversationList.conversations.forEach { next.upsertConversation($0) }
+            next.setPrimaryConversation(conversationList.primaryConversationID)
             try commit(next)
-            if selectedID == nil { selectedID = state.conversations.first(where: { !$0.archived })?.id }
+            if selectPrimaryAfterSnapshot || selectedID == nil {
+                selectedID = state.primaryConversationID ?? state.conversations.first(where: { !$0.archived })?.id
+                selectPrimaryAfterSnapshot = false
+            }
             if let selectedID {
                 let messages = try await api.messages(conversationID: selectedID)
                 try check(attempt)
@@ -290,6 +301,23 @@ public final class ChatModel: ObservableObject {
             modelCatalogError = error.localizedDescription
         }
     }
+    public func refreshAccountContext() async {
+        await refreshModels()
+        guard modelCatalog?.auth?.authenticated == true ||
+                modelCatalog?.auth?.status == "authenticated" else { return }
+        guard isOnline, let connection else { return }
+        let attempt = generation
+        do {
+            let list = try await client(for: connection).conversationList(includeArchived: true)
+            try check(attempt)
+            var next = state
+            list.conversations.forEach { next.upsertConversation($0) }
+            next.setPrimaryConversation(list.primaryConversationID)
+            try commit(next)
+            selectedID = list.primaryConversationID ?? state.conversations.first(where: { !$0.archived })?.id
+            await loadSelectedMessages()
+        } catch { handle(error, attempt: attempt) }
+    }
     public func changeModel(_ selection: ConversationModelSelection) async {
         guard isOnline, !busy, let connection, let conversation = selectedConversation, !conversation.archived else { return }
         busy = true
@@ -309,6 +337,10 @@ public final class ChatModel: ObservableObject {
     }
     public func updateConversation(_ conversation: Conversation, title: String? = nil, archived: Bool? = nil) async {
         guard isOnline, let connection else { return }
+        guard archived != true || !isPrimaryConversation(conversation) else {
+            errorMessage = "主会话不能归档。"
+            return
+        }
         let attempt = generation
         do {
             let updated = try await client(for: connection)

@@ -28,7 +28,7 @@
 | `POST /v1/devices/pair` | `{pairing_code, device_name, platform}` | 201 `{device, token, server_id, api_version}` |
 | `GET /v1/devices` | Mac 管理凭据 | `{devices:[device]}` |
 | `DELETE /v1/devices/{id}` | 自己或 Mac 管理凭据 | `{device}`；撤销后既有凭据无效 |
-| `GET /v1/conversations` | 可选 `query`、`include_archived=true` | `{conversations:[conversation]}` |
+| `GET /v1/conversations` | 可选 `query`、`include_archived=true` | `{conversations:[conversation],primary_conversation_id}`；主会话按当前 Agent/授权主体惰性创建或迁移 |
 | `POST /v1/conversations` | `{title,model?:string或null}` | 201 `{conversation}` |
 | `PATCH /v1/conversations/{id}` | `{title?, archived?, model?:string或null}` | `{conversation}` |
 | `GET /v1/conversations/{id}/messages` | 无额外参数 | `{messages:[message]}` |
@@ -39,6 +39,10 @@
 `device={id,name,platform,permissions,created_at,revoked_at}`。
 
 `conversation={id,title,created_at,updated_at,archived,model}`；`model` 可空，null 表示使用服务端默认模型。旧数据库升级后该字段默认 null，不删除消息或重置事件游标。
+
+`primary_conversation_id` 是当前 Agent 和授权主体的稳定主会话 UUID。主会话可重命名但不能归档；POST 创建的会话均为普通任务会话。客户端冷启动默认选择主会话，前后台恢复和断线重连保持当前选择。产品消息保持完整；Harness 自动上下文压缩不删除产品历史。详细设计见 [`docs/PRIMARY_CONVERSATION.md`](../../docs/PRIMARY_CONVERSATION.md)。
+
+为兼容尚未重启或尚未升级的 v1 服务，客户端必须允许 `GET /v1/conversations` 暂时缺少 `primary_conversation_id`，此时继续显示会话并回退选择第一个未归档会话；不得把这个可选新增字段的缺失当成整条连接失效。升级后的服务仍必须返回该字段。
 
 `model={id,display_name,description,is_default}`，ID 作为不透明字符串使用。`default_model` 可空。模型目录只是 catalog，不证明当前账户具有某个模型的 inference entitlement；只有真实 `turn/completed` 状态为 completed 才证明该次调用成功。
 

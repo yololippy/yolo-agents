@@ -94,6 +94,21 @@ class ChatService:
                 self.runtime.validate_model(fields["model"])
             return self.store.update_conversation(conversation_id, **fields)
 
+    def ensure_primary_conversation(self, user_id="local-user"):
+        """Bind a compatible existing conversation once, or create a new primary."""
+        owner_scope = self.runtime.primary_owner_scope(user_id)
+        existing = self.store.primary_conversation(owner_scope)
+        if existing is not None:
+            return existing
+        preferred = next((
+            conversation for conversation in self.store.list_conversations()
+            if not self.store.is_primary_conversation(conversation["id"])
+            and self.runtime.conversation_matches_primary_owner(conversation["id"], user_id)
+        ), None)
+        return self.store.ensure_primary_conversation(
+            owner_scope, preferred["id"] if preferred is not None else None,
+        )
+
     def drain(self, conversation_id):
         while True:
             with self.lock:

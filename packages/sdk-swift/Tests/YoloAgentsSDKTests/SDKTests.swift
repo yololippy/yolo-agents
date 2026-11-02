@@ -128,7 +128,7 @@ func invalidServiceAddressesFail(_ value: String) {
 }
 
 @Test func queryEncodingAndBearerAreCorrect() async throws {
-    let transport = RecordingTransport([HTTPResult(data: Data("{\"conversations\":[]}".utf8), status: 200)])
+    let transport = RecordingTransport([HTTPResult(data: Data("{\"conversations\":[],\"primary_conversation_id\":\"10000000-0000-4000-8000-000000000001\"}".utf8), status: 200)])
     let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"), token: "fixture-token", transport: transport)
     _ = try await api.conversations(query: "中文 & AAPL?", includeArchived: true)
     let request = try #require(await transport.requests.first)
@@ -137,6 +137,18 @@ func invalidServiceAddressesFail(_ value: String) {
     let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
     #expect(query.first { $0.name == "query" }?.value == "中文 & AAPL?")
     #expect(query.first { $0.name == "include_archived" }?.value == "true")
+}
+
+@Test func legacyConversationListWithoutPrimaryRemainsReadable() async throws {
+    let legacy = """
+    {"conversations":[{"id":"10000000-0000-4000-8000-000000000002","title":"旧会话",
+    "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","archived":false,"model":null}]}
+    """
+    let transport = RecordingTransport([HTTPResult(data: Data(legacy.utf8), status: 200)])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"), token: "fixture-token", transport: transport)
+    let list = try await api.conversationList(includeArchived: true)
+    #expect(list.conversations.map(\.title) == ["旧会话"])
+    #expect(list.primaryConversationID == nil)
 }
 
 @Test func retryReusesTheSameMessageIDAndContent() async throws {
