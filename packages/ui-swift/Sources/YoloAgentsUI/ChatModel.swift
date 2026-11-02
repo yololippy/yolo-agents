@@ -130,9 +130,13 @@ public final class ChatModel: ObservableObject {
     }
     public func setActive(_ value: Bool) {
         active = value
-        if value { startSynchronizing() } else {
+        if value {
+            // iOS cannot keep the SSE task alive indefinitely while suspended.
+            // Preserve an already-online presentation while silently rebuilding
+            // the stream and backfilling from the committed cursor.
+            startSynchronizing(preservingOnlineState: true)
+        } else {
             synchronizationTask?.cancel(); synchronizationTask = nil
-            if connectionState == .online || connectionState == .connecting { connectionState = .disconnected }
         }
     }
     public func reconnect() {
@@ -145,9 +149,9 @@ public final class ChatModel: ObservableObject {
         do { try commit(next) } catch { errorMessage = error.localizedDescription }
         startSynchronizing()
     }
-    private func startSynchronizing() {
+    private func startSynchronizing(preservingOnlineState: Bool = false) {
         guard active, connection != nil, synchronizationTask == nil, connectionState != .authorizationRequired else { return }
-        connectionState = .connecting
+        if !preservingOnlineState || connectionState != .online { connectionState = .connecting }
         let attempt = generation
         synchronizationTask = Task { [weak self] in
             var needsSnapshot = true
@@ -188,10 +192,10 @@ public final class ChatModel: ObservableObject {
                     }
                     self.connectionState = .offline(error.localizedDescription)
                     needsSnapshot = true
-                    retrySeconds = min(30, retrySeconds * 2)
                 }
                 do { try await Task.sleep(nanoseconds: retrySeconds * 1_000_000_000) }
                 catch { return }
+                retrySeconds = min(30, retrySeconds * 2)
             }
         }
     }

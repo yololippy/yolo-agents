@@ -114,6 +114,13 @@ func directSessionConfiguration(requestTimeout: TimeInterval,
     configuration.httpShouldSetCookies = false
     configuration.connectionProxyDictionary = [:]
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    // A Tailnet route can take a moment to return after Wi-Fi/cellular changes
+    // or after the app becomes active.  Let the request wait for that route
+    // instead of immediately turning a recoverable transition into offline UI.
+    configuration.waitsForConnectivity = true
+    configuration.allowsCellularAccess = true
+    configuration.allowsExpensiveNetworkAccess = true
+    configuration.allowsConstrainedNetworkAccess = true
     configuration.timeoutIntervalForRequest = requestTimeout
     configuration.timeoutIntervalForResource = resourceTimeout
     return configuration

@@ -30,6 +30,10 @@ private func encoded<T: Encodable>(_ value: T, status: Int = 200) throws -> HTTP
     #expect(configuration.urlCredentialStorage == nil)
     #expect(configuration.httpCookieStorage == nil)
     #expect(configuration.httpShouldSetCookies == false)
+    #expect(configuration.waitsForConnectivity)
+    #expect(configuration.allowsCellularAccess)
+    #expect(configuration.allowsExpensiveNetworkAccess)
+    #expect(configuration.allowsConstrainedNetworkAccess)
     #expect(configuration.timeoutIntervalForRequest == 12)
     #expect(configuration.timeoutIntervalForResource == 34)
 }

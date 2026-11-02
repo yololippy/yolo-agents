@@ -122,13 +122,15 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     }
 }
 
-@Test @MainActor func modelConsumesLiveDeltasBackfillsCursorAndCancelsInBackground() async throws {
+@Test @MainActor func modelBackfillsAndSilentlyResumesAfterBackgrounding() async throws {
     let (firstChunks, first) = AsyncThrowingStream<Data, Error>.makeStream()
     let (secondChunks, second) = AsyncThrowingStream<Data, Error>.makeStream()
+    let (resumedChunks, resumed) = AsyncThrowingStream<Data, Error>.makeStream()
     let cancelled = UIFLAG()
     let streams = UIStreams([
         SSEConnection(status: 200, contentType: "text/event-stream", chunks: firstChunks, cancel: { first.finish() }),
         SSEConnection(status: 200, contentType: "text/event-stream", chunks: secondChunks, cancel: { cancelled.set(); second.finish() }),
+        SSEConnection(status: 200, contentType: "text/event-stream", chunks: resumedChunks, cancel: { resumed.finish() }),
     ])
     let http = UIHTTP()
     let repository = ClientRepository(store: UIStore())
@@ -154,7 +156,11 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     #expect(await http.cursors.contains(2))
     model.setActive(false)
     try await waitUntil { cancelled.isSet }
-    #expect(model.connectionState == .disconnected)
+    #expect(model.connectionState == .online)
+    model.setActive(true)
+    try await waitUntil { await streams.requests.count == 3 }
+    #expect(model.connectionState == .online)
+    #expect((await streams.requests)[2].value(forHTTPHeaderField: "Last-Event-ID") == "3")
 }
 
 @Test @MainActor func acceptedMessageExposesLoadingUntilTheFirstDelta() async throws {
