@@ -597,7 +597,7 @@ class PaperOrderAPITests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_requests WHERE status='completed'").fetchone()[0], 5)
         self.assertNotIn(b"DU_SECRET_ACCOUNT", self.path.read_bytes())
 
-    def test_model_tool_creates_only_draft_then_mac_must_preview_confirm_and_submit(self):
+    def test_model_tool_previews_then_exact_chat_confirmation_submits(self):
         self.extension.bind_chat_service(self.app, self.auth)
         conversation = self.store.create_conversation("Paper draft")
         run_id = str(uuid4())
@@ -613,30 +613,35 @@ class PaperOrderAPITests(unittest.TestCase):
             proposal={"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"},
             conversation_id=conversation["id"], user_message_id=message["id"], run_id=run_id,
             caller=self.mac["device"], reauthorize=reauthorize)
-        self.assertEqual(set(result), {"status", "order_id", "state"})
-        self.assertEqual((result["status"], result["state"]), ("draft_created", "draft"))
-        self.assertEqual(len(reauthorizations), 2)
-        self.assertEqual(self.broker.calls, {"preview": 0, "submit": 0, "cancel": 0})
+        self.assertEqual(set(result), {"status", "order_id", "state", "what_if", "expires_at"})
+        self.assertEqual((result["status"], result["state"]), ("review_ready", "proposed"))
+        self.assertGreaterEqual(len(reauthorizations), 4)
+        self.assertEqual(self.broker.calls, {"preview": 1, "submit": 0, "cancel": 0})
         replay = self.extension.create_model_paper_draft(
             proposal={"symbol": "AAPL", "side": "BUY", "quantity": 2, "limit_price": "10.00"},
             conversation_id=conversation["id"], user_message_id=message["id"], run_id=run_id,
             caller=self.mac["device"], reauthorize=reauthorize)
         self.assertEqual(replay, result)
-        # A replay performs one fresh caller check but no second pre-insert
-        # check because the original durable request is returned unchanged.
-        self.assertEqual(len(reauthorizations), 3)
+        self.assertGreaterEqual(len(reauthorizations), 5)
         with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_events WHERE request_id=? "
                                         "AND type='order.model_draft_created'", (run_id,)).fetchone()[0], 1)
 
         status, detail = self.request("GET", "/v1/orders/" + result["order_id"], token=self.ios["token"])
-        self.assertEqual((status, detail["order"]["state"]), (200, "draft"))
-        self.assertEqual(self.action(detail["order"], "submit")[0], 409)
-        proposed = self.action(detail["order"], "preview")[1]["order"]
-        self.assertEqual(self.action(proposed, "submit")[0], 409)
-        confirmed = self.action(proposed, "confirm")[1]["order"]
-        submitted = self.action(confirmed, "submit")[1]["order"]
+        self.assertEqual((status, detail["order"]["state"]), (200, "proposed"))
+        assistant = {"role": "assistant", "status": "completed", "run_id": run_id,
+            "content": "```paper-order\n" + json.dumps({
+                "type": "paper_order_draft", "order_id": result["order_id"], "state": "proposed",
+            }) + "\n```"}
+        confirm_run = str(uuid4())
+        confirmation = self.extension.confirm_chat_paper_order(history=(
+            message, assistant,
+            {"id": str(uuid4()), "conversation_id": conversation["id"], "role": "user",
+             "content": "确认", "run_id": confirm_run},
+        ), caller=self.mac["device"], reauthorize=reauthorize)
+        self.assertIn("IBKR Paper 订单已提交", confirmation)
+        submitted = self.extension._orders.get(result["order_id"], self.auth.server_id)["order"]
         self.assertEqual(submitted["state"], "working")
         self.assertEqual(self.broker.calls, {"preview": 1, "submit": 1, "cancel": 0})
         with closing(sqlite3.connect(self.path)) as db:
@@ -646,6 +651,8 @@ class PaperOrderAPITests(unittest.TestCase):
                 "user_message_id": message["id"], "run_id": run_id})
 
     def test_model_read_tools_use_fresh_device_auth_and_redact_account_identity(self):
+        self.extension.bind_chat_service(self.app, self.auth)
+        saved = self.action(self.confirmed(), "submit")[1]["order"]
         reauthorize = lambda: self.auth.authenticate("Bearer " + self.ios["token"])
         caller = self.ios["device"]
         results = [
@@ -657,10 +664,17 @@ class PaperOrderAPITests(unittest.TestCase):
                                                    caller=caller, reauthorize=reauthorize),
             self.extension.read_model_trading_data(tool="get_open_order", arguments={"broker_order_id": "123"},
                                                    caller=caller, reauthorize=reauthorize),
+            self.extension.read_model_trading_data(tool="list_paper_orders", arguments={},
+                                                   caller=caller, reauthorize=reauthorize),
+            self.extension.read_model_trading_data(tool="get_paper_order", arguments={"order_id": saved["id"]},
+                                                   caller=caller, reauthorize=reauthorize),
         ]
         self.assertEqual(self.broker.read_calls, [
             ("quote", "AAPL"), ("positions", None), ("open_orders", None), ("open_orders", "123")])
         self.assertNotIn("DU", json.dumps(results))
+        self.assertNotIn(self.broker.config_id, json.dumps(results))
+        self.assertEqual(results[-2]["orders"][0]["submission_status"], "submitted")
+        self.assertEqual(results[-1]["order"]["state"], "working")
         revoked = deepcopy(caller); revoked["id"] = str(uuid4())
         with self.assertRaises(OrderError):
             self.extension.read_model_trading_data(tool="list_positions", arguments={},
@@ -825,6 +839,19 @@ class PaperOrderAPITests(unittest.TestCase):
         self.broker.facts["config_id"] = self.broker.config_id
         self.assertEqual(self.request("POST", "/v1/orders", self.draft_data(), self.token)[0], 409)
         self.assertEqual(self.broker.calls["submit"], 1)
+
+    def test_submit_rejected_before_place_order_stays_confirmed_not_unknown(self):
+        class BeforeSendError(Exception):
+            code = "unresolved_order"
+
+        order = self.confirmed()
+        self.broker.submit_error = BeforeSendError()
+        status, body = self.action(order, "submit")
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "intent_in_flight")
+        detail = self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]["order"]
+        self.assertEqual(detail["state"], "confirmed")
+        self.assertEqual(detail["error_code"], "intent_in_flight")
 
     def test_crash_after_durable_submitting_recovers_unknown_without_retransmit(self):
         order = self.confirmed()

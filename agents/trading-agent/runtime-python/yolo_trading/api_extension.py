@@ -2,11 +2,15 @@
 
 import json
 from pathlib import Path
+import re
 import threading
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from yolo_agents.api import APIError, identifier
-from yolo_agents.runtime_tools import MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, POSITIONS_TOOL
+from yolo_agents.runtime_tools import (
+    MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, PAPER_ORDER_TOOL,
+    PAPER_ORDERS_TOOL, POSITIONS_TOOL,
+)
 
 from .paper_order_store import PaperOrderStore
 from .paper_order_broker import BrokerBoundaryError, snapshot
@@ -80,7 +84,8 @@ class TradingAPIExtension:
                 reauthorize = getattr(auth, "reauthorize", None)
                 if not callable(bind_tool) or not callable(reauthorize):
                     raise RuntimeError("Trading Host does not support the model tool boundary")
-                bind_tool(self.create_model_paper_draft, self.read_model_trading_data, reauthorize)
+                bind_tool(self.create_model_paper_draft, self.read_model_trading_data,
+                          self.confirm_chat_paper_order, reauthorize)
                 self._tool_bound = True
             self._chat_service, self._auth = service, auth
             if self._orders is None:
@@ -143,10 +148,10 @@ class TradingAPIExtension:
 
     def create_model_paper_draft(self, *, proposal, conversation_id, user_message_id,
                                  run_id, caller, reauthorize):
-        """Create only a draft from a saved Mac chat run.
+        """Create and What-if preview a draft from a saved Mac chat run.
 
-        This is the sole model-facing trading capability.  It cannot preview,
-        confirm, submit or cancel, and it never chooses an account or order
+        This is the sole model-facing trading capability.  It cannot confirm,
+        submit or cancel, and it never chooses an account or order
         execution setting from model arguments.
         """
         if not callable(reauthorize):
@@ -189,16 +194,111 @@ class TradingAPIExtension:
             if not isinstance(result, dict) or not isinstance(result.get("order"), dict):
                 raise OrderError("order_state_conflict")
             order = result["order"]
+            preview_request = str(uuid5(UUID(run_id), "paper-preview"))
+            preview_data = {"client_request_id": preview_request, "version": order["version"],
+                            "content_hash": order["content_hash"]}
+            preview_status, preview_result = self._orders.operate(
+                "preview", preview_data, caller, self._auth.server_id,
+                order_id=order["id"], authorize=reauthorize)
+            if preview_status != 200 or not isinstance(preview_result, dict):
+                error = preview_result.get("error") if isinstance(preview_result, dict) else None
+                raise OrderError(error.get("code", "preview_failed") if isinstance(error, dict)
+                                 else "preview_failed", preview_status)
+            order = preview_result.get("order")
+            if not isinstance(order, dict) or order.get("state") != "proposed" or not isinstance(order.get("preview"), dict):
+                raise OrderError("preview_failed")
             with self._orders.store.transaction() as db:
                 event = db.execute("SELECT 1 FROM paper_events WHERE request_id=? "
                                    "AND type='order.model_draft_created'", (run_id,)).fetchone()
                 if event is None:
                     row = self._orders.store.order(db, order["id"], self._auth.server_id)
-                    if row is None or row["state"] != "draft":
+                    if row is None or row["state"] != "proposed":
                         raise OrderError("order_state_conflict")
                     self._orders.store.event(db, row, "order.model_draft_created", self._orders.now(), run_id,
                         {"conversation_id": conversation_id, "user_message_id": user_message_id, "run_id": run_id})
-            return {"status": "draft_created", "order_id": order["id"], "state": "draft"}
+            preview = order["preview"]
+            return {"status": "review_ready", "order_id": order["id"], "state": "proposed",
+                    "what_if": preview["what_if"], "expires_at": preview["expires_at"]}
+
+    @staticmethod
+    def _confirmation_artifact(history):
+        if (len(history) < 2 or history[-1].get("role") != "user"
+                or re.fullmatch(r"\s*(?:确认|确认下单|确认提交)\s*[。！!]?(?:\s*)", history[-1].get("content", "")) is None):
+            return None
+        previous = history[-2]
+        if previous.get("role") != "assistant" or previous.get("status") != "completed":
+            return None
+        blocks = re.findall(r"```paper-order\s*\n([\s\S]*?)\n```", previous.get("content", ""))
+        if len(blocks) != 1:
+            return None
+        try:
+            artifact = json.loads(blocks[0])
+            if (not isinstance(artifact, dict) or artifact.get("type") != "paper_order_draft"
+                    or artifact.get("state") != "proposed"):
+                return None
+            return str(UUID(artifact["order_id"])), previous.get("run_id")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def confirm_chat_paper_order(self, *, history, caller, reauthorize):
+        """Consume one exact chat confirmation for the immediately preceding trusted review."""
+        artifact = self._confirmation_artifact(history)
+        if artifact is None:
+            return None
+        order_id, source_run = artifact
+        try:
+            caller = self._model_caller(caller, reauthorize)
+            current_run = self._model_uuid(history[-1]["run_id"])
+            conversation_id = self._model_uuid(history[-1]["conversation_id"])
+            with self._order_guard:
+                if self._orders is None or self._auth is None:
+                    raise OrderError("paper_facade_unavailable")
+                detail = self._orders.get(order_id, self._auth.server_id)
+                order = detail["order"]
+                with self._orders.store.read_only() as db:
+                    event = db.execute(
+                        "SELECT payload FROM paper_events WHERE order_id=? AND request_id=? "
+                        "AND type='order.model_draft_created' ORDER BY seq DESC LIMIT 1",
+                        (order_id, source_run)).fetchone()
+                payload = json.loads(event["payload"]) if event else None
+                if not isinstance(payload, dict) or payload.get("conversation_id") != conversation_id:
+                    raise OrderError("confirmation_required")
+                if order.get("state") != "proposed" or not isinstance(order.get("preview"), dict):
+                    raise OrderError("order_state_conflict")
+                confirm_data = {
+                    "client_request_id": str(uuid5(UUID(current_run), "paper-confirm")),
+                    "version": order["version"], "content_hash": order["content_hash"],
+                    "preview_id": order["preview"]["id"], "expires_at": order["preview"]["expires_at"],
+                    "user_action": "confirm_paper_order",
+                }
+                status, result = self._orders.operate(
+                    "confirm", confirm_data, caller, self._auth.server_id,
+                    order_id=order_id, authorize=reauthorize)
+                if status != 200 or not isinstance(result, dict) or not isinstance(result.get("order"), dict):
+                    raise OrderError((result.get("error") or {}).get("code", "confirmation_required"), status)
+                confirmed = result["order"]
+                submit_data = {
+                    "client_request_id": str(uuid5(UUID(current_run), "paper-submit")),
+                    "version": confirmed["version"], "content_hash": confirmed["content_hash"],
+                    "confirmation_id": confirmed["confirmation"]["id"],
+                    "user_action": "submit_paper_order",
+                }
+                status, result = self._orders.operate(
+                    "submit", submit_data, caller, self._auth.server_id,
+                    order_id=order_id, authorize=reauthorize)
+                if status != 200 or not isinstance(result, dict) or not isinstance(result.get("order"), dict):
+                    raise OrderError((result.get("error") or {}).get("code", "order_state_conflict"), status)
+                submitted = result["order"]
+            state = submitted["state"]
+            if state in ("accepted", "working", "partial", "filled"):
+                return (f"IBKR Paper 订单已提交。状态：{state}；订单 ID：{order_id}；"
+                        f"{submitted['side']} {submitted['quantity']} 股 {submitted['contract']['symbol']}，"
+                        f"限价 {submitted['limit_price']} USD。")
+            if state == "rejected":
+                return f"IBKR Paper 已明确拒绝该订单。订单 ID：{order_id}。"
+            return f"IBKR Paper 提交结果暂不明确，已停止自动重试。订单 ID：{order_id}，请先对账。"
+        except OrderError as exc:
+            return f"Paper 订单未提交：{exc.message}"
 
     @staticmethod
     def _model_read_caller(caller, reauthorize):
@@ -229,7 +329,43 @@ class TradingAPIExtension:
             return self.broker.open_orders_detail()
         if tool == OPEN_ORDER_TOOL and set(arguments) == {"broker_order_id"}:
             return self.broker.open_orders_detail(broker_order_id=arguments["broker_order_id"])
+        if tool in (PAPER_ORDERS_TOOL, PAPER_ORDER_TOOL):
+            with self._order_guard:
+                if self._orders is None or self._auth is None:
+                    raise OrderError("paper_facade_unavailable")
+                if tool == PAPER_ORDERS_TOOL and not arguments:
+                    result = self._orders.listing(self._auth.server_id)
+                    orders = [self._model_order(row) for row in result["orders"]]
+                    return {"orders": orders, "count": len(orders)}
+                if tool == PAPER_ORDER_TOOL and set(arguments) == {"order_id"}:
+                    detail = self._orders.get(self._model_uuid(arguments["order_id"]), self._auth.server_id)
+                    return {"order": self._model_order(detail["order"]),
+                            "events": [{key: event.get(key) for key in
+                                        ("seq", "type", "state", "error_code", "created_at")}
+                                       for event in detail["events"]]}
         raise OrderError("invalid_order", 400)
+
+    @staticmethod
+    def _model_order(order):
+        state, error = order["state"], order.get("error_code")
+        if state in ("draft", "proposed", "confirmed"):
+            submission = "not_submitted"
+        elif state in ("submitting", "unknown"):
+            submission = "outcome_unknown"
+        elif state == "rejected":
+            submission = "submitted_rejected" if error == "broker_rejected" else "not_submitted"
+        else:
+            submission = "submitted"
+        contract = order["contract"]
+        return {
+            "order_id": order["id"], "environment": "paper", "state": state,
+            "submission_status": submission, "symbol": contract["symbol"],
+            "side": order["side"], "quantity": order["quantity"],
+            "limit_price": order["limit_price"], "tif": order["tif"],
+            "order_type": order["order_type"], "filled_quantity": order["filled_quantity"],
+            "average_fill_price": order["average_fill_price"], "error_code": error,
+            "created_at": order["created_at"], "updated_at": order["updated_at"],
+        }
 
     @staticmethod
     def order_admin(handler):

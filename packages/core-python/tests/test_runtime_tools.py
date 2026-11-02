@@ -11,6 +11,8 @@ from yolo_agents.runtime_tools import (
     MARKET_QUOTE_TOOL,
     OPEN_ORDER_TOOL,
     OPEN_ORDERS_TOOL,
+    PAPER_ORDER_TOOL,
+    PAPER_ORDERS_TOOL,
     PAPER_DRAFT_SCHEMA,
     PAPER_DRAFT_TOOL,
     POSITIONS_TOOL,
@@ -46,7 +48,8 @@ class RuntimeToolTests(unittest.TestCase):
     def test_read_tools_are_bounded_and_never_expose_execution_actions(self):
         specs = trading_dynamic_tools()
         self.assertEqual({spec["name"] for spec in specs}, {
-            PAPER_DRAFT_TOOL, MARKET_QUOTE_TOOL, POSITIONS_TOOL, OPEN_ORDERS_TOOL, OPEN_ORDER_TOOL})
+            PAPER_DRAFT_TOOL, MARKET_QUOTE_TOOL, POSITIONS_TOOL, OPEN_ORDERS_TOOL, OPEN_ORDER_TOOL,
+            PAPER_ORDERS_TOOL, PAPER_ORDER_TOOL})
         encoded = json.dumps(specs)
         for forbidden in ("confirm_paper_order", "submit_paper_order", "cancel_paper_order"):
             self.assertNotIn(forbidden, encoded)
@@ -59,6 +62,8 @@ class RuntimeToolTests(unittest.TestCase):
         self.assertEqual(calls[0]["tool"], MARKET_QUOTE_TOOL)
         with self.assertRaises(ValueError):
             context.invoke(OPEN_ORDER_TOOL, {"broker_order_id": "not-an-id"})
+        with self.assertRaises(ValueError):
+            context.invoke(PAPER_ORDER_TOOL, {"order_id": "not-an-id"})
 
     def test_valid_proposal_reaches_callback_with_trusted_context_only(self):
         calls = []
@@ -149,6 +154,21 @@ class RuntimeToolTests(unittest.TestCase):
 
         result = context.invoke(PAPER_DRAFT_TOOL, {
             "symbol": "TSLA", "side": "BUY", "quantity": 2, "limit_price": "403",
+        })
+
+        self.assertEqual(result, {"status": "draft_created", "order_id": order_id, "state": "draft"})
+
+    def test_chinese_price_before_order_verb_is_explicit(self):
+        order_id = str(uuid4())
+        context = self.context(lambda **_: {
+            "status": "draft_created", "order_id": order_id, "state": "draft",
+        })
+        context.trusted_messages = (
+            {"role": "user", "content": "438 下单买两股特斯拉"},
+        )
+
+        result = context.invoke(PAPER_DRAFT_TOOL, {
+            "symbol": "TSLA", "side": "BUY", "quantity": 2, "limit_price": "438",
         })
 
         self.assertEqual(result, {"status": "draft_created", "order_id": order_id, "state": "draft"})

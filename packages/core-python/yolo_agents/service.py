@@ -21,6 +21,7 @@ class ChatService:
         self.closing = threading.Event()
         self._paper_draft_tool = None
         self._trading_read_tool = None
+        self._trading_confirmation = None
         self._paper_draft_reauthorize = None
 
     def bind_paper_draft_tool(self, handler, reauthorize):
@@ -30,12 +31,13 @@ class ChatService:
         self._paper_draft_tool = handler
         self._paper_draft_reauthorize = reauthorize
 
-    def bind_trading_tools(self, draft_handler, read_handler, reauthorize):
+    def bind_trading_tools(self, draft_handler, read_handler, confirmation_handler, reauthorize):
         """Bind Trading Agent model tools; all broker reads stay application-owned."""
-        if not callable(read_handler):
+        if not callable(read_handler) or not callable(confirmation_handler):
             raise RuntimeError("Trading read tool binding is invalid")
         self.bind_paper_draft_tool(draft_handler, reauthorize)
         self._trading_read_tool = read_handler
+        self._trading_confirmation = confirmation_handler
 
     def conversation_lock(self, collection, conversation_id):
         with self.lock:
@@ -122,6 +124,18 @@ class ChatService:
         try:
             history = self.history(conversation_id, run_id)
             latest = history[-1]
+            if self._trading_confirmation is not None and caller is not None:
+                handled = self._trading_confirmation(
+                    history=tuple(history), caller=dict(caller),
+                    reauthorize=lambda: self._paper_draft_reauthorize(caller),
+                )
+                if handled is not None:
+                    if not isinstance(handled, str) or not handled.strip():
+                        raise ValueError("invalid trading confirmation response")
+                    self.store.append_event("assistant.delta", conversation_id,
+                                            {"run_id": run_id, "delta": handled})
+                    self.store.finish_run(conversation_id, run_id, handled)
+                    return
             runtime_tools = None
             if self._paper_draft_tool is not None and caller is not None:
                 runtime_tools = RuntimeToolContext(

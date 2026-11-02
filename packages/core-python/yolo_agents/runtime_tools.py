@@ -21,14 +21,16 @@ MARKET_QUOTE_TOOL = "get_market_quote"
 POSITIONS_TOOL = "list_positions"
 OPEN_ORDERS_TOOL = "list_open_orders"
 OPEN_ORDER_TOOL = "get_open_order"
-PAPER_DRAFT_TOOL_SCHEMA_VERSION = 4
+PAPER_ORDERS_TOOL = "list_paper_orders"
+PAPER_ORDER_TOOL = "get_paper_order"
+PAPER_DRAFT_TOOL_SCHEMA_VERSION = 5
 PAPER_DRAFT_DESCRIPTION = (
-    "Create a non-executable Paper stock limit-order draft for review in the Mac app. "
-    "Call this tool whenever the user asks to create a Paper draft and explicitly supplied an "
+    "Create a Paper stock limit-order draft and obtain an application-owned What-if review. "
+    "Call this tool whenever the user asks to place a Paper order and explicitly supplied an "
     "unambiguous ticker, BUY/SELL side, "
     "whole-share quantity, and limit price. Never infer or guess a price. If any field, "
     "especially limit_price, is missing, ask the user for it instead of calling this tool. "
-    "This tool cannot preview, confirm, submit, cancel, or place an order."
+    "The tool prepares the review but cannot confirm, submit, cancel, or place an order."
 )
 PAPER_DRAFT_SCHEMA = {
     "type": "object",
@@ -59,6 +61,14 @@ READ_TOOL_SPECS = (
      "inputSchema": {"type": "object", "properties": {
          "broker_order_id": {"type": "string", "pattern": r"^[1-9][0-9]{0,9}$"}},
          "required": ["broker_order_id"], "additionalProperties": False}},
+    {"type": "function", "name": PAPER_ORDERS_TOOL,
+     "description": "List all application-managed IBKR Paper orders, including drafts, submitted, filled, cancelled, rejected, and uncertain history. Use this for 'all orders', order history, or whether a chat order was actually submitted. A zero result from list_open_orders never means an order was not submitted.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"type": "function", "name": PAPER_ORDER_TOOL,
+     "description": "Get the durable lifecycle and event history for one application-managed IBKR Paper order by its local UUID returned by list_paper_orders or a trusted order card.",
+     "inputSchema": {"type": "object", "properties": {
+         "order_id": {"type": "string", "format": "uuid"}},
+         "required": ["order_id"], "additionalProperties": False}},
 )
 READ_TOOL_NAMES = frozenset(spec["name"] for spec in READ_TOOL_SPECS)
 
@@ -67,17 +77,21 @@ TRADING_TOOL_INSTRUCTIONS = (
     "get_market_quote for current quote questions and always state its data_type; delayed data must never be "
     "described as live. Use list_positions for current holdings, list_open_orders for the current open-order "
     "list, and get_open_order only with an ID returned by list_open_orders. Do not claim current broker facts "
-    "without the corresponding successful tool result. The read tools never expose account identifiers. "
+    "without the corresponding successful tool result. Use list_paper_orders for all orders, order history, "
+    "or whether an earlier chat order was submitted; use get_paper_order for one local order UUID. An empty "
+    "list_open_orders result means only that there are no current open orders. It MUST NEVER be used to claim "
+    "that an order was not submitted: it may already be filled, cancelled, or rejected. The read tools never "
+    "expose account identifiers. "
     "You MUST call create_paper_order_draft "
-    "when the current user asks to create a Paper draft and explicitly supplies all four required "
+    "when the current user asks to create or place a Paper order and explicitly supplies all four required "
     "fields. Do not say the tool is unavailable unless a tool call actually returns a failure. "
-    "Use create_paper_order_draft only to create a non-executable Paper LMT/DAY stock draft. "
+    "Use create_paper_order_draft only to prepare a Paper LMT/DAY stock order review. "
     "The user's message or trusted conversation must explicitly contain the ticker or an unambiguous "
     "company name, BUY/SELL intent, whole-share quantity, and limit price. Never obtain or invent a "
     "price from model knowledge. If the user says, for example, 'buy two shares of Tesla' without a "
     "limit price, ask for the limit price and do not call the tool. After a successful call, state that "
-    "only a draft was created and that the Mac app will obtain What-if and require one explicit confirmation "
-    "before it continues through confirmation and Paper submission. The application will append the trusted paper-order "
+    "the application prepared a What-if review and that one exact follow-up confirmation is required "
+    "before the application confirms and submits to IBKR Paper. The application will append the trusted paper-order "
     "artifact after a successful call; never write, copy, or invent a paper-order fenced block or "
     "order_id yourself. If the tool is unavailable or fails, do not claim a draft exists. You cannot "
     "confirm, submit, cancel, or place any order."
@@ -149,7 +163,7 @@ def _explicit_limit_price(messages: tuple[Mapping[str, Any], ...], limit_price: 
         before = content[max(0, match.start() - 24):match.start()].casefold()
         after = content[match.end():match.end() + 12].casefold()
         if (re.search(r"(?:limit(?:\s+price)?|price|at|@|\$|usd)\s*$", before)
-                or re.match(r"^\s*(?:usd|美元|美金|元|限价|价格|价位)", after)
+                or re.match(r"^\s*(?:usd|美元|美金|元|限价|价格|价位|下单|挂单)", after)
                 or re.search(r"(?:限价|价格|价位|按|以|挂(?:单)?(?:在|到)?)\s*$", before)):
             return True
     sole = re.fullmatch(
@@ -198,7 +212,10 @@ class RuntimeToolContext:
                     for key in ("symbol", "side", "quantity", "limit_price")
                 )
                 if same:
-                    return {"status": "draft_created", "order_id": self._artifact["order_id"], "state": "draft"}
+                    ready = self._artifact.get("state") == "proposed"
+                    return {"status": "review_ready" if ready else "draft_created",
+                            "order_id": self._artifact["order_id"],
+                            "state": self._artifact.get("state", "draft")}
                 return {"status": "draft_unavailable", "message": "本轮已创建另一个 Paper 草稿，未创建第二个草稿。"}
             try:
                 result = self.create_paper_draft(
@@ -212,7 +229,8 @@ class RuntimeToolContext:
                 if not isinstance(result, Mapping):
                     raise ValueError
                 order_id = str(UUID(result["order_id"]))
-                if result.get("status") != "draft_created" or result.get("state") != "draft":
+                if ((result.get("status"), result.get("state"))
+                        not in (("draft_created", "draft"), ("review_ready", "proposed"))):
                     raise ValueError
             except Exception as exc:
                 # Expose only a small application-owned error vocabulary.  Raw
@@ -238,7 +256,14 @@ class RuntimeToolContext:
                 "quantity": proposal["quantity"], "limit_price": proposal["limit_price"],
                 "environment": "paper", "order_type": "LMT", "tif": "DAY",
             }
-            return {"status": "draft_created", "order_id": order_id, "state": "draft"}
+            if result["state"] == "proposed":
+                self._artifact["state"] = "proposed"
+                preview = result.get("what_if")
+                if not isinstance(preview, Mapping):
+                    raise ValueError
+                self._artifact["what_if"] = dict(preview)
+                self._artifact["expires_at"] = result.get("expires_at")
+            return {"status": result["status"], "order_id": order_id, "state": result["state"]}
 
     def _invoke_read(self, tool: str, arguments: object) -> dict[str, Any]:
         if tool == MARKET_QUOTE_TOOL:
@@ -253,7 +278,16 @@ class RuntimeToolContext:
                     or re.fullmatch(r"[1-9][0-9]{0,9}", arguments["broker_order_id"]) is None):
                 raise ValueError("invalid open-order arguments")
             value = {"broker_order_id": arguments["broker_order_id"]}
-        elif tool in (POSITIONS_TOOL, OPEN_ORDERS_TOOL):
+        elif tool == PAPER_ORDER_TOOL:
+            if not isinstance(arguments, dict) or set(arguments) != {"order_id"}:
+                raise ValueError("invalid Paper order arguments")
+            try:
+                value = {"order_id": str(UUID(arguments["order_id"]))}
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError("invalid Paper order arguments") from None
+            if value["order_id"] != arguments["order_id"]:
+                raise ValueError("invalid Paper order arguments")
+        elif tool in (POSITIONS_TOOL, OPEN_ORDERS_TOOL, PAPER_ORDERS_TOOL):
             if not isinstance(arguments, dict) or arguments:
                 raise ValueError("invalid list arguments")
             value = {}
@@ -408,7 +442,15 @@ def finish_trading_reply(cleaned: str, tools: object) -> str:
     """Append exactly one application-owned card after streamed, filtered model text."""
     block = trusted_paper_order_block(tools)
     if block is not None:
-        return ("\n\n" if cleaned else "") + block
+        artifact = tools.trusted_artifact()
+        review = ""
+        if artifact and artifact.get("state") == "proposed":
+            what_if = artifact.get("what_if", {})
+            review = ("What-if 已通过：初始保证金变动 "
+                      f"{what_if.get('initial_margin_change', '未知')} USD，维持保证金变动 "
+                      f"{what_if.get('maintenance_margin_change', '未知')} USD，预计佣金 "
+                      f"{what_if.get('commission', '未知')} USD。回复“确认”后将直接提交到 IBKR Paper。\n\n")
+        return ("\n\n" if cleaned else "") + review + block
     if isinstance(tools, RuntimeToolContext) and tools.attempted():
         return ("\n\n" if cleaned else "") + "Paper 草稿未创建。"
     return "" if cleaned.strip() else "Paper 草稿未创建。"
@@ -484,11 +526,25 @@ def pydantic_trading_tools():
         return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
                 if tools is None else tools.invoke(OPEN_ORDER_TOOL, {"broker_order_id": broker_order_id}))
 
+    def list_paper_orders(ctx) -> dict[str, Any]:
+        """List the durable lifecycle of every application-managed IBKR Paper order."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(PAPER_ORDERS_TOOL, {}))
+
+    def get_paper_order(ctx, order_id: str) -> dict[str, Any]:
+        """Read one application-managed Paper order and its lifecycle events."""
+        tools = context(ctx)
+        return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
+                if tools is None else tools.invoke(PAPER_ORDER_TOOL, {"order_id": order_id}))
+
     read_tools = [
         (get_market_quote, MARKET_QUOTE_TOOL, READ_TOOL_SPECS[0]["description"]),
         (list_positions, POSITIONS_TOOL, READ_TOOL_SPECS[1]["description"]),
         (list_open_orders, OPEN_ORDERS_TOOL, READ_TOOL_SPECS[2]["description"]),
         (get_open_order, OPEN_ORDER_TOOL, READ_TOOL_SPECS[3]["description"]),
+        (list_paper_orders, PAPER_ORDERS_TOOL, READ_TOOL_SPECS[4]["description"]),
+        (get_paper_order, PAPER_ORDER_TOOL, READ_TOOL_SPECS[5]["description"]),
     ]
     return [pydantic_paper_draft_tool(), *[
         Tool(function, takes_ctx=True, name=name, description=description,

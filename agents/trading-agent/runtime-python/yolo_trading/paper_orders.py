@@ -426,6 +426,23 @@ class PaperOrderService:
                 _LOGGER.warning("Paper preview broker call failed (%s)",
                                 code if code in safe_codes else type(exc).__name__)
                 return self._preview_failure(row["id"], user_id, request_id)
+            # The IBKR adapter raises these only before placeOrder. Preserve
+            # the confirmed review and report a retryable application error;
+            # an operation that was provably never transmitted must not poison
+            # the ledger as an ambiguous broker outcome.
+            code = getattr(exc, "code", None)
+            pre_submit = {
+                "broker_not_ready", "execution_disabled", "invalid_order_id",
+                "order_id_unavailable", "preview_required", "stale_broker_context",
+                "unresolved_order",
+            }
+            if action == "submit" and code in pre_submit:
+                public_code = "intent_in_flight" if code == "unresolved_order" else "broker_not_ready"
+                with self.store.transaction() as db:
+                    row = self._get(db, row["id"], user_id)
+                    row.update(state="confirmed", error_code=public_code, updated_at=self.now())
+                    self.store.save(db, row)
+                    return self._failure(db, request_id, row, OrderError(public_code))
             result = {"order_ref": row["id"], "status": "unknown"}
         with self.store.transaction() as db:
             row = self._get(db, row["id"], user_id)
