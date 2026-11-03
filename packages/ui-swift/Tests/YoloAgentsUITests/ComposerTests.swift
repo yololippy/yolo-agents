@@ -2,6 +2,17 @@ import Foundation
 import Testing
 @testable import YoloAgentsUI
 
+@Test func composerCopyCanBeCustomizedPerAgentWithoutForkingTheUI() {
+    let standard = AgentComposerConfiguration.standard
+    #expect(standard.placeholder == "输入消息…")
+    let custom = AgentComposerConfiguration(placeholder: "询问助手…",
+                                            offlinePlaceholder: "离线时保存草稿",
+                                            archivedPlaceholder: "已归档")
+    #expect(custom.placeholder == "询问助手…")
+    #expect(custom.offlinePlaceholder == "离线时保存草稿")
+    #expect(custom.archivedPlaceholder == "已归档")
+}
+
 @Test func reconnectOrSendingDoesNotDisableDraftEditing() {
     let offline = ComposerAvailability(hasConversation: true, archived: false, online: false, busy: false)
     #expect(offline.canEdit && !offline.canSend)

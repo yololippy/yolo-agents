@@ -21,10 +21,13 @@ public struct YoloAgentsRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     private let features: [ChatFeature]
     private let messageAccessory: ChatMessageAccessory?
+    private let composerConfiguration: AgentComposerConfiguration
     public init(identity: AgentAppIdentity, features: [ChatFeature] = [],
-                messageAccessory: ChatMessageAccessory? = nil) {
+                messageAccessory: ChatMessageAccessory? = nil,
+                composerConfiguration: AgentComposerConfiguration = .standard) {
         self.features = features
         self.messageAccessory = messageAccessory
+        self.composerConfiguration = composerConfiguration
         _model = StateObject(wrappedValue: ChatModel(identity: identity))
     }
     public var body: some View {
@@ -34,7 +37,8 @@ public struct YoloAgentsRootView: View {
             } else if model.connection == nil {
                 PairingView(model: model, isSettings: false)
             } else {
-                ChatShell(model: model, features: features, messageAccessory: messageAccessory)
+                ChatShell(model: model, features: features, messageAccessory: messageAccessory,
+                          composerConfiguration: composerConfiguration)
             }
         }
         .task { await model.start() }
@@ -179,6 +183,7 @@ private struct ChatShell: View {
     @ObservedObject var model: ChatModel
     let features: [ChatFeature]
     let messageAccessory: ChatMessageAccessory?
+    let composerConfiguration: AgentComposerConfiguration
     @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
@@ -244,7 +249,8 @@ private struct ChatShell: View {
         } detail: {
             ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true },
                        openAccount: { showAccount = true }, features: features,
-                       messageAccessory: messageAccessory, openFeature: { selectedFeature = $0 })
+                       messageAccessory: messageAccessory, composerConfiguration: composerConfiguration,
+                       openFeature: { selectedFeature = $0 })
         }
         .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
         .sheet(item: $selectedFeature) { feature in
@@ -324,7 +330,9 @@ private struct ChatDetail: View {
     let openAccount: () -> Void
     let features: [ChatFeature]
     let messageAccessory: ChatMessageAccessory?
+    let composerConfiguration: AgentComposerConfiguration
     let openFeature: (ChatFeature) -> Void
+    @ViewState private var composerDismissRequest = 0
     private var composerAvailability: ComposerAvailability {
         ComposerAvailability(hasConversation: model.selectedID != nil,
                              archived: model.selectedConversation?.archived == true,
@@ -375,6 +383,7 @@ private struct ChatDetail: View {
                         }.padding().frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    .simultaneousGesture(TapGesture().onEnded { composerDismissRequest += 1 })
                     .onChange(of: model.messages) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                     .onChange(of: model.partialReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                     .onChange(of: model.awaitingReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
@@ -406,11 +415,10 @@ private struct ChatDetail: View {
                         get: { drafts.text(for: id) }, set: { drafts.set($0, for: id) }),
                         isEditable: composerAvailability.canEdit,
                         canSend: composerAvailability.canSend,
-                        online: model.isOnline, onSend: { sendDraft(in: id) })
+                        online: model.isOnline, configuration: composerConfiguration,
+                        dismissRequest: composerDismissRequest, onSend: { sendDraft(in: id) })
                         .id(id)
                 }
-                Text("仅聊天与查看 · 数据以 Mac 服务端为准")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 6)
             }.background(.bar)
         }
     }

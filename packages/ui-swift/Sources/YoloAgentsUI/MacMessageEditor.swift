@@ -42,6 +42,10 @@ final class MacComposerTextView: NSTextView {
         layout.drawGlyphs(forGlyphRange: layout.glyphRange(for: container), at: textContainerOrigin)
     }
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            window?.makeFirstResponder(nil)
+            return
+        }
         guard event.keyCode == 36 || event.keyCode == 76 else { super.keyDown(with: event); return }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if !flags.intersection([.control, .option, .command]).isEmpty { super.keyDown(with: event); return }
@@ -57,16 +61,20 @@ final class MacComposerTextView: NSTextView {
 
 struct MacMessageEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var measuredHeight: CGFloat
     let placeholder: String
     let isEditable: Bool
     let canSubmit: Bool
     let focusRequest: Int
+    let dismissRequest: Int
     let onSubmit: () -> Void
+    private let minimumHeight: CGFloat = 40
+    private let maximumHeight: CGFloat = 136
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: 92))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: minimumHeight))
         scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = false
         scroll.autohidesScrollers = true
         let storage = NSTextStorage()
         let layout = NSLayoutManager()
@@ -80,7 +88,7 @@ struct MacMessageEditor: NSViewRepresentable {
         editor.allowsUndo = true
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
-        editor.minSize = NSSize(width: 0, height: 92)
+        editor.minSize = NSSize(width: 0, height: minimumHeight)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
@@ -110,6 +118,7 @@ struct MacMessageEditor: NSViewRepresentable {
         editor.isSelectable = true
         editor.canSubmit = canSubmit
         editor.onSubmit = onSubmit
+        context.coordinator.updateHeight(editor, in: scroll)
         if context.coordinator.lastFocusRequest != focusRequest {
             context.coordinator.lastFocusRequest = focusRequest
             DispatchQueue.main.async { [weak editor] in
@@ -117,15 +126,40 @@ struct MacMessageEditor: NSViewRepresentable {
                 editor.window?.makeFirstResponder(editor)
             }
         }
+        if context.coordinator.lastDismissRequest != dismissRequest {
+            context.coordinator.lastDismissRequest = dismissRequest
+            DispatchQueue.main.async { [weak editor] in
+                guard let editor else { return }
+                if editor.window?.firstResponder === editor { editor.window?.makeFirstResponder(nil) }
+            }
+        }
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MacMessageEditor
         var lastFocusRequest = 0
+        var lastDismissRequest = 0
         init(_ parent: MacMessageEditor) { self.parent = parent }
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? MacComposerTextView else { return }
             parent.text = editor.string
+            guard let scroll = editor.enclosingScrollView else { return }
+            updateHeight(editor, in: scroll)
+        }
+        func updateHeight(_ editor: MacComposerTextView, in scroll: NSScrollView) {
+            guard scroll.contentSize.width > 0,
+                  let textContainer = editor.textContainer,
+                  let layoutManager = editor.layoutManager else { return }
+            textContainer.containerSize = NSSize(width: max(1, scroll.contentSize.width),
+                                                 height: .greatestFiniteMagnitude)
+            layoutManager.ensureLayout(for: textContainer)
+            let natural = ceil(layoutManager.usedRect(for: textContainer).height +
+                               editor.textContainerInset.height * 2)
+            let height = min(max(natural, parent.minimumHeight), parent.maximumHeight)
+            scroll.hasVerticalScroller = natural > parent.maximumHeight
+            if abs(parent.measuredHeight - height) > 0.5 {
+                DispatchQueue.main.async { [weak self] in self?.parent.measuredHeight = height }
+            }
         }
     }
 }
