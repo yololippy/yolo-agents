@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yolo Agent 设备配对"
+  short_description: "优先通过 iPhone Mirroring 自动完成 iOS 客户端配对"
+  default_prompt: "使用 $yolo-agent-device-pairing 通过 iPhone Mirroring 帮我完成当前 Agent 的 iPhone 配对。"
