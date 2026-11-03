@@ -1,0 +1,36 @@
+#!/bin/zsh
+set -euo pipefail
+
+version=3.24.2
+expected_sha256=2449ef36d758ea56c6ca15fc6b6c4cbe626c8f0a95e36f6455c717ee390add93
+archive_name="IBCMacos-$version.zip"
+download_url="https://github.com/IbcAlpha/IBC/releases/download/$version/$archive_name"
+install_root="$HOME/Library/Application Support/YoloAgents/IBC"
+version_dir="$install_root/$version"
+current_link="$install_root/current"
+temporary_dir=$(mktemp -d /tmp/yolo-ibc-install.XXXXXX)
+
+cleanup() {
+  rm -rf "$temporary_dir"
+}
+trap cleanup EXIT
+
+archive_path="$temporary_dir/$archive_name"
+curl -fsSL -o "$archive_path" "$download_url"
+actual_sha256=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+  echo "IBC checksum mismatch; refusing installation." >&2
+  exit 1
+fi
+
+mkdir -p "$install_root"
+if [[ ! -d "$version_dir" ]]; then
+  mkdir "$temporary_dir/extracted"
+  ditto -x -k "$archive_path" "$temporary_dir/extracted"
+  chmod u+x "$temporary_dir/extracted"/*.sh "$temporary_dir/extracted"/scripts/*.sh
+  mv "$temporary_dir/extracted" "$version_dir"
+fi
+ln -sfn "$version" "$current_link"
+
+echo "IBC $version installed at: $version_dir"
+echo "Verified SHA-256: $actual_sha256"

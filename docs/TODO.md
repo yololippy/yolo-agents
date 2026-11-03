@@ -66,6 +66,7 @@
 - [x] **M0-07 技术决策**：已确定 PydanticAI Core＋官方 Harness、Codex app-server、SQLite WAL、通信 v1 及独立 `ib_async` 薄适配；Paper 执行需显式双开关，Live 强制关闭。PydanticAI 供应商、备份和外网访问属于后续验收，不再影响接入选型。
 - [ ] **M0-08 验证证据**：按通过/失败/未测记录版本、配置、步骤和脱敏结果；复用旧调研的接口、版本或代码前重新核对。
 - [ ] **M0-09 认证周期**：验证每日 Auto restart、周末认证、IB Key、异常退出/主机重启和同用户名占用；记录时区及中断窗口，区分故障注入与真实跨周测试。
+  - 已实现并实测 Paper-only `Gateway Supervisor → IBC → IB Gateway`、Security.framework Keychain 凭据、脱敏日志、LaunchAgent 和冷启动自动登录；4002 恢复后 Host 完成全量对账并恢复 Paper ready。每日 06:15 Auto Restart、主机重启、2FA 超时和周日 14:15 Cold Restart 的自然时间验收尚未完成，因此保持未勾选。
 
 验收：模拟只读连接范围明确，认证失效可识别；文档核查、上游测试和账户实测分别记录，未通过项不宣称可用。
 

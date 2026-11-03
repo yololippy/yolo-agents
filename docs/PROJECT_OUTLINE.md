@@ -96,7 +96,13 @@ Client Portal Gateway 需要浏览器认证，官方要求每日重新认证且�
 
 外出时可用事先配置的安全远程桌面操作 Gateway，再在手机完成认证；通知不代替发起登录。不能承诺用户无法完成认证时仍执行定时订单。
 
-### 3.4 多端登录、外部订单与恢复边界
+### 3.4 Gateway 自动恢复（Paper）
+
+本机采用独立 `Gateway Supervisor → IBC → IB Gateway` 运维链路，凭据保存在 macOS Keychain，不进入 Agent、仓库、命令行或数据库。Supervisor 只在 Gateway 进程不存在时启动固定 Paper 模式；进程存在但 4002 未开放时仅提示人工登录/IB Key，不循环结束进程。每日 Auto Restart、周日 Cold Restart、竞争会话、运行配置和状态含义见 [Gateway 自动恢复流程](../agents/trading-agent/IBKR_GATEWAY_AUTOMATION.md)。
+
+该链路不改变交易恢复语义：Gateway 与 IBKR 的网络中断由 Gateway 自行恢复，交易服务恢复后完整对账；未知订单绝不因为进程恢复而自动重发。IBC 仍不能绕过每周认证或 2FA。
+
+### 3.5 多端登录、外部订单与恢复边界
 
 同一用户名不能同时维持多个交易应用的交易会话。额外用户名可用于并行登录，但不是新资金子账户，权限和行情订阅需单独核对。官方指出同用户名登录 Client Portal 可能影响 Gateway 后续自动重连；只读访问、交易会话和 IB Key 认证需分别验证。[多应用登录说明](https://www.interactivebrokers.com/docs/tws-api/doc/connectivity/logging-into-multiple-applications)、[Web API 会话说明](https://www.interactivebrokers.com/docs/web-api/authentication/sessions)
 

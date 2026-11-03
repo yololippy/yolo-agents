@@ -4,6 +4,9 @@
 
 本模块是 `trading-agent` 私有的 IBKR 运行时。它提供显式 paper/live 配置、Gateway 生命周期、启动对账、Paper 股票限价单和独立订单账本。Live 环境没有执行路径；聊天模型也没有直接订单工具。Mac 管理设备必须按“草稿 → What-if → 确认 → 提交”逐步操作，iOS 仅查看脱敏订单状态。
 
+Paper Gateway 的 IBC、Keychain、LaunchAgent 与 2FA 自动恢复流程见
+[IBKR_GATEWAY_AUTOMATION.md](IBKR_GATEWAY_AUTOMATION.md)。
+
 ## 模块
 
 - `ibkr_config.py`：不可变配置、来源审计和安全默认值。
