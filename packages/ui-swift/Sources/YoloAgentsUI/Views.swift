@@ -1,5 +1,10 @@
 import SwiftUI
 import YoloAgentsSDK
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 // Resolve the long-standing property wrapper explicitly. The macOS 27 SDK also
 // exports a same-named macro whose plugin is absent from Command Line Tools.
@@ -14,6 +19,16 @@ struct ConversationRenameRequest: Identifiable, Equatable {
         self.conversation = conversation
         initialTitle = conversation.title
     }
+}
+
+private func copyConversationID(_ id: UUID) {
+    let value = id.uuidString.lowercased()
+    #if os(macOS)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(value, forType: .string)
+    #elseif os(iOS)
+    UIPasteboard.general.string = value
+    #endif
 }
 
 public struct YoloAgentsRootView: View {
@@ -192,7 +207,7 @@ private struct ChatShell: View {
     @ViewState private var renameRequest: ConversationRenameRequest? = nil
     @ViewState private var drafts = ComposerDrafts()
     private var conversations: [Conversation] {
-        model.state.conversations.filter {
+        model.state.orderedConversations.filter {
             (includeArchived || !$0.archived) &&
             (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query))
         }
@@ -219,6 +234,9 @@ private struct ChatShell: View {
                             }.padding(.vertical, 4)
                         }
                         .contextMenu {
+                            Button { copyConversationID(conversation.id) } label: {
+                                Label("复制会话 ID", systemImage: "doc.on.doc")
+                            }
                             Button("重命名") { renameRequest = ConversationRenameRequest(conversation) }
                                 .disabled(!model.isOnline)
                             Button(conversation.archived ? "取消归档" : "归档") {

@@ -375,6 +375,31 @@ func invalidServiceAddressesFail(_ value: String) {
     #expect(try repository.state(for: connection) == ClientState())
 }
 
+@Test func primaryConversationRemainsFirstWhenNewerConversationsArrive() {
+    let primaryID = UUID(uuidString: "10000000-0000-4000-8000-000000000070")!
+    let newerID = UUID(uuidString: "10000000-0000-4000-8000-000000000071")!
+    var state = ClientState()
+    state.upsertConversation(Conversation(
+        id: primaryID, title: "main", createdAt: now,
+        updatedAt: now
+    ))
+    state.upsertConversation(Conversation(
+        id: newerID, title: "新会话", createdAt: now.addingTimeInterval(60),
+        updatedAt: now.addingTimeInterval(60)
+    ))
+
+    #expect(state.conversations.first?.id == newerID)
+    state.setPrimaryConversation(primaryID)
+    #expect(state.conversations.map(\.id) == [primaryID, newerID])
+
+    state.upsertConversation(Conversation(
+        id: newerID, title: "再次更新的新会话", createdAt: now.addingTimeInterval(60),
+        updatedAt: now.addingTimeInterval(120)
+    ))
+    #expect(state.orderedConversations.map(\.id) == [primaryID, newerID])
+    #expect(state.cacheSnapshot().conversations.first?.id == primaryID)
+}
+
 @Test func boundedCacheRetainsOutstandingRequestAndRecentMessages() throws {
     var state = ClientState()
     for i in 0..<60 {

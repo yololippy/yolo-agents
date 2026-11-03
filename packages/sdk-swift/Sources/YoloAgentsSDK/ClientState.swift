@@ -41,8 +41,23 @@ public struct ClientState: Codable, Equatable, Sendable {
     public private(set) var cursor: Int64 = 0
     public init() {}
 
+    /// Primary is a stable product-level conversation, so it stays above newer
+    /// task conversations on every client. The remaining conversations retain
+    /// the existing most-recently-updated ordering.
+    public var orderedConversations: [Conversation] {
+        conversations.sorted { lhs, rhs in
+            let lhsIsPrimary = lhs.id == primaryConversationID
+            let rhsIsPrimary = rhs.id == primaryConversationID
+            if lhsIsPrimary != rhsIsPrimary { return lhsIsPrimary }
+            return lhs.updatedAt == rhs.updatedAt
+                ? lhs.id.uuidString < rhs.id.uuidString
+                : lhs.updatedAt > rhs.updatedAt
+        }
+    }
+
     public mutating func setPrimaryConversation(_ id: UUID?) {
         primaryConversationID = id
+        conversations = orderedConversations
     }
 
     public func messages(in conversationID: UUID) -> [Message] {
@@ -73,7 +88,7 @@ public struct ClientState: Codable, Equatable, Sendable {
             // A REST snapshot can arrive after a newer event while requests overlap.
             if conversations[index].updatedAt <= conversation.updatedAt { conversations[index] = conversation }
         } else { conversations.append(conversation) }
-        conversations.sort { $0.updatedAt == $1.updatedAt ? $0.id.uuidString < $1.id.uuidString : $0.updatedAt > $1.updatedAt }
+        conversations = orderedConversations
     }
     public mutating func mergeMessages(_ incoming: [Message], conversationID: UUID) throws {
         guard incoming.allSatisfy({ $0.conversationID == conversationID }) else {
@@ -216,8 +231,9 @@ public struct ClientState: Codable, Equatable, Sendable {
     public func cacheSnapshot() -> ClientState {
         var snapshot = self
         let required = Set(outgoing.map(\.conversationID))
-        snapshot.conversations = Array(conversations.prefix(50)) +
-            conversations.dropFirst(50).filter { required.contains($0.id) }
+        let ordered = orderedConversations
+        snapshot.conversations = Array(ordered.prefix(50)) +
+            ordered.dropFirst(50).filter { required.contains($0.id) }
         let retained = Set(snapshot.conversations.map { $0.id.uuidString })
         snapshot.messagesByConversation = messagesByConversation.filter { retained.contains($0.key) }.mapValues { messages in
             let pendingIDs = Set(outgoing.map(\.id))
