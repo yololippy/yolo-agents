@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from yolo_agents.agent_runtime import (
-    DemoRuntime, RuntimeConfigurationError, RuntimeExecutionError,
+    DemoRuntime, RuntimeConfigurationError, RuntimeConnectionError, RuntimeExecutionError,
     RuntimeStateError, create_runtime,
 )
 from yolo_agents.store import Store
@@ -688,6 +688,44 @@ class OfficialSDKTests(unittest.TestCase):
         messages = self.store.list_messages(self.cid)
         self.assertEqual(len(messages), 1)
         self.assertIsNone(runtime.recover_completed_reply(self.cid, messages[0]["id"]))
+
+    def test_connection_failure_discards_cached_agent_without_replaying(self):
+        from pydantic_ai.exceptions import ModelConnectionError
+        from pydantic_ai.models.function import FunctionModel
+        from uuid import uuid4
+
+        attempts = []
+
+        async def stream(messages, _info):
+            attempts.append(list(messages))
+            if len(attempts) == 1:
+                raise ModelConnectionError("offline-model", "Connection error.")
+            yield "Recovered on an explicit later request."
+
+        model = FunctionModel(stream_function=stream)
+        runtime = self.runtime(model)
+        created = []
+
+        def factory(_model, **kwargs):
+            agent = self.official_agent(model, **kwargs)
+            created.append(agent)
+            return agent
+
+        runtime._backend.Agent = factory
+        run_id = str(uuid4())
+        self.store.append_message(self.cid, "user", "first attempt", run_id=run_id)
+        with self.assertRaises(RuntimeConnectionError):
+            list(runtime.stream_reply(self.store.list_messages(self.cid), self.cid))
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(runtime._agents, {})
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+
+        retry_conversation = self.store.create_conversation("explicit retry")["id"]
+        reply, _ = self.ask(runtime, "try again", conversation_id=retry_conversation)
+        self.assertEqual(reply, "Recovered on an explicit later request.")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(created), 2)
 
     def test_official_parallel_fresh_conversations_and_worker_loop_shutdown(self):
         import asyncio

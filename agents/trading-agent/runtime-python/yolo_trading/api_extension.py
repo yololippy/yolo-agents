@@ -384,12 +384,25 @@ class TradingAPIExtension:
         }
 
     def public_health(self):
+        broker = self.broker_health()
         try:
             snapshot(self.broker)
             enabled = True
         except BrokerBoundaryError:
             enabled = False
-        return {"trade_execution_enabled": enabled, "broker": self.broker_health()}
+        configuration = broker.get("configuration") if isinstance(broker, dict) else None
+        environment = configuration.get("environment") if isinstance(configuration, dict) else None
+        label = "IBKR Paper" if environment == "paper" else "IBKR Live" if environment == "live" else "IBKR"
+        if (broker.get("connected") is True and broker.get("environment_verified") is True
+                and broker.get("data_complete") is True and broker.get("health_stale") is not True):
+            state, detail = "ready", "已连接"
+        elif broker.get("state") in ("connecting", "recovering"):
+            state, detail = "checking", "正在连接"
+        else:
+            state, detail = "unavailable", "未连接"
+        return {"trade_execution_enabled": enabled, "broker": broker, "components": [{
+            "id": "ibkr", "label": label, "state": state, "detail": detail,
+        }]}
 
     def route(self, handler, method, path, query, caller):
         if path == "/v1/broker/health" and method == "GET":

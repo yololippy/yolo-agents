@@ -126,9 +126,14 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/v1/health":
             health = {"status": "ok", "api_version": 1, "server_id": auth.server_id,
                       "agent_mode": app.runtime.mode, "model": app.runtime.model_name,
-                      "agent_id": app.agent_id, "app_name": app.app_name}
+                      "agent_id": app.agent_id, "app_name": app.app_name,
+                      "components": []}
             if self.server.extension is not None:
-                health.update(self.server.extension.public_health())
+                extension_health = dict(self.server.extension.public_health())
+                components = extension_health.pop("components", [])
+                if isinstance(components, list):
+                    health["components"].extend(components)
+                health.update(extension_health)
             self.send_json(200, health)
             return
         if method == "POST" and path == "/v1/devices/pair":

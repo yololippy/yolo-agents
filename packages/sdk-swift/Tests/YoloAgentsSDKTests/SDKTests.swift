@@ -127,6 +127,18 @@ func invalidServiceAddressesFail(_ value: String) {
     #expect(body == ["pairing_code": "a-code", "device_name": "手机", "platform": "ios"])
 }
 
+@Test func healthDecodesAgentNeutralServiceComponents() throws {
+    let json = """
+    {"status":"ok","api_version":1,"server_id":"40000000-0000-4000-8000-000000000004",
+    "agent_mode":"chatgpt","model":null,"trade_execution_enabled":true,
+    "components":[{"id":"ibkr","label":"IBKR Paper","state":"ready","detail":"已连接"}]}
+    """
+    let health = try WireJSON.decoder().decode(Health.self, from: Data(json.utf8))
+    #expect(health.components == [ServiceComponentHealth(
+        id: "ibkr", label: "IBKR Paper", state: "ready", detail: "已连接"
+    )])
+}
+
 @Test func queryEncodingAndBearerAreCorrect() async throws {
     let transport = RecordingTransport([HTTPResult(data: Data("{\"conversations\":[],\"primary_conversation_id\":\"10000000-0000-4000-8000-000000000001\"}".utf8), status: 200)])
     let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"), token: "fixture-token", transport: transport)

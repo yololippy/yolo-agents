@@ -32,6 +32,10 @@ class RuntimeExecutionError(RuntimeError):
     """A real model run failed; no demo fallback or automatic replay occurred."""
 
 
+class RuntimeConnectionError(RuntimeExecutionError):
+    """The cached provider connection failed and was discarded for the next run."""
+
+
 class RuntimeGuardrailError(RuntimeExecutionError):
     """The credential guard blocked a request, tool call, or response."""
 
@@ -334,6 +338,13 @@ class PydanticRuntime(_Runtime):
                 )
             return self._agents[key]
 
+    def _discard_agent(self, namespace: str, model_name: str, agent: Any) -> None:
+        """Forget one failed cached provider without replaying its model request."""
+        key = (namespace, threading.get_ident(), model_name)
+        with self._guard:
+            if self._agents.get(key) is agent:
+                del self._agents[key]
+
     def _model_instance(self, model_name):
         return model_name
 
@@ -507,6 +518,16 @@ class PydanticRuntime(_Runtime):
             except Exception as exc:
                 if is_guardrail_error(exc):
                     raise RuntimeGuardrailError("检测到可能的凭据，已阻止本次请求。") from None
+                # A long-lived HTTP client can retain an unusable connection
+                # after sleep or a network-path change. Never replay this turn:
+                # discard only its cached Agent so the next explicit user action
+                # creates a fresh provider and connection pool.
+                from pydantic_ai.exceptions import ModelConnectionError
+                if isinstance(exc, ModelConnectionError):
+                    self._discard_agent(namespace, selected_model, agent)
+                    raise RuntimeConnectionError(
+                        "模型连接已重置；本次消息未自动重试。"
+                    ) from None
                 raise RuntimeExecutionError(
                     f"真实模型运行失败（{type(exc).__name__}），本次未自动重试或切换到演示模式。"
                 ) from None

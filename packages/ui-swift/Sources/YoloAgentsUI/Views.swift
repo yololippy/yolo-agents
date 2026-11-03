@@ -470,22 +470,122 @@ private struct ChatDetail: View {
         }.padding(.horizontal).padding(.vertical, 8)
     }
     private var connectionBanner: some View {
-        HStack(spacing: 8) {
-            Circle().fill(model.isOnline ? Color.green : Color.orange).frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.connectionState.label).font(.caption.bold())
-                if case .offline(let reason) = model.connectionState { Text(reason).font(.caption2).lineLimit(2) }
-                if let health = model.health, health.agentMode == "demo" {
-                    Text("演示模式 · 未调用真实模型或券商").font(.caption2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 7) {
+                ServiceStatusBadge(presentation: ServiceStatusPresentation(model.connectionState))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ServiceStatusBadge(presentation: ServiceStatusPresentation(model.modelConnectionState))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(model.serviceComponents) { component in
+                    ServiceStatusBadge(presentation: ServiceStatusPresentation(component))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            Spacer()
-            if model.connectionState == .authorizationRequired {
-                Button("重新配对", action: openSettings).font(.caption)
-            } else if !model.isOnline {
-                Button("重连") { model.reconnect() }.font(.caption)
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if case .offline(let reason) = model.connectionState {
+                    Text(reason).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                } else if let health = model.health, health.agentMode == "demo" {
+                    Text("演示模式 · 未调用真实模型或券商")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if model.connectionState == .authorizationRequired {
+                    Button("重新配对", action: openSettings).font(.caption)
+                } else if !model.isOnline {
+                    Button("重连") { model.reconnect() }.font(.caption)
+                }
             }
-        }.padding(.horizontal).padding(.vertical, 8).background(.bar)
+        }
+        .padding(.horizontal).padding(.vertical, 8).background(.bar)
+    }
+}
+
+enum ServiceStatusTone: Equatable {
+    case positive, warning, negative, neutral
+}
+
+struct ServiceStatusPresentation: Equatable {
+    let title: String
+    let value: String
+    let tone: ServiceStatusTone
+    let accessibilityIdentifier: String
+
+    init(title: String, value: String, tone: ServiceStatusTone, accessibilityIdentifier: String) {
+        self.title = title
+        self.value = value
+        self.tone = tone
+        self.accessibilityIdentifier = accessibilityIdentifier
+    }
+
+    init(_ state: ConnectionState) {
+        title = "Mac 服务"
+        accessibilityIdentifier = "status.mac-service"
+        switch state {
+        case .online: value = "已连接"; tone = .positive
+        case .connecting: value = "连接中"; tone = .warning
+        case .offline: value = "已断开"; tone = .negative
+        case .authorizationRequired: value = "需重新配对"; tone = .negative
+        case .disconnected: value = "未连接"; tone = .neutral
+        }
+    }
+
+    init(_ state: ModelConnectionState) {
+        title = "AI 模型"
+        accessibilityIdentifier = "status.ai-model"
+        switch state {
+        case .checking: value = "检查中"; tone = .warning
+        case .available: value = "可用"; tone = .positive
+        case .recovering: value = "待重试"; tone = .warning
+        case .unavailable: value = "不可用"; tone = .negative
+        case .disabled: value = "未启用"; tone = .neutral
+        }
+    }
+
+    init(_ component: ServiceComponentHealth) {
+        title = component.label
+        value = component.detail ?? {
+            switch component.state {
+            case "ready": "可用"
+            case "checking": "检查中"
+            case "unavailable": "不可用"
+            default: component.state
+            }
+        }()
+        switch component.state {
+        case "ready": tone = .positive
+        case "checking": tone = .warning
+        case "unavailable": tone = .negative
+        default: tone = .neutral
+        }
+        accessibilityIdentifier = "status.component.\(component.id)"
+    }
+}
+
+private struct ServiceStatusBadge: View {
+    let presentation: ServiceStatusPresentation
+
+    private var color: Color {
+        switch presentation.tone {
+        case .positive: .green
+        case .warning: .orange
+        case .negative: .red
+        case .neutral: .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Circle().fill(color).frame(width: 7, height: 7).padding(.top, 4)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(presentation.title).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                Text(presentation.value).font(.caption.bold()).lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(presentation.accessibilityIdentifier)
     }
 }
 

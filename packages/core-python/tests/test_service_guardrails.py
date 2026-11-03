@@ -14,7 +14,7 @@ from uuid import uuid4
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel
 
-from yolo_agents.agent_runtime import create_runtime
+from yolo_agents.agent_runtime import RuntimeConnectionError, create_runtime
 from yolo_agents.api import ChatHTTPServer
 from yolo_agents.auth import DeviceAuth
 from yolo_agents.service import ChatService
@@ -175,6 +175,37 @@ class GuardrailHTTPTests(unittest.TestCase):
         finally:
             self.finish_gate.set()
         self.assertTrue(any(event["type"] == "assistant.completed" for event in self.terminal()))
+
+
+class ConnectionFailureTests(unittest.TestCase):
+    def test_connection_reset_is_public_and_never_replayed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder) / "app.sqlite3")
+            conversation = store.create_conversation("connection failure")["id"]
+
+            class Runtime:
+                calls = 0
+
+                def stream_reply(self, *_args):
+                    self.calls += 1
+                    raise RuntimeConnectionError("private provider connection detail")
+
+            runtime = Runtime()
+            service = ChatService(store, runtime)
+            try:
+                service.send(conversation, "hello", str(uuid4()))
+                service.close()
+                messages = store.list_messages(conversation)
+                self.assertEqual(runtime.calls, 1)
+                self.assertEqual(messages[-1]["status"], "failed")
+                self.assertEqual(messages[-1]["content"], "模型连接已自动重置；本次消息未自动重试，请重新发送。")
+                terminal = [event for event in store.list_events(conversation_id=conversation)
+                            if event["type"] == "assistant.failed"]
+                self.assertEqual(terminal[-1]["payload"]["error"]["code"], "model_connection_reset")
+                self.assertNotIn("private provider", json.dumps(terminal[-1]))
+            finally:
+                service.close()
+                store.close()
 
 
 if __name__ == "__main__":

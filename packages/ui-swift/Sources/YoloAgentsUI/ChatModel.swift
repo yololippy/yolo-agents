@@ -15,6 +15,10 @@ public enum ConnectionState: Equatable {
     }
 }
 
+public enum ModelConnectionState: Equatable {
+    case checking, available, recovering, unavailable, disabled
+}
+
 @MainActor
 public final class ChatModel: ObservableObject {
     @Published public private(set) var started = false
@@ -25,6 +29,7 @@ public final class ChatModel: ObservableObject {
     @Published public private(set) var modelCatalog: ModelCatalog?
     @Published public private(set) var modelCatalogError: String?
     @Published public private(set) var modelCatalogLoading = false
+    @Published public private(set) var modelConnectionState: ModelConnectionState = .checking
     @Published public private(set) var busy = false
     @Published public var selectedID: UUID?
     @Published public var errorMessage: String?
@@ -32,6 +37,7 @@ public final class ChatModel: ObservableObject {
     private let transport: any HTTPTransport
     private let streamTransport: any SSETransport
     private var synchronizationTask: Task<Void, Never>?
+    private var healthMonitorTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = true
     private var selectPrimaryAfterSnapshot = false
@@ -55,6 +61,7 @@ public final class ChatModel: ObservableObject {
                   transport: transport, streamTransport: streamTransport)
     }
     public var isOnline: Bool { connectionState == .online }
+    public var serviceComponents: [ServiceComponentHealth] { health?.components ?? [] }
     public var selectedConversation: Conversation? { state.conversations.first { $0.id == selectedID } }
     public func isPrimaryConversation(_ conversation: Conversation) -> Bool {
         state.primaryConversationID == conversation.id
@@ -122,8 +129,9 @@ public final class ChatModel: ObservableObject {
             try repository.saveState(ClientState(), for: connection)
             try repository.saveConnection(connection)
             synchronizationTask?.cancel(); synchronizationTask = nil
+            healthMonitorTask?.cancel(); healthMonitorTask = nil
             generation = UUID()
-            self.connection = connection; self.health = health
+            self.connection = connection; apply(health)
             modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
             state = ClientState(); selectedID = nil
             connectionState = .disconnected
@@ -144,11 +152,13 @@ public final class ChatModel: ObservableObject {
             startSynchronizing(preservingOnlineState: true)
         } else {
             synchronizationTask?.cancel(); synchronizationTask = nil
+            healthMonitorTask?.cancel(); healthMonitorTask = nil
         }
     }
     public func reconnect() {
         guard connectionState != .authorizationRequired else { return }
         synchronizationTask?.cancel(); synchronizationTask = nil
+        healthMonitorTask?.cancel(); healthMonitorTask = nil
         // Invalidate every in-flight operation before making a replacement connection.
         generation = UUID()
         var next = state
@@ -158,6 +168,7 @@ public final class ChatModel: ObservableObject {
     }
     private func startSynchronizing(preservingOnlineState: Bool = false) {
         guard active, connection != nil, synchronizationTask == nil, connectionState != .authorizationRequired else { return }
+        startHealthMonitoring()
         if !preservingOnlineState || connectionState != .online { connectionState = .connecting }
         let attempt = generation
         synchronizationTask = Task { [weak self] in
@@ -180,6 +191,7 @@ public final class ChatModel: ObservableObject {
                     for try await event in stream {
                         try self.check(attempt)
                         try self.commit(self.state.applying(event))
+                        self.observe(event)
                         receivedEvent = true
                     }
                     try self.check(attempt)
@@ -194,6 +206,7 @@ public final class ChatModel: ObservableObject {
                     if let error = error as? ClientError, error.requiresPairing {
                         self.connectionState = .authorizationRequired
                         self.errorMessage = error.localizedDescription
+                        self.healthMonitorTask?.cancel(); self.healthMonitorTask = nil
                         self.synchronizationTask = nil
                         return
                     }
@@ -203,6 +216,31 @@ public final class ChatModel: ObservableObject {
                 do { try await Task.sleep(nanoseconds: retrySeconds * 1_000_000_000) }
                 catch { return }
                 retrySeconds = min(30, retrySeconds * 2)
+            }
+        }
+    }
+    private func startHealthMonitoring() {
+        guard active, connection != nil, healthMonitorTask == nil,
+              connectionState != .authorizationRequired else { return }
+        let attempt = generation
+        healthMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) }
+                catch { return }
+                guard let self, self.generation == attempt, let connection = self.connection else { return }
+                do {
+                    let health = try await self.client(for: connection).health()
+                    try self.check(attempt)
+                    guard health.apiVersion == 1, health.serverID == connection.pairing.serverID else {
+                        throw ClientError.incompatibleServer
+                    }
+                    try self.identity?.validate(health, serverID: connection.pairing.serverID)
+                    self.apply(health)
+                } catch {
+                    if self.isCancellation(error) || self.generation != attempt { return }
+                    // The event stream owns the Mac-service connection state.
+                    // A failed status poll must not turn a healthy stream offline.
+                }
             }
         }
     }
@@ -216,7 +254,7 @@ public final class ChatModel: ObservableObject {
                 throw ClientError.incompatibleServer
             }
             try identity?.validate(health, serverID: connection.pairing.serverID)
-            self.health = health
+            apply(health)
             await refreshModels()
             try check(attempt)
             let conversationList = try await api.conversationList(includeArchived: true)
@@ -242,7 +280,26 @@ public final class ChatModel: ObservableObject {
             let page = try await api.events(after: state.cursor)
             try check(attempt)
             try commit(state.applying(page))
+            page.events.forEach(observe)
             if !page.hasMore { break }
+        }
+    }
+    private func apply(_ health: Health) {
+        self.health = health
+        if health.agentMode == "demo" { modelConnectionState = .disabled }
+    }
+    private func observe(_ event: ServerEvent) {
+        switch event.type {
+        case "assistant.delta", "assistant.completed":
+            modelConnectionState = .available
+        case "assistant.failed":
+            switch event.payload.error?.code {
+            case "model_connection_reset": modelConnectionState = .recovering
+            case "model_configuration_error", "login_required", "agent_failed":
+                modelConnectionState = .unavailable
+            default: break
+            }
+        default: break
         }
     }
     private func check(_ attempt: UUID) throws {
@@ -296,9 +353,17 @@ public final class ChatModel: ObservableObject {
             try check(attempt)
             modelCatalog = catalog
             modelCatalogError = catalog.error?.message
+            if health?.agentMode == "demo" {
+                modelConnectionState = .disabled
+            } else if catalog.error != nil || catalog.auth?.needsLogin == true {
+                modelConnectionState = .unavailable
+            } else if modelConnectionState == .checking {
+                modelConnectionState = .available
+            }
         } catch {
             guard generation == attempt, !Task.isCancelled else { return }
             modelCatalogError = error.localizedDescription
+            modelConnectionState = .unavailable
         }
     }
     public func refreshAccountContext() async {
@@ -400,13 +465,16 @@ public final class ChatModel: ObservableObject {
         }
     }
     public func disconnect() {
-        synchronizationTask?.cancel(); synchronizationTask = nil; generation = UUID()
+        synchronizationTask?.cancel(); synchronizationTask = nil
+        healthMonitorTask?.cancel(); healthMonitorTask = nil
+        generation = UUID()
         if let connection {
             do { try repository.forget(connection) }
             catch { errorMessage = error.localizedDescription }
         }
         connection = nil; state = ClientState(); selectedID = nil; health = nil
         modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
+        modelConnectionState = .checking
         connectionState = .disconnected
     }
 }

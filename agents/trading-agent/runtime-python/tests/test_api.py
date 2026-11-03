@@ -101,6 +101,9 @@ class HTTPTests(unittest.TestCase):
         self.assertIs(body["trade_execution_enabled"], False)
         self.assertEqual(body["broker"]["configuration"]["environment"], "paper")
         self.assertFalse(body["broker"]["execution_enabled"])
+        self.assertEqual(body["components"], [{
+            "id": "ibkr", "label": "IBKR Paper", "state": "unavailable", "detail": "未连接",
+        }])
         self.assertNotIn("token", json.dumps(body))
 
     def test_model_catalog_requires_device_auth_and_does_not_claim_entitlement(self):

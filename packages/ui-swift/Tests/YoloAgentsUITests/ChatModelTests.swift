@@ -22,6 +22,20 @@ private let conversationJSON = """
     #expect(second.initialTitle == "第二次名称")
     #expect(first.id != second.id)
 }
+
+@Test func serviceStatusesArePresentedIndependently() {
+    #expect(ServiceStatusPresentation(ConnectionState.online) ==
+            ServiceStatusPresentation(title: "Mac 服务", value: "已连接", tone: .positive,
+                                      accessibilityIdentifier: "status.mac-service"))
+    #expect(ServiceStatusPresentation(ModelConnectionState.recovering) ==
+            ServiceStatusPresentation(title: "AI 模型", value: "待重试", tone: .warning,
+                                      accessibilityIdentifier: "status.ai-model"))
+    let ibkr = ServiceComponentHealth(id: "ibkr", label: "IBKR Paper",
+                                      state: "unavailable", detail: "未连接")
+    #expect(ServiceStatusPresentation(ibkr) ==
+            ServiceStatusPresentation(title: "IBKR Paper", value: "未连接", tone: .negative,
+                                      accessibilityIdentifier: "status.component.ibkr"))
+}
 private final class UIStore: SecureStore, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]

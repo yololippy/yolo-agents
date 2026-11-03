@@ -28,6 +28,19 @@ public struct PairingResponse: Codable, Equatable, Sendable {
     }
 }
 
+/// A provider or integration advertised by the Agent host. Unknown component
+/// IDs and states remain display-only so future Agents can add their own.
+public struct ServiceComponentHealth: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let label: String
+    public let state: String
+    public let detail: String?
+
+    public init(id: String, label: String, state: String, detail: String? = nil) {
+        self.id = id; self.label = label; self.state = state; self.detail = detail
+    }
+}
+
 public struct Health: Codable, Equatable, Sendable {
     public let status: String
     public let apiVersion: Int
@@ -37,8 +50,9 @@ public struct Health: Codable, Equatable, Sendable {
     public let tradeExecutionEnabled: Bool
     public let agentID: String?
     public let appName: String?
+    public let components: [ServiceComponentHealth]
     enum CodingKeys: String, CodingKey {
-        case status, model
+        case status, model, components
         case apiVersion = "api_version", serverID = "server_id"
         case agentMode = "agent_mode", tradeExecutionEnabled = "trade_execution_enabled"
         case agentID = "agent_id", appName = "app_name"
@@ -54,6 +68,7 @@ public struct Health: Codable, Equatable, Sendable {
         tradeExecutionEnabled = try values.decodeIfPresent(Bool.self, forKey: .tradeExecutionEnabled) ?? false
         agentID = try values.decodeIfPresent(String.self, forKey: .agentID)
         appName = try values.decodeIfPresent(String.self, forKey: .appName)
+        components = try values.decodeIfPresent([ServiceComponentHealth].self, forKey: .components) ?? []
     }
 }
 
