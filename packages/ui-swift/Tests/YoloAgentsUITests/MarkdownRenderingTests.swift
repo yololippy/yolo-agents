@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import YoloAgentsUI
+#if os(macOS)
+import AppKit
+#endif
 
 @Test func markdownLinksAllowOnlyHTTPS() throws {
     #expect(AgentMarkdownLinkPolicy.allows(try #require(URL(string: "https://example.com/path"))))
@@ -21,3 +24,15 @@ import Testing
     #expect(await iterator.next() == "**正在输出**")
     #expect(await iterator.next() == nil)
 }
+
+#if os(macOS)
+@Test func macMarkdownUsesSystemBodyTypography() {
+    let config = AgentMarkdownTheme.automatic.renderConfig(streaming: false)
+    let bodySize = NSFont.preferredFont(forTextStyle: .body).pointSize
+
+    #expect(abs(config.paragraphStyle.textFonts.normal.pointSize - bodySize) < 0.01)
+    #expect(abs(config.orderedListStyle.textFonts.normal.pointSize - bodySize) < 0.01)
+    #expect(abs(config.inlineStyle.linkTextFont.pointSize - bodySize) < 0.01)
+    #expect(config.tableStyle.textFonts.normal.pointSize <= bodySize)
+}
+#endif

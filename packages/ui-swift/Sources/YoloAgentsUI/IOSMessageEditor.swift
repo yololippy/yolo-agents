@@ -3,7 +3,8 @@ import SwiftUI
 import UIKit
 
 /// A native multiline editor so the shared composer gets reliable intrinsic
-/// sizing, Chinese marked-text handling, and explicit keyboard dismissal.
+/// sizing and Chinese marked-text handling. The keyboard is dismissed through
+/// scrolling or tapping the transcript, without an extra accessory toolbar.
 final class IOSComposerTextView: UITextView {
     var placeholder = "" {
         didSet { if placeholder != oldValue { setNeedsDisplay() } }
@@ -57,19 +58,6 @@ struct IOSMessageEditor: UIViewRepresentable {
         editor.accessibilityLabel = "消息输入"
         editor.accessibilityIdentifier = "chat.composer"
 
-        let toolbar = UIToolbar()
-        toolbar.sizeToFit()
-        let flexible = UIBarButtonItem(systemItem: .flexibleSpace)
-        let dismiss = UIBarButtonItem(
-            image: UIImage(systemName: "keyboard.chevron.compact.down"),
-            style: .plain,
-            target: context.coordinator,
-            action: #selector(Coordinator.dismissKeyboard)
-        )
-        dismiss.accessibilityLabel = "收起键盘"
-        toolbar.items = [flexible, dismiss]
-        editor.inputAccessoryView = toolbar
-        context.coordinator.editor = editor
         updateUIView(editor, context: context)
         return editor
     }
@@ -108,7 +96,6 @@ struct IOSMessageEditor: UIViewRepresentable {
 
     @MainActor final class Coordinator: NSObject, UITextViewDelegate {
         var parent: IOSMessageEditor
-        weak var editor: UITextView?
         var lastFocusRequest = 0
         var lastDismissRequest = 0
 
@@ -130,8 +117,6 @@ struct IOSMessageEditor: UIViewRepresentable {
             textView.isScrollEnabled = natural > parent.maximumHeight
             if abs(parent.measuredHeight - height) > 0.5 { parent.measuredHeight = height }
         }
-
-        @objc func dismissKeyboard() { editor?.resignFirstResponder() }
     }
 }
 #endif
