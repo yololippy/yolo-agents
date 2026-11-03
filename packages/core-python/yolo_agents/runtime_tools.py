@@ -17,6 +17,7 @@ from uuid import UUID
 
 
 PAPER_DRAFT_TOOL = "create_paper_order_draft"
+PAPER_CANCEL_TOOL = "cancel_paper_order"
 MARKET_QUOTE_TOOL = "get_market_quote"
 POSITIONS_TOOL = "list_positions"
 OPEN_ORDERS_TOOL = "list_open_orders"
@@ -41,6 +42,17 @@ PAPER_DRAFT_SCHEMA = {
         "limit_price": {"type": "string", "pattern": r"^[1-9][0-9]{0,6}(?:\.[0-9]{1,4})?$"},
     },
     "required": ["symbol", "side", "quantity", "limit_price"],
+    "additionalProperties": False,
+}
+PAPER_CANCEL_DESCRIPTION = (
+    "Cancel one application-managed IBKR Paper order. Call this only when the current user "
+    "explicitly asks to cancel or withdraw the order and includes its local order UUID. "
+    "This cannot cancel Live orders, modify an order, or cancel multiple orders."
+)
+PAPER_CANCEL_SCHEMA = {
+    "type": "object",
+    "properties": {"order_id": {"type": "string", "format": "uuid"}},
+    "required": ["order_id"],
     "additionalProperties": False,
 }
 
@@ -94,7 +106,9 @@ TRADING_TOOL_INSTRUCTIONS = (
     "before the application confirms and submits to IBKR Paper. The application will append the trusted paper-order "
     "artifact after a successful call; never write, copy, or invent a paper-order fenced block or "
     "order_id yourself. If the tool is unavailable or fails, do not claim a draft exists. You cannot "
-    "confirm, submit, cancel, or place any order."
+    "confirm, submit, or place any order. Use cancel_paper_order only when the current user explicitly "
+    "asks to cancel one order and includes the local order UUID in that same message. Never infer the "
+    "target order, cancel multiple orders, modify an order, or cancel a Live order."
 )
 CODEX_TRADING_PROPOSAL_INSTRUCTIONS = (
     TRADING_TOOL_INSTRUCTIONS + " When the current user asks to create a Paper draft and "
@@ -123,8 +137,18 @@ def paper_draft_dynamic_tool() -> dict[str, Any]:
     }
 
 
+def paper_cancel_dynamic_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": PAPER_CANCEL_TOOL,
+        "description": PAPER_CANCEL_DESCRIPTION,
+        "inputSchema": PAPER_CANCEL_SCHEMA,
+    }
+
+
 def trading_dynamic_tools() -> list[dict[str, Any]]:
-    return [paper_draft_dynamic_tool(), *(dict(spec) for spec in READ_TOOL_SPECS)]
+    return [paper_draft_dynamic_tool(), paper_cancel_dynamic_tool(),
+            *(dict(spec) for spec in READ_TOOL_SPECS)]
 
 
 def validate_paper_draft_arguments(arguments: object) -> dict[str, Any]:
@@ -189,6 +213,7 @@ class RuntimeToolContext:
     create_paper_draft: Callable[..., Mapping[str, Any]]
     reauthorize: Callable[[], Mapping[str, Any]]
     read_trading_data: Callable[..., Mapping[str, Any]] | None = None
+    cancel_paper_order: Callable[..., Mapping[str, Any]] | None = None
     _guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _artifact: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
@@ -196,6 +221,8 @@ class RuntimeToolContext:
     def invoke(self, tool: str, arguments: object) -> dict[str, str]:
         if tool in READ_TOOL_NAMES:
             return self._invoke_read(tool, arguments)
+        if tool == PAPER_CANCEL_TOOL:
+            return self._invoke_cancel(arguments)
         if tool != PAPER_DRAFT_TOOL:
             raise ValueError("unknown runtime tool")
         proposal = validate_paper_draft_arguments(arguments)
@@ -264,6 +291,57 @@ class RuntimeToolContext:
                 self._artifact["what_if"] = dict(preview)
                 self._artifact["expires_at"] = result.get("expires_at")
             return {"status": result["status"], "order_id": order_id, "state": result["state"]}
+
+    def _invoke_cancel(self, arguments: object) -> dict[str, Any]:
+        if not isinstance(arguments, dict) or set(arguments) != {"order_id"}:
+            raise ValueError("invalid Paper cancellation arguments")
+        try:
+            order_id = str(UUID(arguments["order_id"]))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("invalid Paper cancellation arguments") from None
+        if order_id != arguments["order_id"]:
+            raise ValueError("invalid Paper cancellation arguments")
+        latest = self.trusted_messages[-1] if self.trusted_messages else {}
+        content = latest.get("content") if latest.get("role") == "user" else None
+        explicit = (isinstance(content, str) and order_id in content and
+                    re.search(r"(?:撤(?:销)?(?:订单|单)|取消(?:订单|挂单)?|cancel)",
+                              content, re.IGNORECASE) is not None)
+        if not explicit:
+            return {
+                "status": "needs_information", "missing_fields": ["explicit_cancel_request"],
+                "message": "请在当前消息明确写出取消或撤单，并包含本地订单 UUID。",
+            }
+        if self.cancel_paper_order is None:
+            return {"status": "cancel_unavailable", "error_code": "paper_facade_unavailable"}
+        try:
+            result = self.cancel_paper_order(
+                order_id=order_id,
+                conversation_id=self.conversation_id,
+                user_message_id=self.user_message_id,
+                run_id=self.run_id,
+                caller=dict(self.caller),
+                reauthorize=self.reauthorize,
+            )
+            if (not isinstance(result, Mapping) or result.get("status") != "cancel_requested"
+                    or result.get("order_id") != order_id
+                    or result.get("state") not in ("cancel_pending", "cancelled")):
+                raise ValueError
+            return dict(result)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            safe_codes = {
+                "broker_not_ready", "invalid_order", "order_state_conflict",
+                "paper_facade_unavailable", "paper_only", "permission_revoked",
+            }
+            result = {
+                "status": "cancel_unavailable",
+                "message": "Paper 撤单请求未执行，请查询订单状态后重试。",
+            }
+            if code in safe_codes:
+                result["error_code"] = code
+            _LOGGER.warning("Paper cancel callback failed (%s)",
+                            code if code in safe_codes else type(exc).__name__)
+            return result
 
     def _invoke_read(self, tool: str, arguments: object) -> dict[str, Any]:
         if tool == MARKET_QUOTE_TOOL:
@@ -538,6 +616,12 @@ def pydantic_trading_tools():
         return ({"status": "unavailable", "error_code": "broker_read_unavailable"}
                 if tools is None else tools.invoke(PAPER_ORDER_TOOL, {"order_id": order_id}))
 
+    def cancel_paper_order(ctx, order_id: str) -> dict[str, Any]:
+        """Cancel one explicitly identified application-managed IBKR Paper order."""
+        tools = context(ctx)
+        return ({"status": "cancel_unavailable", "error_code": "paper_facade_unavailable"}
+                if tools is None else tools.invoke(PAPER_CANCEL_TOOL, {"order_id": order_id}))
+
     read_tools = [
         (get_market_quote, MARKET_QUOTE_TOOL, READ_TOOL_SPECS[0]["description"]),
         (list_positions, POSITIONS_TOOL, READ_TOOL_SPECS[1]["description"]),
@@ -546,7 +630,10 @@ def pydantic_trading_tools():
         (list_paper_orders, PAPER_ORDERS_TOOL, READ_TOOL_SPECS[4]["description"]),
         (get_paper_order, PAPER_ORDER_TOOL, READ_TOOL_SPECS[5]["description"]),
     ]
-    return [pydantic_paper_draft_tool(), *[
+    return [pydantic_paper_draft_tool(),
+            Tool(cancel_paper_order, takes_ctx=True, name=PAPER_CANCEL_TOOL,
+                 description=PAPER_CANCEL_DESCRIPTION,
+                 require_parameter_descriptions=False, sequential=True), *[
         Tool(function, takes_ctx=True, name=name, description=description,
              require_parameter_descriptions=False, sequential=True)
         for function, name, description in read_tools

@@ -23,6 +23,7 @@ class ChatService:
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat")
         self.closing = threading.Event()
         self._paper_draft_tool = None
+        self._paper_cancel_tool = None
         self._trading_read_tool = None
         self._trading_confirmation = None
         self._paper_draft_reauthorize = None
@@ -34,12 +35,15 @@ class ChatService:
         self._paper_draft_tool = handler
         self._paper_draft_reauthorize = reauthorize
 
-    def bind_trading_tools(self, draft_handler, read_handler, confirmation_handler, reauthorize):
+    def bind_trading_tools(self, draft_handler, read_handler, cancel_handler,
+                           confirmation_handler, reauthorize):
         """Bind Trading Agent model tools; all broker reads stay application-owned."""
-        if not callable(read_handler) or not callable(confirmation_handler):
+        if (not callable(read_handler) or not callable(cancel_handler)
+                or not callable(confirmation_handler)):
             raise RuntimeError("Trading read tool binding is invalid")
         self.bind_paper_draft_tool(draft_handler, reauthorize)
         self._trading_read_tool = read_handler
+        self._paper_cancel_tool = cancel_handler
         self._trading_confirmation = confirmation_handler
 
     def conversation_lock(self, collection, conversation_id):
@@ -167,6 +171,7 @@ class ChatService:
                     create_paper_draft=self._paper_draft_tool,
                     reauthorize=lambda: self._paper_draft_reauthorize(caller),
                     read_trading_data=self._trading_read_tool,
+                    cancel_paper_order=self._paper_cancel_tool,
                 )
             chunks, size = [], 0
             stream = (self.runtime.stream_reply(history, conversation_id, runtime_tools=runtime_tools)

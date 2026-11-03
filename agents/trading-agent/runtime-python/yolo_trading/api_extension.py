@@ -85,6 +85,7 @@ class TradingAPIExtension:
                 if not callable(bind_tool) or not callable(reauthorize):
                     raise RuntimeError("Trading Host does not support the model tool boundary")
                 bind_tool(self.create_model_paper_draft, self.read_model_trading_data,
+                          self.cancel_model_paper_order,
                           self.confirm_chat_paper_order, reauthorize)
                 self._tool_bound = True
             self._chat_service, self._auth = service, auth
@@ -299,6 +300,65 @@ class TradingAPIExtension:
             return f"IBKR Paper 提交结果暂不明确，已停止自动重试。订单 ID：{order_id}，请先对账。"
         except OrderError as exc:
             return f"Paper 订单未提交：{exc.message}"
+
+    def cancel_model_paper_order(self, *, order_id, conversation_id, user_message_id,
+                                 run_id, caller, reauthorize):
+        """Cancel one Paper order from an explicit, durable chat instruction."""
+        caller = self._model_caller(caller, reauthorize)
+        order_id = self._model_uuid(order_id)
+        conversation_id = self._model_uuid(conversation_id)
+        user_message_id = self._model_uuid(user_message_id)
+        run_id = self._model_uuid(run_id)
+        with self._order_guard:
+            if self._orders is None or self._auth is None or self._chat_service is None:
+                raise OrderError("paper_facade_unavailable")
+            conversation = self._chat_service.store.get_conversation(conversation_id)
+            source = next((message for message in self._chat_service.store.list_messages(conversation_id)
+                           if message.get("id") == user_message_id), None)
+            content = source.get("content") if isinstance(source, dict) else None
+            if (conversation is None or conversation.get("archived") or source is None
+                    or source.get("role") != "user" or source.get("run_id") != run_id
+                    or not isinstance(content, str) or order_id not in content
+                    or re.search(r"(?:撤(?:销)?(?:订单|单)|取消(?:订单|挂单)?|cancel)",
+                                 content, re.IGNORECASE) is None):
+                raise OrderError("invalid_order", 400)
+            detail = self._orders.get(order_id, self._auth.server_id)
+            order = detail["order"]
+            data = {
+                "client_request_id": str(uuid5(UUID(run_id), "paper-cancel:" + order_id)),
+                "version": order["version"], "content_hash": order["content_hash"],
+                "user_action": "cancel_paper_order",
+            }
+            status, result = self._orders.operate(
+                "cancel", data, caller, self._auth.server_id,
+                order_id=order_id, authorize=reauthorize)
+            if (status != 200 or not isinstance(result, dict)
+                    or not isinstance(result.get("order"), dict)):
+                error = result.get("error") if isinstance(result, dict) else None
+                raise OrderError(error.get("code", "order_state_conflict")
+                                 if isinstance(error, dict) else "order_state_conflict", status)
+            cancelled = result["order"]
+            with self._orders.store.transaction() as db:
+                existing = db.execute(
+                    "SELECT 1 FROM paper_events WHERE order_id=? AND request_id=? "
+                    "AND type='order.model_cancel_requested'",
+                    (order_id, data["client_request_id"])).fetchone()
+                if existing is None:
+                    row = self._orders.store.order(db, order_id, self._auth.server_id)
+                    self._orders.store.event(
+                        db, row, "order.model_cancel_requested", self._orders.now(),
+                        data["client_request_id"], {
+                            "conversation_id": conversation_id,
+                            "user_message_id": user_message_id,
+                            "run_id": run_id,
+                            "device_id": caller["id"],
+                        })
+            return {
+                "status": "cancel_requested", "order_id": order_id,
+                "state": cancelled["state"],
+                "symbol": cancelled["contract"]["symbol"],
+                "filled_quantity": cancelled["filled_quantity"],
+            }
 
     @staticmethod
     def _model_read_caller(caller, reauthorize):

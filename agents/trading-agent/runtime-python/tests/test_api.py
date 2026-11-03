@@ -606,6 +606,29 @@ class PaperOrderAPITests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertNotIn("DU_SECRET_ACCOUNT", json.dumps(view))
             self.assertNotIn("broker_order_id", json.dumps(view))
+
+    def test_agent_cancel_requires_durable_chat_instruction_and_records_source(self):
+        order = self.action(self.confirmed(), "submit")[1]["order"]
+        conversation = self.store.create_conversation("Agent 撤单")
+        run_id = str(uuid4())
+        message = self.store.append_message(
+            conversation["id"], "user", f"取消订单 {order['id']}", run_id=run_id)
+        caller = self.auth.authenticate("Bearer " + self.token)
+        result = self.extension.cancel_model_paper_order(
+            order_id=order["id"], conversation_id=conversation["id"],
+            user_message_id=message["id"], run_id=run_id, caller=caller,
+            reauthorize=lambda: self.auth.reauthorize(caller),
+        )
+        self.assertEqual((result["status"], result["state"]),
+                         ("cancel_requested", "cancelled"))
+        with closing(sqlite3.connect(self.path)) as db:
+            row = db.execute(
+                "SELECT payload FROM paper_events WHERE order_id=? "
+                "AND type='order.model_cancel_requested'", (order["id"],)).fetchone()
+        payload = json.loads(row[0])
+        self.assertEqual(payload["conversation_id"], conversation["id"])
+        self.assertEqual(payload["user_message_id"], message["id"])
+        self.assertEqual(payload["run_id"], run_id)
         with closing(sqlite3.connect(self.path)) as db, db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_versions").fetchone()[0], 2)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM paper_confirmations").fetchone()[0], 1)

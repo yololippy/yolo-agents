@@ -11,6 +11,7 @@ from yolo_agents.runtime_tools import (
     MARKET_QUOTE_TOOL,
     OPEN_ORDER_TOOL,
     OPEN_ORDERS_TOOL,
+    PAPER_CANCEL_TOOL,
     PAPER_ORDER_TOOL,
     PAPER_ORDERS_TOOL,
     PAPER_DRAFT_SCHEMA,
@@ -35,24 +36,25 @@ class RuntimeToolTests(unittest.TestCase):
             create_paper_draft=callback, reauthorize=lambda: {"platform": "macos"},
         )
 
-    def test_schema_requires_explicit_limit_price_and_exposes_no_execution_actions(self):
+    def test_schema_requires_explicit_limit_price_and_exposes_no_submit_actions(self):
         spec = paper_draft_dynamic_tool()
         self.assertEqual(spec["name"], PAPER_DRAFT_TOOL)
         self.assertEqual(set(PAPER_DRAFT_SCHEMA["required"]), {"symbol", "side", "quantity", "limit_price"})
         encoded = str(spec).casefold()
-        for forbidden in ("confirm_paper_order", "submit_paper_order", "cancel_paper_order"):
+        for forbidden in ("confirm_paper_order", "submit_paper_order"):
             self.assertNotIn(forbidden, encoded)
         with self.assertRaises(ValueError):
             validate_paper_draft_arguments({"symbol": "TSLA", "side": "BUY", "quantity": 2})
 
-    def test_read_tools_are_bounded_and_never_expose_execution_actions(self):
+    def test_read_and_cancel_tools_are_bounded_and_never_expose_submit_actions(self):
         specs = trading_dynamic_tools()
         self.assertEqual({spec["name"] for spec in specs}, {
             PAPER_DRAFT_TOOL, MARKET_QUOTE_TOOL, POSITIONS_TOOL, OPEN_ORDERS_TOOL, OPEN_ORDER_TOOL,
-            PAPER_ORDERS_TOOL, PAPER_ORDER_TOOL})
+            PAPER_ORDERS_TOOL, PAPER_ORDER_TOOL, PAPER_CANCEL_TOOL})
         encoded = json.dumps(specs)
-        for forbidden in ("confirm_paper_order", "submit_paper_order", "cancel_paper_order"):
+        for forbidden in ("confirm_paper_order", "submit_paper_order"):
             self.assertNotIn(forbidden, encoded)
+        self.assertIn(PAPER_CANCEL_TOOL, encoded)
         calls = []
         context = self.context(lambda **_: {})
         context.read_trading_data = lambda **kwargs: calls.append(kwargs) or {
@@ -64,6 +66,25 @@ class RuntimeToolTests(unittest.TestCase):
             context.invoke(OPEN_ORDER_TOOL, {"broker_order_id": "not-an-id"})
         with self.assertRaises(ValueError):
             context.invoke(PAPER_ORDER_TOOL, {"order_id": "not-an-id"})
+
+    def test_cancel_requires_explicit_current_message_and_calls_bounded_callback(self):
+        order_id, calls = str(uuid4()), []
+        context = self.context(lambda **_: {})
+        context.cancel_paper_order = lambda **kwargs: calls.append(kwargs) or {
+            "status": "cancel_requested", "order_id": order_id,
+            "state": "cancel_pending", "symbol": "TSLA", "filled_quantity": 0,
+        }
+        context.trusted_messages = ({"role": "user", "content": f"取消订单 {order_id}"},)
+        result = context.invoke(PAPER_CANCEL_TOOL, {"order_id": order_id})
+        self.assertEqual(result["status"], "cancel_requested")
+        self.assertEqual(calls[0]["order_id"], order_id)
+        self.assertEqual(calls[0]["conversation_id"], context.conversation_id)
+        self.assertEqual(calls[0]["user_message_id"], context.user_message_id)
+
+        context.trusted_messages = ({"role": "user", "content": "取消刚才的订单"},)
+        result = context.invoke(PAPER_CANCEL_TOOL, {"order_id": order_id})
+        self.assertEqual(result["status"], "needs_information")
+        self.assertEqual(len(calls), 1)
 
     def test_valid_proposal_reaches_callback_with_trusted_context_only(self):
         calls = []
