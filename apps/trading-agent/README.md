@@ -38,7 +38,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 早期只有 CLT 时，SwiftPM 的 TestingMacros 插件发现不稳定，曾通过显式加载其自带官方插件完成相同单元测试；该环境的旧构建系统还缺少 Testing framework 搜索路径。此记录保留为历史，当前使用上面的完整 Xcode 正常命令。代码中的 `ViewState` 是经典 SwiftUI `State` 属性包装器的类型别名，用于避开早期 CLT 未附带的同名宏插件；没有修改系统 SDK 或使用私有 API。
 
-正式 App 工程为 `YoloAgents.xcodeproj`，共享 `YoloAgentsIOS` / `YoloAgentsMac` schemes，通过本地 Swift Package 引用通信和界面库。main 已统一准备 Simulator runtime 并完成下述 SDK / Keychain / 网络测试；Mac 正常启动后的真实 UI 交互也已记录。真机运行前选择自己的签名 Team、唯一 Bundle Identifier 和已信任的设备。
+正式 App 工程为 `YoloAgents.xcodeproj`，共享 `YoloAgentsIOS` / `YoloAgentsMac` schemes，通过本地 Swift Package 引用通信和界面库。iOS 与 macOS 使用统一的产品身份 `com.yoloagents.tradingagent`，并由 `Configuration/Brand.xcconfig` 集中配置；真机运行前选择自己的签名 Team 和已信任的设备。main 已统一准备 Simulator runtime 并完成下述 SDK / Keychain / 网络测试；Mac 正常启动后的真实 UI 交互也已记录。
 
 `YoloAgentsMac` scheme 可用以下本地 ad-hoc 命令做纯编译检查；正式 UI 验收使用稳定的 Apple Development 签名，避免每次改变签名哈希都重新申请钥匙串访问：
 

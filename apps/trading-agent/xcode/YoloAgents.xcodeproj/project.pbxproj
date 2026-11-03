@@ -29,6 +29,7 @@
 
 /* Begin PBXFileReference section */
 		A00000000000000000000006 /* ../macos/Sources/YoloAgentsMac/YoloAgentsMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/YoloAgentsMac/YoloAgentsMacApp.swift; sourceTree = "<group>"; };
+		A0000000000000000000000C /* Configuration/Brand.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration/Brand.xcconfig; sourceTree = "<group>"; };
 		A00000000000000000000007 /* Configuration/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Configuration/Info.plist; sourceTree = "<group>"; };
 		A00000000000000000000008 /* Configuration/YoloAgents.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Configuration/YoloAgents.entitlements; sourceTree = "<group>"; };
 		A00000000000000000000009 /* YoloAgentsIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = YoloAgentsIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -73,6 +74,7 @@
 			children = (
 				A00000000000000000000006 /* ../macos/Sources/YoloAgentsMac/YoloAgentsMacApp.swift */,
 				A0000000000000000000000B /* ../ios/Sources/YoloAgentsIOS/YoloAgentsIOSApp.swift */,
+				A0000000000000000000000C /* Configuration/Brand.xcconfig */,
 				A00000000000000000000007 /* Configuration/Info.plist */,
 				A00000000000000000000008 /* Configuration/YoloAgents.entitlements */,
 				C00000000000000000000002 /* Tests */,
@@ -267,6 +269,7 @@
 /* Begin XCBuildConfiguration section */
 		A00000000000000000000040 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A0000000000000000000000C /* Configuration/Brand.xcconfig */;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
@@ -280,6 +283,7 @@
 		};
 		A00000000000000000000041 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A0000000000000000000000C /* Configuration/Brand.xcconfig */;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
@@ -298,13 +302,11 @@
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = Manual;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5BQ2U68A8X;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yoloagents.personal.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -322,13 +324,11 @@
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = Manual;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5BQ2U68A8X;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yoloagents.personal.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -342,14 +342,12 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Configuration/YoloAgents.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yoloagents.personal.macos;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -361,14 +359,12 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Configuration/YoloAgents.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yoloagents.personal.macos;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -387,7 +383,7 @@
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = Manual;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.yoloagents.personal.ios.sdk-tests";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER).ios.sdktests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -409,7 +405,7 @@
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = Manual;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.yoloagents.personal.ios.sdk-tests";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(TRADING_AGENT_BUNDLE_IDENTIFIER).ios.sdktests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
