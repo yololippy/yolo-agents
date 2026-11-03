@@ -355,7 +355,9 @@ private struct ChatDetail: View {
                             ForEach(model.partialReplies) { reply in
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("助手").font(.caption.bold()).foregroundStyle(.secondary)
-                                    if !reply.content.isEmpty { Text(reply.content).textSelection(.enabled) }
+                                    if !reply.content.isEmpty {
+                                        AgentStreamingMarkdownView(reply.content)
+                                    }
                                     if let error = reply.error {
                                         Label("回复失败：\(error.message)", systemImage: "exclamationmark.triangle")
                                             .font(.caption).foregroundStyle(.red)
@@ -541,7 +543,13 @@ private struct MessageBubble: View {
                     Spacer()
                     Text(message.createdAt, style: .time)
                 }.font(.caption).foregroundStyle(.secondary)
-                Text(message.content).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                if message.role == .assistant {
+                    AgentMarkdownView(message.content)
+                } else {
+                    Text(message.content)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if let accessory, let connection = model.connection {
                     accessory.content(message, connection)
                 }

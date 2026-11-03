@@ -2,6 +2,13 @@
 
 可复用的 SwiftUI 聊天界面。该包依赖相邻的 `sdk-swift`，不包含任何特定 Agent 的品牌、Bundle ID 或 App 工程配置。
 
+## Markdown 消息
+
+`AgentMarkdownView` 与 `AgentStreamingMarkdownView` 封装固定版本的 Microsoft
+`SwiftStreamingMarkdown`，分别渲染助手的完整消息和流式回复。用户消息保持纯文本，避免改变原始输入。
+组件属于共享 UI，不包含 Trading/IBKR 逻辑；后续 Agent 复用相同渲染器，通过
+`AgentMarkdownTheme` 提供品牌颜色即可。远程图片默认关闭，链接只允许交给系统打开 `https` URL。
+
 2026-10-27：
 
 - `ChatModel` 先补齐全局游标，再持续接收 SSE；正常服务端流轮换直接续接，网络错误按退避重试，设备认证失效停止连接。iOS 在非活动阶段取消，恢复活动后补齐；macOS 不因窗口短暂失去焦点中断回复。
