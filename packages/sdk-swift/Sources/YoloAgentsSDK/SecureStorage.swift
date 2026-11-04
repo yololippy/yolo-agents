@@ -14,7 +14,7 @@ public struct KeychainFailure: Error, LocalizedError, Sendable {
 
 public struct KeychainStore: SecureStore {
     private let service: String
-    public init(service: String = "com.tradingagent.apple.v1") { self.service = service }
+    public init(service: String = "com.yoloagents.yolo-trade.apple.v1") { self.service = service }
     private func query(_ key: String) -> [CFString: Any] {
         [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: key,
          kSecAttrSynchronizable: false]

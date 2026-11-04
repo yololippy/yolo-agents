@@ -624,7 +624,7 @@ class OfficialSDKTests(unittest.TestCase):
                 yield action
 
         calls, order_id = [], str(uuid4())
-        runtime = self.runtime(FunctionModel(stream_function=stream), agent_name="trading-agent")
+        runtime = self.runtime(FunctionModel(stream_function=stream), agent_name="yolo-trade")
         context = RuntimeToolContext(
             conversation_id=self.cid, user_message_id=str(uuid4()), run_id=str(uuid4()),
             caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},

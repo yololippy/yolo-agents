@@ -24,7 +24,7 @@
 
 ## 2. 服务分层与数据归属
 
-新增已确认方向：各 Agent 使用自己的 ChatGPT Provider 授权。Trading Agent 与 B Agent 分别管理登录、聊天、记忆、Skills 和客户端缓存；共享框架只复用实现。同一 Agent 的 Mac/iOS 共用后端。设计与迁移边界见 [Provider 方案](CHATGPT_PROVIDER_PLAN.md)，当前实施进度见 TODO 的 P 系列任务。
+新增已确认方向：各 Agent 使用自己的 ChatGPT Provider 授权。YoloTrade 与 YoloBeni 分别管理登录、聊天、记忆、Skills 和客户端缓存；共享框架只复用实现。同一 Agent 的 Mac/iOS 共用后端。设计与迁移边界见 [Provider 方案](CHATGPT_PROVIDER_PLAN.md)，当前实施进度见 TODO 的 P 系列任务。
 
 ```mermaid
 flowchart LR
@@ -40,7 +40,7 @@ flowchart LR
 ```
 
 - **聊天应用服务**负责会话、模型调用、AI 审核、图片媒体和受控工具接口；主 Agent 已选 PydanticAI Core＋官方 Harness，记忆/检索/压缩方案见 [Agent 方案](RESEARCH_PYDANTICAI.md)。当前同时提供本地演示、PydanticAI 和 Codex app-server 模式；PydanticAI 图片输入使用官方二进制内容、图片输出按模型 profile 开放，Codex 支持图片输入但当前关闭图片生成。Codex 复用 Mac 上受管 ChatGPT 登录且已完成真实文本模型验收，PydanticAI 供应商及真实图片输出仍需单独配置与验证。
-- **独立交易服务**统一持有 IBKR 连接，负责账户事实、程序风控、授权校验、订单、定时任务、行情监控和恢复。当前已实现显式环境配置、Paper 启动读取、What-if、订单状态/事件、独立账本及 Mac 管理设备确认；Live 强制关闭。当前 Host 与聊天仍同进程，独立守护、自动重连和跨重启主动对账属于后续工作。 Paper 专用双端模型、请求和界面归属 `apps/trading-agent/client-swift/`，共享 SDK/UI 只提供通用传输和功能入口。
+- **独立交易服务**统一持有 IBKR 连接，负责账户事实、程序风控、授权校验、订单、定时任务、行情监控和恢复。当前已实现显式环境配置、Paper 启动读取、What-if、订单状态/事件、独立账本及 Mac 管理设备确认；Live 强制关闭。当前 Host 与聊天仍同进程，独立守护、自动重连和跨重启主动对账属于后续工作。 Paper 专用双端模型、请求和界面归属 `apps/yolo-trade/client-swift/`，共享 SDK/UI 只提供通用传输和功能入口。
 - **IB Gateway**是官方程序，管理券商登录和连接。第一版均在同一台 Mac 上运行，交易服务内部先按模块划分。
 - **数据库**保存会话、消息、工具调用、订单意图及版本、授权、审核、券商订单/成交、自动化任务和审计。券商实际状态是对账依据；模型摘要不作为交易账本。
 - **会话形态**为每个 Agent/授权主体一个长期主会话，加多个可归档任务会话；双端冷启动默认打开主会话，Harness 分层压缩模型上下文但不删除产品历史。设计与迁移见 [主会话与自动上下文压缩](PRIMARY_CONVERSATION.md)。
@@ -99,7 +99,7 @@ Client Portal Gateway 需要浏览器认证，官方要求每日重新认证且�
 
 ### 3.4 Gateway 自动恢复（Paper）
 
-本机采用独立 `Gateway Supervisor → IBC → IB Gateway` 运维链路，凭据保存在 macOS Keychain，不进入 Agent、仓库、命令行或数据库。Supervisor 只在 Gateway 进程不存在时启动固定 Paper 模式；进程存在但 4002 未开放时仅提示人工登录/IB Key，不循环结束进程。每日 Auto Restart、周日 Cold Restart、竞争会话、运行配置和状态含义见 [Gateway 自动恢复流程](../agents/trading-agent/IBKR_GATEWAY_AUTOMATION.md)。
+本机采用独立 `Gateway Supervisor → IBC → IB Gateway` 运维链路，凭据保存在 macOS Keychain，不进入 Agent、仓库、命令行或数据库。Supervisor 只在 Gateway 进程不存在时启动固定 Paper 模式；进程存在但 4002 未开放时仅提示人工登录/IB Key，不循环结束进程。每日 Auto Restart、周日 Cold Restart、竞争会话、运行配置和状态含义见 [Gateway 自动恢复流程](../agents/yolo-trade/IBKR_GATEWAY_AUTOMATION.md)。
 
 该链路不改变交易恢复语义：Gateway 与 IBKR 的网络中断由 Gateway 自行恢复，交易服务恢复后完整对账；未知订单绝不因为进程恢复而自动重发。IBC 仍不能绕过每周认证或 2FA。
 

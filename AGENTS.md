@@ -8,7 +8,7 @@
 
 - `apps/<agent-name>/` 存放某个 Agent 可运行、面向用户的客户端。平台入口分别放在 `ios/`、`macos/`，同时构建两端的 Apple 工程放在 `xcode/`。
 - `agents/<agent-name>/` 存放该 Agent 私有的领域逻辑、启动入口、依赖和测试。Python 运行时放在 `runtime-python/`。
-- `packages/` 只存放确实能被多个 Agent 或 App 复用的代码或协议。不得过早把某个 Agent 私有的策略、账户数据、券商配置或领域集成抽到共享包。
+- `packages/` 只存放确实能被多个 Agent 或 App 复用的代码或协议。不得过早把某个 Agent 私有的策略、账户数据、第三方配置或领域集成抽到共享包。
 
 ## Package 命名
 
@@ -31,29 +31,34 @@
 
 ```text
 packages/{protocol,core-python,sdk-swift,ui-swift}/
-agents/{trading-agent,b-agent}/runtime-python/
-apps/{trading-agent,b-agent}/{ios,macos,xcode}/
+agents/{yolo-trade,yolo-beni}/runtime-python/
+apps/{yolo-trade,yolo-beni}/{ios,macos,xcode}/
 ```
 
-IBKR 集成目前属于 `trading-agent`，应继续放在 `agents/trading-agent/runtime-python/`；只有另一个 Agent 出现真实复用需求时，才考虑抽取为共享 Package。
+IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-python/`；只有另一个产品出现真实复用需求时，才考虑抽取为共享 Package。
 
 ## 多 Agent 复用原则
 
-- 开发任何新功能时，必须先评估协议、领域无关的运行时能力、Swift SDK 和通用 UI 是否能被多个 Agent 复用；可复用部分应放入职责匹配的 `packages/`，并通过配置、能力声明或依赖注入适配具体 Agent，不得在共享层写死 `trading-agent` 的名称、身份、目录、端口或私有业务规则。
-- Agent 私有的策略、账户数据、券商集成、权限和产品入口继续保留在各自的 `agents/<agent-name>/` 与 `apps/<agent-name>/`。共享能力与 Agent 私有接入必须保持清晰边界，数据、凭据、缓存和运行状态按 Agent 身份隔离。
-- 默认只为当前用户指定的 Agent 接入和验收新功能。除非用户明确要求，不得为了证明可复用性而修改、扩展、构建、联调或验收其他 Agent；应以共享接口和测试证明未来可接入性。
+- 开发新功能时，先判断协议、领域无关运行时、Swift SDK 和通用 UI 是否已被多个产品真实复用。可复用部分放入职责匹配的 `packages/`，通过配置、能力声明或依赖注入适配，不得在共享层写死 `yolo-trade` 或 `yolo-beni` 的身份、目录、端口和私有规则。
+- Agent 私有策略、账户数据、第三方集成、权限和产品入口保留在对应的 `agents/<agent-name>/` 与 `apps/<agent-name>/`。凭据、缓存、Skills 和运行状态按产品身份隔离。
+- 默认只为用户当前指定的产品接入和验收功能。不得为了证明可复用性而修改、构建、联调或验收另一产品；未来复用性通过共享接口和测试证明。
 
-## 当前开发范围
+## 当前产品范围
 
-- 默认只开发 `trading-agent` 及其实际需要的共享 Package、协议和客户端能力。
-- `b-agent` 目前只作为架构兼容对象：设计共享接口、目录边界、身份隔离和数据模型时需要考虑未来能接入其他 Agent，但不得因此提前实现 B Agent 功能。
-- 除非用户明确指定开发 `b-agent`，不得修改或扩展 `agents/b-agent/`、`apps/b-agent/` 的功能，也不得把 B Agent 构建、联调、真实授权或验收作为当前任务的默认范围。
-- 共享代码变更应保持现有多 Agent 边界清晰，但“兼容 B Agent”不等于要求同步为 B Agent 增加产品功能。
+- `yolo-trade` 是交易产品；券商账户、风控、订单和交易规则保持私有。
+- `yolo-beni` 是日常生活助手；个人偏好、生活数据和专属集成保持私有。
+- 两个产品均可独立开发。当前任务范围由用户最新指令、对应产品 TODO 和协调者派发共同确定。
+- 共享代码变更必须保持产品边界和身份隔离，不等于要求同步为另一产品增加功能。
 
 ## 多会话协作
 
-用户已要求只由标题精确为 `main` 的本仓库会话协调 Ibkr、Agent、iOS 及按需创建的其他开发会话。`agents/`、`apps/`、`packages/` 产品代码改动默认由 main 新建或派发给非 main 开发会话实施；用户明确要求 main 直接修改时，以该次指令为准。跨会话分工时读取 [trading-agent-coordination](.agents/skills/trading-agent-coordination/SKILL.md)，按其中的目录归属协调写入。当前授权范围以 TODO、仓库规则和用户指令为准；会话 ID 仅保存在 Git 忽略的 `.agents/runtime/trading-agent-coordination/team.local.md`，不写入 skill 或版本控制文件。
+- 标题精确为 `main` 且工作目录为本仓库的会话是总协调者，可以调配 `main-trade`、`main-beni`、共享层及全部产品开发会话；只有 `main` 负责跨产品冲突、最终集成、Git 操作和用户总汇报。
+- `main-trade` 负责 YoloTrade 产品内的拆分、派发、审阅和验证；`main-beni` 负责 YoloBeni。产品主会话不得执行 Git 操作，也不得管理另一产品的会话或私有文件。
+- 其他开发会话只执行直接派发的任务，不继续派发、不联系其他会话、不执行 Git 操作。
+- `agents/`、`apps/`、`packages/` 的产品代码默认由协调者派发给职责匹配的开发会话实施；用户明确要求某个协调会话直接修改时，以该次指令为准。
+- 跨会话分工必须读取 [yolo-agents-coordination](.agents/skills/yolo-agents-coordination/SKILL.md)，按其中的产品路由、共享层单一所有权和文件归属规则执行。
+- 会话 ID 只保存在 Git 忽略的 `.agents/runtime/yolo-agents-coordination/team.local.md`，不写入 Skill 或版本控制文件。
 
 ## 重构要求
 
-调整目录时，必须在同一个改动中同步更新导入路径、Package manifest、Xcode 本地 Package 引用、脚本和文档。完成后再执行相关 Python 测试、Swift Package 测试/构建及 Xcode 构建，验证无误后才汇报完成。
+调整目录或产品身份时，必须在同一个改动中同步更新导入路径、Package manifest、Xcode 本地 Package 引用、脚本、运行时配置和文档。完成后执行相关 Python 测试、Swift Package 测试与 Xcode 构建，验证无误后才汇报完成。

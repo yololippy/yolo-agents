@@ -42,30 +42,30 @@ def credential(subject='subject-a', client='client-a', scope='chatgpt.tokens.use
 
 class IdentityTests(unittest.TestCase):
     def test_distinct_defaults_and_cross_agent_nested_and_symlink_rejected(self):
-        self.assertNotEqual(create_parser(agent_name='trading-agent').parse_args([]).data_dir,
-                            create_parser(agent_name='b-agent', default_port=8766).parse_args([]).data_dir)
+        self.assertNotEqual(create_parser(agent_name='yolo-trade').parse_args([]).data_dir,
+                            create_parser(agent_name='yolo-beni', default_port=8766).parse_args([]).data_dir)
         with tempfile.TemporaryDirectory() as temp:
             a, b = Path(temp) / 'a', Path(temp) / 'b'
-            prepare_agent_directory(a, 'trading-agent', 'Trading Agent')
-            prepare_agent_directory(b, 'b-agent', 'B Agent')
+            prepare_agent_directory(a, 'yolo-trade', 'YoloTrade')
+            prepare_agent_directory(b, 'yolo-beni', 'YoloBeni')
             alias = Path(temp) / 'alias'
             alias.symlink_to(a, target_is_directory=True)
             for path in (a, alias, a / 'nested'):
                 with self.subTest(path=path), self.assertRaises(RuntimeError):
-                    prepare_agent_directory(path, 'b-agent', 'B Agent', adopt_existing=True)
+                    prepare_agent_directory(path, 'yolo-beni', 'YoloBeni', adopt_existing=True)
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'trading-agent', adopt_existing=True)
+                prepare_agent_directory(temp, 'yolo-trade', adopt_existing=True)
 
     def test_unmarked_legacy_requires_explicit_adoption_and_preserves_data(self):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp) / 'app.sqlite3'
             data.write_bytes(b'legacy')
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'trading-agent')
-            prepare_agent_directory(temp, 'trading-agent', adopt_existing=True)
+                prepare_agent_directory(temp, 'yolo-trade')
+            prepare_agent_directory(temp, 'yolo-trade', adopt_existing=True)
             self.assertEqual(data.read_bytes(), b'legacy')
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'b-agent', adopt_existing=True)
+                prepare_agent_directory(temp, 'yolo-beni', adopt_existing=True)
 
 
 class AuthTests(unittest.TestCase):
@@ -287,7 +287,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         self.cid = self.store.create_conversation('Test', model='model-a')['id']
         self.backend = fake_backend()
         with patch('yolo_agents.agent_runtime._load_pydantic_backend', return_value=self.backend):
-            self.runtime = ChatGPTRuntime(None, self.root, self.store, agent_name='b-agent', app_name='B Agent')
+            self.runtime = ChatGPTRuntime(None, self.root, self.store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(self.runtime.close)
         self.runtime.account.store.write(credential())
         self.runtime._catalog_unlocked = lambda **kwargs: {'models': [{'id': 'model-a'}, {'id': 'model-b'}],
@@ -459,7 +459,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         store = Store(root / 'app.sqlite3')
         self.addCleanup(store.close)
         cid = store.create_conversation('Real SDK', model='model-a')['id']
-        runtime = ChatGPTRuntime(None, root, store, agent_name='b-agent', app_name='B Agent')
+        runtime = ChatGPTRuntime(None, root, store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(runtime.close)
         runtime.account.store.write(credential())
         received, release, first_chunk = [], threading.Event(), threading.Event()
@@ -535,7 +535,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         root.mkdir()
         store = Store(root / 'app.sqlite3')
         self.addCleanup(store.close)
-        runtime = ChatGPTRuntime(None, root, store, agent_name='b-agent', app_name='B Agent')
+        runtime = ChatGPTRuntime(None, root, store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(runtime.close)
         runtime.account.store.write(credential(expired=True))
         calls = []
@@ -561,7 +561,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         root.mkdir()
         store = Store(root / 'app.sqlite3')
         self.addCleanup(store.close)
-        runtime = ChatGPTRuntime(None, root, store, agent_name='b-agent', app_name='B Agent')
+        runtime = ChatGPTRuntime(None, root, store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(runtime.close)
         runtime.account.store.write(credential(expired=True))
         calls = []
@@ -584,7 +584,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         self.assertIsNone(runtime.account.principal())
         self.assertEqual(runtime.list_models()['auth']['status'], 'login_required')
         self.assertEqual(len(calls), 1)
-        reopened = AccountManager(root / 'chatgpt-auth', 'B Agent')
+        reopened = AccountManager(root / 'chatgpt-auth', 'YoloBeni')
         try:
             self.assertEqual(reopened.status()['error']['code'], 'credential_persistence_failed')
             self.assertIsNone(reopened.principal())
@@ -596,7 +596,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         root.mkdir()
         store = Store(root / 'app.sqlite3')
         self.addCleanup(store.close)
-        runtime = ChatGPTRuntime(None, root, store, agent_name='b-agent', app_name='B Agent')
+        runtime = ChatGPTRuntime(None, root, store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(runtime.close)
         runtime.account.store.write(credential(expired=True))
         calls = []
@@ -617,7 +617,7 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         root.mkdir()
         store = Store(root / 'app.sqlite3')
         self.addCleanup(store.close)
-        runtime = ChatGPTRuntime(None, root, store, agent_name='b-agent', app_name='B Agent')
+        runtime = ChatGPTRuntime(None, root, store, agent_name='yolo-beni', app_name='YoloBeni')
         self.addCleanup(runtime.close)
         runtime.account.store.write(credential(expired=True))
         calls = []

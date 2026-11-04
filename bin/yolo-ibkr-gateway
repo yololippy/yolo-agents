@@ -8,5 +8,5 @@ if [[ ! -x "$python_bin" ]]; then
   python_bin=/usr/bin/python3
 fi
 
-export PYTHONPATH="$repo_root/packages/core-python:$repo_root/agents/trading-agent/runtime-python${PYTHONPATH:+:$PYTHONPATH}"
-exec "$python_bin" -m yolo_trading.gateway_supervisor "$@"
+export PYTHONPATH="$repo_root/packages/core-python:$repo_root/agents/yolo-trade/runtime-python${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python_bin" -m yolo_trade.gateway_supervisor "$@"

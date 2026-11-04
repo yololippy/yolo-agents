@@ -1,2 +1,0 @@
-# B Agent uses only the shared runtime; no broker dependencies.
--r ../../../packages/core-python/requirements.txt

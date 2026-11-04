@@ -6,7 +6,7 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 ## Agent 私有接口扩展
 
-`APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。Trading Agent 的 Paper 客户端位于 [client-swift](../../apps/trading-agent/client-swift/README.md)。
+`APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。YoloTrade 的 Paper 客户端位于 [client-swift](../../apps/yolo-trade/client-swift/README.md)。
 
 ## ChatGPT 账号与 App 身份
 
@@ -14,7 +14,7 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 `ChatGPTLoginResponse.authorizationURL()` 只允许 HTTPS 的 `chatgpt.com` / `auth.openai.com`，拒绝其他 host、用户凭据、非标准端口、fragment、控制字符和令牌参数。OAuth 凭据留在后端；Mac 只在内存展示邮箱和套餐，iOS 只使用模型目录的脱敏状态，不调用账号管理接口。
 
-私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service、默认地址及旧服务策略。健康响应兼容可空 `agent_id` / `app_name`；配对前和恢复同步前校验服务身份。`ClientRepository(identity:)` 独立保存配对和缓存：Trading 沿用 `com.tradingagent.apple.v1` 和旧键保留数据；B 使用 `com.yoloagents.b-agent.apple.v1` 与 `agent.b-agent.` 键前缀，绝不回读 Trading。只有 Trading 允许缺少身份的旧服务；明确身份不匹配始终拒绝。
+私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service、默认地址及旧服务策略。健康响应兼容可空 `agent_id` / `app_name`；配对前和恢复同步前校验服务身份。`ClientRepository(identity:)` 独立保存配对和缓存：YoloTrade 沿用 `com.yoloagents.yolo-trade.apple.v1` 和旧键保留数据；YoloBeni 使用 `com.yoloagents.yolo-beni.apple.v1` 与 `agent.yolo-beni.` 键前缀，绝不回读 YoloTrade。只有 YoloTrade 允许缺少身份的旧服务；明确身份不匹配始终拒绝。
 
 2026-10-28：SDK 47 项通过，1 项真实服务测试默认跳过。身份与存储测试使用内存 fixtures，不访问生产 Keychain。
 
@@ -37,4 +37,4 @@ for try await event in stream {
 }
 ```
 
-B Agent 健康响应不包含交易专属 `trade_execution_enabled`；共享 Health 解码在缺失或 null 时按 false 处理，类型错误仍拒绝，服务身份等必要字段保持严格校验。新增回归测试覆盖此响应及完整配对流程。
+YoloBeni 健康响应不包含交易专属 `trade_execution_enabled`；共享 Health 解码在缺失或 null 时按 false 处理，类型错误仍拒绝，服务身份等必要字段保持严格校验。新增回归测试覆盖此响应及完整配对流程。

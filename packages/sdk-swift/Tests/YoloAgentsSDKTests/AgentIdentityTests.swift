@@ -2,10 +2,10 @@ import Foundation
 import Testing
 @testable import YoloAgentsSDK
 
-private let tradingIdentity = AgentAppIdentity(agentID: "trading-agent", appName: "Trading Agent",
-    keychainService: "com.tradingagent.apple.v1", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
-private let bIdentity = AgentAppIdentity(agentID: "b-agent", appName: "B Agent",
-    keychainService: "com.yoloagents.b-agent.apple.v1", defaultServiceAddress: "http://127.0.0.1:8766")
+private let yoloTradeIdentity = AgentAppIdentity(agentID: "yolo-trade", appName: "YoloTrade",
+    keychainService: "com.yoloagents.yolo-trade.apple.v1", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
+private let yoloBeniIdentity = AgentAppIdentity(agentID: "yolo-beni", appName: "YoloBeni",
+    keychainService: "com.yoloagents.yolo-beni.apple.v1", defaultServiceAddress: "http://127.0.0.1:8766")
 private final class IdentityMemory: SecureStore, @unchecked Sendable {
     private let lock = NSLock()
     private var data: [String: Data] = [:]
@@ -28,65 +28,65 @@ private func identityHealth(_ id: String?) throws -> Health {
 }
 
 @Test func agentIdentityRejectsCrossConnectionsAndLimitsLegacyCompatibility() throws {
-    try tradingIdentity.validate(identityHealth("trading-agent"))
-    try bIdentity.validate(identityHealth("b-agent"))
-    try tradingIdentity.validate(identityHealth(nil))
-    #expect(throws: ClientError.agentIdentityMismatch) { try bIdentity.validate(identityHealth("trading-agent")) }
-    #expect(throws: ClientError.agentIdentityMismatch) { try tradingIdentity.validate(identityHealth("b-agent")) }
-    #expect(throws: ClientError.agentIdentityUnavailable) { try bIdentity.validate(identityHealth(nil)) }
-    #expect(throws: ClientError.incompatibleServer) { try bIdentity.validate(identityHealth("b-agent"), serverID: UUID()) }
-    #expect(throws: ClientError.agentIdentityMismatch) { try bIdentity.validate(identityConnection("trading-agent")) }
+    try yoloTradeIdentity.validate(identityHealth("yolo-trade"))
+    try yoloBeniIdentity.validate(identityHealth("yolo-beni"))
+    try yoloTradeIdentity.validate(identityHealth(nil))
+    #expect(throws: ClientError.agentIdentityMismatch) { try yoloBeniIdentity.validate(identityHealth("yolo-trade")) }
+    #expect(throws: ClientError.agentIdentityMismatch) { try yoloTradeIdentity.validate(identityHealth("yolo-beni")) }
+    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloBeniIdentity.validate(identityHealth(nil)) }
+    #expect(throws: ClientError.incompatibleServer) { try yoloBeniIdentity.validate(identityHealth("yolo-beni"), serverID: UUID()) }
+    #expect(throws: ClientError.agentIdentityMismatch) { try yoloBeniIdentity.validate(identityConnection("yolo-trade")) }
 }
 
-@Test func scopedStoragePreservesTradingMigrationAndNeverImportsItIntoB() throws {
+@Test func scopedStoragePreservesYoloTradeMigrationAndNeverImportsItIntoYoloBeni() throws {
     let memory = IdentityMemory()
     let original = ClientRepository(store: memory)
     let legacyConnection = try identityConnection()
     try original.saveConnection(legacyConnection)
-    var tradingState = ClientState()
+    var yoloTradeState = ClientState()
     let date = Date(timeIntervalSince1970: 1_800_000_000)
-    tradingState.upsertConversation(Conversation(id: UUID(), title: "Trading only", createdAt: date, updatedAt: date))
-    try original.saveState(tradingState, for: legacyConnection)
-    let trading = ClientRepository(identity: tradingIdentity, store: memory)
-    let b = ClientRepository(identity: bIdentity, store: memory)
-    #expect(try trading.connection() == legacyConnection)
-    #expect(try trading.state(for: legacyConnection).conversations.first?.title == "Trading only")
-    #expect(try b.connection() == nil)
-    let bConnection = try identityConnection("b-agent")
-    try b.saveConnection(bConnection)
-    #expect(try b.state(for: bConnection).conversations.isEmpty)
-    var bState = ClientState()
-    bState.upsertConversation(Conversation(id: UUID(), title: "B only", createdAt: date, updatedAt: date))
-    try b.saveState(bState, for: bConnection)
-    #expect(try trading.state(for: legacyConnection).conversations.first?.title == "Trading only")
-    #expect(try b.state(for: bConnection).conversations.first?.title == "B only")
-    #expect(throws: ClientError.agentIdentityUnavailable) { try b.saveConnection(legacyConnection) }
-    try b.forget(bConnection)
-    #expect(try b.connection() == nil && trading.connection() == legacyConnection)
-    #expect(tradingIdentity.keychainService != bIdentity.keychainService)
+    yoloTradeState.upsertConversation(Conversation(id: UUID(), title: "YoloTrade only", createdAt: date, updatedAt: date))
+    try original.saveState(yoloTradeState, for: legacyConnection)
+    let yoloTrade = ClientRepository(identity: yoloTradeIdentity, store: memory)
+    let yoloBeni = ClientRepository(identity: yoloBeniIdentity, store: memory)
+    #expect(try yoloTrade.connection() == legacyConnection)
+    #expect(try yoloTrade.state(for: legacyConnection).conversations.first?.title == "YoloTrade only")
+    #expect(try yoloBeni.connection() == nil)
+    let yoloBeniConnection = try identityConnection("yolo-beni")
+    try yoloBeni.saveConnection(yoloBeniConnection)
+    #expect(try yoloBeni.state(for: yoloBeniConnection).conversations.isEmpty)
+    var yoloBeniState = ClientState()
+    yoloBeniState.upsertConversation(Conversation(id: UUID(), title: "YoloBeni only", createdAt: date, updatedAt: date))
+    try yoloBeni.saveState(yoloBeniState, for: yoloBeniConnection)
+    #expect(try yoloTrade.state(for: legacyConnection).conversations.first?.title == "YoloTrade only")
+    #expect(try yoloBeni.state(for: yoloBeniConnection).conversations.first?.title == "YoloBeni only")
+    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloBeni.saveConnection(legacyConnection) }
+    try yoloBeni.forget(yoloBeniConnection)
+    #expect(try yoloBeni.connection() == nil && yoloTrade.connection() == legacyConnection)
+    #expect(yoloTradeIdentity.keychainService != yoloBeniIdentity.keychainService)
 }
 
 @Test func providerAccountDetailsErrorsAndCancellationDecode() throws {
     let data = Data("""
-    {"account":{"status":"login_required","method":"chatgpt","can_manage":true,"agent_id":"b-agent","app_name":"B Agent",
+    {"account":{"status":"login_required","method":"chatgpt","can_manage":true,"agent_id":"yolo-beni","app_name":"YoloBeni",
     "error":{"code":"remote_revocation_unconfirmed"}}}
     """.utf8)
     let account = try WireJSON.decoder().decode(ChatGPTAccountStatus.self, from: data)
-    #expect(account.agentID == "b-agent" && account.appName == "B Agent" && account.canManage == true)
+    #expect(account.agentID == "yolo-beni" && account.appName == "YoloBeni" && account.canManage == true)
     #expect(account.method == "chatgpt" && account.error?.message.contains("远程授权撤销尚未确认") == true)
     #expect(try WireJSON.decoder().decode(AccountLoginCancellation.self, from: data).isCancelled)
 }
 
-@Test func nonTradingHealthOmitsExecutionCapabilityWithoutGrantingIt() throws {
+@Test func yoloBeniHealthOmitsExecutionCapabilityWithoutGrantingIt() throws {
     var object: [String: Any] = ["status": "ok", "api_version": 1,
         "server_id": "40000000-0000-4000-8000-000000000004", "agent_mode": "chatgpt",
-        "agent_id": "b-agent", "app_name": "B Agent", "model": NSNull()]
+        "agent_id": "yolo-beni", "app_name": "YoloBeni", "model": NSNull()]
     func decode() throws -> Health {
         try WireJSON.decoder().decode(Health.self, from: JSONSerialization.data(withJSONObject: object))
     }
     let health = try decode()
-    #expect(!health.tradeExecutionEnabled && health.agentID == "b-agent" && health.appName == "B Agent")
-    try bIdentity.validate(health)
+    #expect(!health.tradeExecutionEnabled && health.agentID == "yolo-beni" && health.appName == "YoloBeni")
+    try yoloBeniIdentity.validate(health)
     object["trade_execution_enabled"] = true
     #expect(try decode().tradeExecutionEnabled)
     object["trade_execution_enabled"] = false

@@ -14,9 +14,9 @@
 
 退出尝试发现并调用官方 revocation endpoint，然后清除本地 token；未确认远程撤销时返回 `remote_revocation_unconfirmed`，用户可在 ChatGPT 设置断开应用。取消或退出使迟到的 callback 无法激活账号；若迟到的换码已产生凭据，则尝试撤销并在未确认时报告。账号变更与已接受/排队的聊天使用同一准入锁，目录获取及实际运行也参加账号操作保护。
 
-各 Agent 默认 `~/Library/Application Support/YoloAgents/<agent-id>/`，目录标记记录归属并拒绝跨 Agent 或父子目录重用。未标记的非空自定义目录需要 `--adopt-existing-data` 明确接管；检测到旧 Trading 根目录存在聊天时，新的 Trading 默认路径不会静默开启空库。显式使用旧根目录需 `--data-dir <旧目录> --adopt-existing-data`；B Agent 不能接管旧 Trading 根目录。Host 和 Trading 入口在创建账本或连接券商前调用 `prepare_agent_directory`，Host 再持锁核验一次。
+各 Agent 默认 `~/Library/Application Support/YoloAgents/<agent-id>/`，目录标记记录归属并拒绝跨 Agent 或父子目录重用。未标记的非空自定义目录需要 `--adopt-existing-data` 明确接管；检测到旧 YoloTrade 根目录存在聊天时，新的 YoloTrade 默认路径不会静默开启空库。显式使用旧根目录需 `--data-dir <旧目录> --adopt-existing-data`；YoloBeni 不能接管旧 YoloTrade 根目录。Host 和 YoloTrade 入口在创建账本或连接券商前调用 `prepare_agent_directory`，Host 再持锁核验一次。
 
-若过渡期将旧根目录本身接管为 Trading，默认 B Agent 目录会成为 Trading 的子目录并被隔离检查拒绝；此时 B 必须显式使用旧根之外的目录。建议完成受控迁移后，两个 Agent 使用同一未拥有父目录下的独立兄弟目录；本实现不会自动移动生产数据。
+若过渡期将旧根目录本身接管为 YoloTrade，默认 YoloBeni 目录会成为 YoloTrade 的子目录并被隔离检查拒绝；此时 YoloBeni 必须显式使用旧根之外的目录。建议完成受控迁移后，两个 Agent 使用同一未拥有父目录下的独立兄弟目录；本实现不会自动移动生产数据。
 
 本实例 `skills/` 只读取目录内普通 `SKILL.md`，限制数量和大小，拒绝跟随符号链接和硬链接；内容复制到临时私有快照后交给官方 `Skills`。不加载全局 Codex Skills 或其他 Agent 的文件，也不提供对技能目录附带脚本的执行能力。Memory、ConversationSearch、StepPersistence 和 Compaction 使用官方 Harness；历史和记忆按服务端用户及 ChatGPT 注册主体隔离。历史搜索是词法检索，中文召回不保证完整。
 

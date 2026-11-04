@@ -36,7 +36,7 @@ class ChatService:
         self._paper_draft_reauthorize = None
 
     def bind_paper_draft_tool(self, handler, reauthorize):
-        """Bind the Trading Agent's draft-only callback; never an execution API."""
+        """Bind the YoloTrade's draft-only callback; never an execution API."""
         if not callable(handler) or not callable(reauthorize) or self._paper_draft_tool is not None:
             raise RuntimeError("Paper draft tool binding is invalid")
         self._paper_draft_tool = handler
@@ -44,7 +44,7 @@ class ChatService:
 
     def bind_trading_tools(self, draft_handler, read_handler, cancel_handler,
                            confirmation_handler, reauthorize):
-        """Bind Trading Agent model tools; all broker reads stay application-owned."""
+        """Bind YoloTrade model tools; all broker reads stay application-owned."""
         if (not callable(read_handler) or not callable(cancel_handler)
                 or not callable(confirmation_handler)):
             raise RuntimeError("Trading read tool binding is invalid")

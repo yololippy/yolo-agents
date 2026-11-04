@@ -54,11 +54,11 @@ def prepare_agent_directory(data_dir, agent_name="base", app_name=None, *, adopt
     """
     directory = Path(data_dir).expanduser().resolve()
     legacy = (Path.home() / "Library/Application Support/YoloAgents").resolve()
-    if agent_name == "b-agent" and directory == legacy and (legacy / "app.sqlite3").exists():
-        raise RuntimeError("B Agent cannot adopt the legacy Trading Agent directory.")
-    if (agent_name == "trading-agent" and directory == legacy / agent_name
+    if agent_name == "yolo-beni" and directory == legacy and (legacy / "app.sqlite3").exists():
+        raise RuntimeError("YoloBeni cannot adopt the legacy YoloTrade directory.")
+    if (agent_name == "yolo-trade" and directory == legacy / agent_name
             and (legacy / "app.sqlite3").exists() and not (directory / ".agent-owner.json").exists()):
-        raise RuntimeError("Legacy Trading chat exists. Explicitly use the old --data-dir with --adopt-existing-data, or migrate it before using the new default.")
+        raise RuntimeError("Legacy YoloTrade chat exists. Explicitly use the old --data-dir with --adopt-existing-data, or migrate it before using the new default.")
     return ensure_agent_identity(directory, agent_name, adopt_existing=adopt_existing)
 
 

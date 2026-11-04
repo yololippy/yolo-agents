@@ -6,32 +6,32 @@
 
 采用 PydanticAI Core + 官方 Harness + `OpenAIChatGPTProvider` + `OpenAIResponsesModel`。新增明确的 `chatgpt` 运行模式，使用本应用自己的 Sign in with ChatGPT 授权和公开 Responses API。`codex` 模式保留为显式回退，不读取或复制 Codex 登录凭据，不在请求失败时自动切换模式。
 
-`Yolo Agents` 是仓库与共享框架名称，不作为两个业务 Agent 共用的授权身份。Trading Agent 与 B Agent 分别注册、分别登录与退出。B Agent 本轮仅提供独立授权和聊天骨架，没有交易工具。
+`Yolo Agents` 是仓库与共享框架名称，不作为两个业务 Agent 共用的授权身份。YoloTrade 与 YoloBeni 分别注册、分别登录与退出。YoloBeni 本轮仅提供独立授权和聊天骨架，没有交易工具。
 
 ## 2. 实例与双端关系
 
-| 内容 | Trading Agent | B Agent |
+| 内容 | YoloTrade | YoloBeni |
 | --- | --- | --- |
-| 固定实例 ID | `trading-agent` | `b-agent` |
-| 用户看到的授权名称 | `有路交易`（`Yolo Trade`） | `B Agent` |
+| 固定实例 ID | `yolo-trade` | `yolo-beni` |
+| 用户看到的授权名称 | `YoloTrade` | `YoloBeni` |
 | 默认回环服务端口 | `8765` | `8766` |
-| 默认 Mac 数据目录 | `~/Library/Application Support/YoloAgents/trading-agent/` | `~/Library/Application Support/YoloAgents/b-agent/` |
+| 默认 Mac 数据目录 | `~/Library/Application Support/YoloAgents/yolo-trade/` | `~/Library/Application Support/YoloAgents/yolo-beni/` |
 | OAuth 注册、令牌、退出 | 本实例独立 | 本实例独立 |
 | 产品聊天、Harness 记忆与快照 | 本实例独立 | 本实例独立 |
 | Skills 与工具配置 | 本实例独立 | 本实例独立，不导入 IBKR |
-| Mac/iOS 本地配对与缓存 | Trading App 专属命名空间 | B App 专属命名空间 |
+| Mac/iOS 本地配对与缓存 | YoloTrade App 专属命名空间 | YoloBeni App 专属命名空间 |
 
-同一 Agent 的 Mac 和 iOS 客户端连接同一个后端，因而共用会话和记忆。OAuth 登录在 Mac 上完成，由后端保存令牌；iOS 只持有自己的设备配对凭据，不接收 OAuth 令牌。界面应显示当前 Agent 身份，防止将 B App 配到交易服务。
+同一 Agent 的 Mac 和 iOS 客户端连接同一个后端，因而共用会话和记忆。OAuth 登录在 Mac 上完成，由后端保存令牌；iOS 只持有自己的设备配对凭据，不接收 OAuth 令牌。界面应显示当前 Agent 身份，防止将 YoloBeni App 配到交易服务。
 
 独立授权不等于独立套餐额度。同一个 ChatGPT 账号的套餐限制仍由 OpenAI 决定；不得利用多实例绕过限制。登录也不会导入 ChatGPT 网站的聊天或记忆。
 
 ## 3. 代码职责
 
 - `packages/core-python/`：通用 OAuth/Provider、生命周期、实例归属校验、会话存储、Harness 能力与流式事件适配。
-- `agents/trading-agent/runtime-python/`：Trading Agent 身份和启动入口、交易工具边界、IBKR 私有集成。模型登录迁移不改变订单确认与执行权限。
-- `agents/b-agent/runtime-python/`：B Agent 身份和启动入口；不依赖 Trading Agent。
+- `agents/yolo-trade/runtime-python/`：YoloTrade 身份和启动入口、交易工具边界、IBKR 私有集成。模型登录迁移不改变订单确认与执行权限。
+- `agents/yolo-beni/runtime-python/`：YoloBeni 身份和启动入口；不依赖 YoloTrade。
 - `packages/sdk-swift/`、`packages/ui-swift/`：通用账号协议、浏览器登录与状态界面、实例参数、按命名空间保存配对和缓存。
-- `apps/<agent-name>/`：本 App 的身份、Bundle ID、缓存/Keychain 命名空间、平台入口和私有界面。Paper 代码仍在 Trading Agent 的 `client-swift/`。
+- `apps/<agent-name>/`：本 App 的身份、Bundle ID、缓存/Keychain 命名空间、平台入口和私有界面。Paper 代码仍在 YoloTrade 的 `client-swift/`。
 
 共享的是实现代码。授权注册、运行时实例、数据库、Skills 和业务权限不共享。
 
@@ -61,9 +61,9 @@
 
 Skills 从当前实例 `skills/` 目录加载；不自动遍历仓库其他 Agent、全局 Codex Skills 或另一实例目录。拒绝通过符号链接越过配置边界。本轮加载范围是各 Skill 的普通 `SKILL.md`，不加载附带资源或执行脚本。Skills 不能赋予未注册的工具权限，不能把文档里的文字当作订单执行授权。
 
-2026-10-28 已接入官方 Harness 输入、工具、输出 Guardrails，使用官方已知凭据格式检测；共享运行时同时服务 Trading/B。对已有上下文、记忆注入、Skills 加载、缓存恢复补充检查，流式输出在发送前保留并检查可能的凭据前缀。拦截返回 `guardrail_blocked`，不自动重试。普通聊天和记忆功能通过离线回归；本轮新增防护未做真实供应商或真机验收。用户原始产品消息和官方步骤快照可能保留原文，不做历史数据库脱敏；这也不是通用提示注入检测或交易风控，详细范围见 [凭据防护](../packages/core-python/README.md#凭据防护)。
+2026-10-28 已接入官方 Harness 输入、工具、输出 Guardrails，使用官方已知凭据格式检测；共享运行时同时服务 YoloTrade/YoloBeni。对已有上下文、记忆注入、Skills 加载、缓存恢复补充检查，流式输出在发送前保留并检查可能的凭据前缀。拦截返回 `guardrail_blocked`，不自动重试。普通聊天和记忆功能通过离线回归；本轮新增防护未做真实供应商或真机验收。用户原始产品消息和官方步骤快照可能保留原文，不做历史数据库脱敏；这也不是通用提示注入检测或交易风控，详细范围见 [凭据防护](../packages/core-python/README.md#凭据防护)。
 
-客户端配对、历史缓存和 Keychain 使用 App 专属命名空间。Trading 保留已有本地缓存的兼容路径；B Agent 不读取旧 Trading 缓存。
+客户端配对、历史缓存和 Keychain 使用 App 专属命名空间。YoloTrade 保留已有本地缓存的兼容路径；YoloBeni 不读取旧 YoloTrade 缓存。
 
 ## 7. HTTP 与界面
 
@@ -83,8 +83,8 @@ Mac 账号页展示本应用名称、当前授权状态、登录/取消/退出�
 ## 8. 迁移与回退
 
 - 不自动删除、移动或覆盖已有生产聊天数据库。旧根目录不能因默认目录变化而被误认为空白新安装；提供明确的旧目录使用或迁移步骤。
-- 旧目录首次接管使用 `--data-dir "原目录" --adopt-existing-data`；该选项只允许未标记的旧目录，不能覆盖另一 Agent 的归属。默认 Trading 子目录发现旧根聊天时明确拒绝启动，避免出现“历史消失”的误解。B Agent 不允许接管已知 Trading 旧根。
-- Agent 数据目录不允许父子嵌套。若暂时接管旧 `YoloAgents/` 根目录，B Agent 必须用 `--data-dir` 指定根目录以外的位置，例如 `~/Library/Application Support/BAgent/`；不能同时使用默认 `YoloAgents/b-agent/`。正常使用双实例默认路径前，需停服、备份并将旧数据迁入 Trading 专属子目录，再核对聊天、设备和交易配置。本轮不自动搬动生产数据。
+- 旧目录首次接管使用 `--data-dir "原目录" --adopt-existing-data`；该选项只允许未标记的旧目录，不能覆盖另一 Agent 的归属。默认 YoloTrade 子目录发现旧根聊天时明确拒绝启动，避免出现“历史消失”的误解。YoloBeni 不允许接管已知 YoloTrade 旧根。
+- Agent 数据目录不允许父子嵌套。若暂时接管旧 `YoloAgents/` 根目录，YoloBeni 必须用 `--data-dir` 指定根目录以外的位置，例如 `~/Library/Application Support/YoloBeni/`；不能同时使用默认 `YoloAgents/yolo-beni/`。正常使用双实例默认路径前，需停服、备份并将旧数据迁入 YoloTrade 专属子目录，再核对聊天、设备和交易配置。本轮不自动搬动生产数据。
 - 原 Codex 产品聊天保留可读，Codex thread 与 Harness Conversation 不互相反序列化。迁移后新建 Provider 会话；若支持复制历史，需要明确标记为新会话，不能假装恢复原供应商状态。
 - 现有真实 Codex 服务在新路径验收前保留。先用隔离数据目录做 Mac 联调；切换生产服务时核对原参数、数据目录和端口，保留回退命令。
 - 不自动登录、撤销或复制另一个 Agent 的身份，不在迁移中触发 IBKR 下单。

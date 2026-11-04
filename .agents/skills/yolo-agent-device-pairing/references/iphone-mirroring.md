@@ -35,5 +35,5 @@
 - 手机已离开配对页并进入当前 Agent 的会话列表。
 - 服务端设备表新增或保留一个未撤销的目标 iOS 设备，名称与本次输入一致。
 - 健康端点的 `agent_id` 与目标 App 一致。
-- Trading Agent 的 Broker 状态为 `connected_paper`、`ready=true`，不存在未完成对账阻塞。
+- YoloTrade 的 Broker 状态为 `connected_paper`、`ready=true`，不存在未完成对账阻塞。
 - 未修改订单、未重启 IB Gateway、未把运行时秘密写入仓库。

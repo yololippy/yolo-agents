@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def environment():
     result = {k: v for k, v in os.environ.items() if not k.startswith("YOLO_AGENTS_")}
     result["PYTHONPATH"] = os.pathsep.join(str(ROOT / p) for p in (
-        "packages/core-python", "agents/trading-agent/runtime-python", "agents/b-agent/runtime-python"))
+        "packages/core-python", "agents/yolo-trade/runtime-python", "agents/yolo-beni/runtime-python"))
     result["PYTHONUNBUFFERED"] = "1"
     return result
 
@@ -100,12 +100,12 @@ class AgentIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="yolo-provider-isolation-") as folder:
             trading, other = Path(folder) / "trading", Path(folder) / "b"
             with ExitStack() as stack:
-                first = stack.enter_context(Host("yolo_trading", trading, "demo"))
-                second = stack.enter_context(Host("yolo_b_agent", other, "demo"))
+                first = stack.enter_context(Host("yolo_trade", trading, "demo"))
+                second = stack.enter_context(Host("yolo_beni", other, "demo"))
                 first_token, second_token = first.pair("macos"), second.pair("macos")
                 a, b = first.request("health")[1], second.request("health")[1]
-                self.assertEqual(a["agent_id"], "trading-agent")
-                self.assertEqual(b["agent_id"], "b-agent")
+                self.assertEqual(a["agent_id"], "yolo-trade")
+                self.assertEqual(b["agent_id"], "yolo-beni")
                 self.assertNotEqual(a["server_id"], b["server_id"])
                 self.assertEqual(second.request("conversations", token=first_token)[0], 401)
                 status, created = first.request("conversations", token=first_token, data={"title": "keep-local-history"})
@@ -119,9 +119,9 @@ class AgentIsolationTests(unittest.TestCase):
                 self.assertEqual(second.request("orders", token=second_token)[0], 404)
             # Same owned data survives an explicit mode switch; no Codex token is imported.
             with ExitStack() as stack:
-                first = stack.enter_context(Host("yolo_trading", trading, "chatgpt"))
-                second = stack.enter_context(Host("yolo_b_agent", other, "chatgpt"))
-                for host, agent_id in ((first, "trading-agent"), (second, "b-agent")):
+                first = stack.enter_context(Host("yolo_trade", trading, "chatgpt"))
+                second = stack.enter_context(Host("yolo_beni", other, "chatgpt"))
+                for host, agent_id in ((first, "yolo-trade"), (second, "yolo-beni")):
                     mac = host.pair("macos")
                     ios = host.pair("ios")
                     status, result = host.request("account", token=mac)
@@ -142,8 +142,8 @@ class AgentIsolationTests(unittest.TestCase):
                 self.assertEqual(a_url.hostname, "auth.openai.com")
                 self.assertEqual(b_url.hostname, "auth.openai.com")
                 a_query, b_query = parse_qs(a_url.query), parse_qs(b_url.query)
-                self.assertEqual(a_query["agent_name_hint"], ["有路交易"])
-                self.assertEqual(b_query["agent_name_hint"], ["B Agent"])
+                self.assertEqual(a_query["agent_name_hint"], ["YoloTrade"])
+                self.assertEqual(b_query["agent_name_hint"], ["YoloBeni"])
                 self.assertNotEqual(a_query["state"], b_query["state"])
                 self.assertNotEqual(a_query["redirect_uri"], b_query["redirect_uri"])
                 self.assertEqual(first.request("account/login/cancel", token=first_token, data={})[0], 200)
@@ -163,7 +163,7 @@ class AgentIsolationTests(unittest.TestCase):
                 self.assertEqual(len(other_row_ids), 2)
             # Cross-agent ownership must fail before creating a trading ledger in B's directory.
             existing = sorted(p.name for p in other.iterdir())
-            attempted = subprocess.run([sys.executable, "-m", "yolo_trading", "--mode", "demo", "--port", "0",
+            attempted = subprocess.run([sys.executable, "-m", "yolo_trade", "--mode", "demo", "--port", "0",
                 "--data-dir", str(other)], cwd=ROOT, env=environment(), capture_output=True, timeout=10)
             self.assertNotEqual(attempted.returncode, 0)
             self.assertEqual(sorted(p.name for p in other.iterdir()), existing)

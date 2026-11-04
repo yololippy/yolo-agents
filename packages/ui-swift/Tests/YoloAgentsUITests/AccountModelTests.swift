@@ -4,22 +4,22 @@ import YoloAgentsSDK
 @testable import YoloAgentsUI
 
 private let accountServerID = "40000000-0000-4000-8000-000000000004"
-private let accountIdentity = AgentAppIdentity(agentID: "b-agent", appName: "B Agent", keychainService: "fixture.b", defaultServiceAddress: "http://127.0.0.1:8766")
-private let legacyIdentity = AgentAppIdentity(agentID: "trading-agent", appName: "Trading Agent", keychainService: "fixture.trading", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
+private let accountIdentity = AgentAppIdentity(agentID: "yolo-beni", appName: "YoloBeni", keychainService: "fixture.yolo-beni", defaultServiceAddress: "http://127.0.0.1:8766")
+private let legacyIdentity = AgentAppIdentity(agentID: "yolo-trade", appName: "YoloTrade", keychainService: "fixture.yolo-trade", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
 private actor AccountStateHTTP: HTTPTransport {
     private(set) var requests: [URLRequest] = []
     private var status: String
     private var authenticatedAfter: Int?
     private var pendingReads = 0
-    private var accountAgent = "b-agent"
-    private var healthAgent: String? = "b-agent"
+    private var accountAgent = "yolo-beni"
+    private var healthAgent: String? = "yolo-beni"
     private var failure: (String, Int)?
     private var officialURL = "https://auth.openai.com/oauth/authorize?state=fixture"
     private var legacy = false
     init(status: String = "login_required", authenticatedAfter: Int? = nil) {
         self.status = status; self.authenticatedAfter = authenticatedAfter
     }
-    func legacyOnly() { legacy = true; healthAgent = nil; accountAgent = "trading-agent" }
+    func legacyOnly() { legacy = true; healthAgent = nil; accountAgent = "yolo-trade" }
     func setHealthAgent(_ value: String?) { healthAgent = value }
     func setAccountAgent(_ value: String) { accountAgent = value }
     func fail(_ path: String, status: Int) { failure = (path, status) }
@@ -61,7 +61,7 @@ private actor AccountStateHTTP: HTTPTransport {
     }
     private func account() -> [String: Any] {
         var value: [String: Any] = ["status": status, "method": legacy ? "codex" : "chatgpt", "can_manage": true]
-        if !legacy { value["agent_id"] = accountAgent; value["app_name"] = "B Agent" }
+        if !legacy { value["agent_id"] = accountAgent; value["app_name"] = "YoloBeni" }
         if status == "authenticated" { value["email"] = "fixture@example.test"; value["plan_type"] = "plus" }
         return value
     }
@@ -98,9 +98,9 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
     let http = AccountStateHTTP(status: "authenticated")
     let model = try accountModel(http)
     await model.refresh()
-    #expect(model.appName == "B Agent" && model.canManage && !model.usesCodex)
+    #expect(model.appName == "YoloBeni" && model.canManage && !model.usesCodex)
     #expect(model.account?.email == "fixture@example.test" && model.account?.planType == "plus")
-    #expect(model.logoutExplanation.contains("仅退出 B Agent") && !model.logoutExplanation.contains("Codex"))
+    #expect(model.logoutExplanation.contains("仅退出 YoloBeni") && !model.logoutExplanation.contains("Codex"))
     await model.logout()
     #expect(model.statusLabel == "未登录" && model.noticeMessage?.contains("远程授权撤销尚未确认") == true)
     #expect(model.errorMessage?.contains("远程授权撤销尚未确认") == true)
@@ -186,7 +186,7 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
     #expect(await pendingHTTP.requests.last?.url?.path == "/v1/account/login/cancel")
 }
 
-@Test @MainActor func legacyTradingFallbackIsReadDiscoveryOnlyAndShowsRealCodexImpact() async throws {
+@Test @MainActor func legacyYoloTradeFallbackIsReadDiscoveryOnlyAndShowsRealCodexImpact() async throws {
     let http = AccountStateHTTP(status: "authenticated")
     await http.legacyOnly()
     let model = try accountModel(http, identity: legacyIdentity)
@@ -203,7 +203,7 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
 }
 
 @Test @MainActor func wrongAgentAndUnidentifiedHealthBlockPrivateAccountCalls() async throws {
-    for id in ["trading-agent", nil] {
+    for id in ["yolo-trade", nil] {
         let http = AccountStateHTTP()
         await http.setHealthAgent(id)
         let model = try accountModel(http)
@@ -213,7 +213,7 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
         #expect(await http.requests.allSatisfy { $0.url?.path == "/v1/health" && $0.value(forHTTPHeaderField: "Authorization") == nil })
     }
     let mismatched = AccountStateHTTP()
-    await mismatched.setAccountAgent("trading-agent")
+    await mismatched.setAccountAgent("yolo-trade")
     let other = try accountModel(mismatched)
     await other.refresh()
     #expect(other.account == nil && !other.canManage && other.errorMessage != nil)
@@ -224,7 +224,7 @@ func credentialsCanBeClearedWhenRefreshOrPlanConsentIsNeeded(_ status: String) a
     let http = AccountStateHTTP(status: status)
     let model = try accountModel(http)
     await model.refresh()
-    #expect(model.canLogout && model.appName == "B Agent" && model.account?.method == "chatgpt")
+    #expect(model.canLogout && model.appName == "YoloBeni" && model.account?.method == "chatgpt")
     if status == "expired" { #expect(model.statusLabel == "登录状态需要刷新") }
     await model.logout()
     #expect(model.statusLabel == "未登录" && !model.canLogout)

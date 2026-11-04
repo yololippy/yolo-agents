@@ -5,7 +5,7 @@ import YoloAgentsSDK
 
 /// Uses only a unique test service/account. Never queries or removes production entries.
 @Test func isolatedKeychainWriteReadUpdateDelete() throws {
-    let store = KeychainStore(service: "com.tradingagent.sdk-tests.\(UUID().uuidString)")
+    let store = KeychainStore(service: "com.yoloagents.yolo-trade.sdk-tests.\(UUID().uuidString)")
     let account = "temporary-entry.\(UUID().uuidString)"
     defer {
         do { try store.remove(account) }

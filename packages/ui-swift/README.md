@@ -6,7 +6,7 @@
 
 `AgentMarkdownView` 与 `AgentStreamingMarkdownView` 封装固定版本的 Microsoft
 `SwiftStreamingMarkdown`，分别渲染助手的完整消息和流式回复。用户消息保持纯文本，避免改变原始输入。
-组件属于共享 UI，不包含 Trading/IBKR 逻辑；后续 Agent 复用相同渲染器，通过
+组件属于共享 UI，不包含 YoloTrade/IBKR 逻辑；后续 Agent 复用相同渲染器，通过
 `AgentMarkdownTheme` 提供品牌颜色即可。远程图片默认关闭，链接只允许交给系统打开 `https` URL。
 
 2026-10-27：
@@ -23,7 +23,7 @@
 
 Mac 编辑器保留原生 NSTextView、中文组字与 Enter / Shift+Enter 行为。
 
-侧边栏和工具栏提供“ChatGPT 账号”。`ChatGPTAccountModel` 展示所属 App，默认使用通用账号接口；只有允许旧服务的 Trading 在 GET 404 后发现旧 Codex 读接口。POST 不回退。Mac 发起官方浏览器授权、轮询状态；取消和超时真正调用后端取消接口，取消失败保持未确认提示，旧 Codex 模式不支持取消时显示实际错误。
+侧边栏和工具栏提供“ChatGPT 账号”。`ChatGPTAccountModel` 展示所属 App，默认使用通用账号接口；只有允许旧服务的 YoloTrade 在 GET 404 后发现旧 Codex 读接口。POST 不回退。Mac 发起官方浏览器授权、轮询状态；取消和超时真正调用后端取消接口，取消失败保持未确认提示，旧 Codex 模式不支持取消时显示实际错误。
 
 Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex 受管登录对其他使用者的影响说明。`expired` 显示“登录状态需要刷新”，`permission_required` 显示待授予套餐权限，两者仍能退出清理。远程撤销未确认会明确显示。iOS 和非管理设备只读健康身份与模型目录中的脱敏认证状态，邮箱和套餐不进入其状态或聊天缓存。
 
@@ -31,6 +31,6 @@ Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex �
 
 ## App 功能入口
 
-`YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，B 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [Trading 私有客户端](../../apps/trading-agent/client-swift/README.md)。
+`YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，YoloBeni 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [YoloTrade 私有客户端](../../apps/yolo-trade/client-swift/README.md)。
 
-首次连接页的标题取当前 App 身份，B 显示 B Agent。配对回归测试使用不含交易能力字段的 B 健康响应，验证完成配对并保存正确 Agent ID。
+首次连接页的标题取当前 App 身份，YoloBeni 显示 YoloBeni。配对回归测试使用不含交易能力字段的 YoloBeni 健康响应，验证完成配对并保存正确 Agent ID。

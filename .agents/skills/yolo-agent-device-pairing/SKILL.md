@@ -33,7 +33,7 @@ description: "通过 Mac 的 iPhone Mirroring 为 yolo-agents 的 iOS 客户端�
    - HTTPS 地址下保持“允许本地开发连接（未加密）”关闭；
    - 直接键盘输入服务地址和配对码，不依赖跨设备剪贴板；
    - 提交后等待进入会话列表或出现明确错误。
-6. 同时从手机 UI 和服务端验收：确认出现新的有效 iOS 设备，Agent 身份与目标一致，Host 健康；Trading Agent 还需确认 IBKR 回到 `connected_paper` 且对账完成。
+6. 同时从手机 UI 和服务端验收：确认出现新的有效 iOS 设备，Agent 身份与目标一致，Host 健康；YoloTrade 还需确认 IBKR 回到 `connected_paper` 且对账完成。
 
 ## 安全边界
 

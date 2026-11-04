@@ -58,7 +58,7 @@ main 随后使用隔离的临时服务数据和本机真实 Codex CLI 完成受�
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s packages/core-python/tests -v
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s agents/trading-agent/runtime-python/tests -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/python -W error::ResourceWarning -m unittest discover -s agents/yolo-trade/runtime-python/tests -v
 ```
 
 Mac App 也已通过稳定开发签名连接正式本地服务，实测模型菜单、新会话、输入、模型切换和真实回复；一次较长回复收到 120 个 `assistant.delta` 后以 completed 收敛。Codex 子进程的只读隔离和工具关闭同时由配置核验与故障注入测试覆盖。套餐额度、不同模型 entitlement 和网络故障仍不能由目录查询保证；Apple 真机、远程 HTTPS 和弱网验收独立进行。本次后端实现没有修改 Info.plist 或 project.pbxproj；工作区中这两个文件的既有签名改动不属于本批后端代码。

@@ -36,7 +36,7 @@ PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --host 0.0.0.
 
 设备撤销、消息幂等和同步细节见 [通信协议](../protocol/COMMUNICATION_V1.md)。iPhone 首版仅聊天与查看；交易执行、确认和预授权接口均返回 403。
 
-交易 Agent 的 IBKR 模拟盘 / 正式市场配置、健康状态和启动命令见 [交易 Agent 说明](../../agents/trading-agent/README.md)。共享 Host 不接受券商专属参数。
+YoloTrade 的 IBKR 模拟盘 / 正式市场配置、健康状态和启动命令见 [YoloTrade 说明](../../agents/yolo-trade/README.md)。共享 Host 不接受券商专属参数。
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python python3 -m unittest discover -s packages/core-python/tests -v

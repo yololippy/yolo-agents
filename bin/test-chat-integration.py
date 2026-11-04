@@ -64,13 +64,13 @@ def main():
     if args.testing_plugin and not args.testing_plugin.is_file():
         parser.error("--testing-plugin must point to an existing installed library")
     sys.path.insert(0, str(root / "packages/core-python"))
-    sys.path.insert(0, str(root / "agents/trading-agent/runtime-python"))
+    sys.path.insert(0, str(root / "agents/yolo-trade/runtime-python"))
     from yolo_agents.agent_runtime import create_runtime
     from yolo_agents.api import ChatHTTPServer
     from yolo_agents.auth import DeviceAuth
     from yolo_agents.service import ChatService
     from yolo_agents.store import Store
-    from yolo_trading.api_extension import TradingAPIExtension
+    from yolo_trade.api_extension import TradingAPIExtension
     with tempfile.TemporaryDirectory(prefix="yolo-agents-integration-") as temp:
         folder = Path(temp)
         store = Store(folder / "app.sqlite3")

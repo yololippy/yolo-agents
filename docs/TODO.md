@@ -32,44 +32,54 @@
 
 方案见 [CHATGPT_PROVIDER_PLAN.md](CHATGPT_PROVIDER_PLAN.md)。现有 Codex/Paper 交付保留；以下记录独立 Provider 的实现与验收状态。真实授权已在独立验收配置中完成，生产服务尚未迁移。
 
-- [x] **P-01 方案落盘**：明确 Trading Agent/B Agent 独立授权、数据、Skills 与双端关系。
+- [x] **P-01 方案落盘**：明确 YoloTrade/YoloBeni 独立授权、数据、Skills 与双端关系。
 - [x] **P-02 后端 Provider**：`packages/core-python/` 已接入官方 SIWC、凭据持久化/串行刷新/撤销、模型目录与增量适配，保留显式 Codex 回退。官方 SDK 流式和刷新通过模拟 HTTP 传输验证，真实供应商验收见 P-06。
-- [x] **P-03 实例隔离**：Trading/B 独立入口、归属标记、数据目录、记忆/Skills 已实现；同用户不同应用注册 ID、目录串用、令牌串用与历史保留通过测试。迁移限制见方案，生产旧目录未搬动。
-- [x] **P-04 双端客户端**：通用账号页、按 App 隔离 Keychain/缓存、连接身份校验，B Agent 最小可运行双端。SDK 47 项、UI 23 项、Trading 私有客户端 22 项通过；1 项真实服务测试跳过；两个 Agent 的 Mac/iOS Simulator 四目标构建通过。已补做 B Mac 的真实连接、账号页和聊天发送验收；iPhone 真机仍待验收。
-- [x] **P-05 自动化验证**：Core 103、Trading 112、B Agent 4 项 Python 测试通过；`bin/test-agent-isolation.py` 双 Host 真实 HTTP 联调通过。覆盖隔离、权限、取消/迟到回调、刷新失败、保存失败、撤销不确定、模型切换与增量转发；Swift 与四目标构建结果见 P-04。
-- [x] **P-06 Mac 真实验收**（2026-10-28）：Trading/B 分别完成真实浏览器授权。真实模型流式、模型切换、跨会话/重启后的记忆召回、Skills 隔离、B 退出后 Trading 授权保持有效通过；B Mac 连接、账号页和 Enter 单次发送通过。下列证据仅针对独立验收配置，未切换生产服务。
+- [x] **P-03 实例隔离**：YoloTrade/YoloBeni 独立入口、归属标记、数据目录、记忆/Skills 已实现；同用户不同应用注册 ID、目录串用、令牌串用与历史保留通过测试。迁移限制见方案，生产旧目录未搬动。
+- [x] **P-04 双端客户端**：通用账号页、按 App 隔离 Keychain/缓存、连接身份校验，YoloBeni 最小可运行双端。SDK 47 项、UI 23 项、YoloTrade 私有客户端 22 项通过；1 项真实服务测试跳过；两个 Agent 的 Mac/iOS Simulator 四目标构建通过。已补做 YoloBeni Mac 的真实连接、账号页和聊天发送验收；iPhone 真机仍待验收。
+- [x] **P-05 自动化验证**：Core 103、YoloTrade 112、YoloBeni 4 项 Python 测试通过；`bin/test-agent-isolation.py` 双 Host 真实 HTTP 联调通过。覆盖隔离、权限、取消/迟到回调、刷新失败、保存失败、撤销不确定、模型切换与增量转发；Swift 与四目标构建结果见 P-04。
+- [x] **P-06 Mac 真实验收**（2026-10-28）：YoloTrade/YoloBeni 分别完成真实浏览器授权。真实模型流式、模型切换、跨会话/重启后的记忆召回、Skills 隔离、YoloBeni 退出后 YoloTrade 授权保持有效通过；YoloBeni Mac 连接、账号页和 Enter 单次发送通过。下列证据仅针对独立验收配置，未切换生产服务。
 
 ### Provider 真实验收证据（2026-10-28）
 
-- 配置：`~/Library/Application Support/YoloAgentsValidation/{trading-agent,b-agent}/`，回环端口分别为 `18765`、`18766`。授权与测试数据分别保存；原 8765 服务、生产聊天和 IBKR 配置保持原状。
-- 授权：两实例状态为 `authenticated`；Trading 取得 8 个真实可用模型。B 退出调用成功且无撤销未确认错误，Trading 随后仍可读取 8 个模型；B 再次登录成功。两实例重启后授权仍有效。
+- 配置：`~/Library/Application Support/YoloAgentsValidation/{yolo-trade,yolo-beni}/`，回环端口分别为 `18765`、`18766`。授权与测试数据分别保存；原 8765 服务、生产聊天和 IBKR 配置保持原状。
+- 授权：两实例状态为 `authenticated`；YoloTrade 取得 8 个真实可用模型。YoloBeni 退出调用成功且无撤销未确认错误，YoloTrade 随后仍可读取 8 个模型；YoloBeni 再次登录成功。两实例重启后授权仍有效。
 - 真实流式：`gpt-6-luna` 完成记忆写入、跨会话召回和重启召回；同会话切换 `gpt-6.1-sol` 成功。对应回复记录 3、4、4、6 个增量事件，累计增量与完成文本一致。
-- 隔离：B 空记忆时明确回答不存在，没有读到 Trading 的合成验收标记。两实例同名 `acceptance-guide` 技能分别返回其私有标签，均产生真实增量回复。
-- Mac GUI：B 显示自身名称、已登录和已连接；新会话中按 Enter 提交仅产生一条用户消息，完整回复与界面一致，共 13 个增量事件。新版 Trading Mac 构建通过，但本轮未替换正在运行的生产 Trading App。
-- 本轮发现并修复：空记忆工具反馈因零纠错预算被直接终止；共享健康响应误将交易字段设为必填；B 首次连接页标题硬编码 Trading。修复后 Core 103、SDK 47（另 1 项跳过）、UI 23 项通过，B/Trading Mac 重建并复测。
+- 隔离：YoloBeni 空记忆时明确回答不存在，没有读到 YoloTrade 的合成验收标记。两实例同名 `acceptance-guide` 技能分别返回其私有标签，均产生真实增量回复。
+- Mac GUI：YoloBeni 显示自身名称、已登录和已连接；新会话中按 Enter 提交仅产生一条用户消息，完整回复与界面一致，共 13 个增量事件。新版 YoloTrade Mac 构建通过，但本轮未替换正在运行的生产 YoloTrade App。
+- 本轮发现并修复：空记忆工具反馈因零纠错预算被直接终止；共享健康响应误将交易字段设为必填；YoloBeni 首次连接页标题硬编码 YoloTrade。修复后 Core 103、SDK 47（另 1 项跳过）、UI 23 项通过，YoloBeni/YoloTrade Mac 重建并复测。
 - 边界：真实令牌到期轮换、iPhone 真机和生产迁移不在上述通过项中；刷新故障与竞态仍依据离线回归验证。验收未调用 IBKR 或发送交易指令。
 
 ## 本轮补充：G-01 Guardrails（2026-10-28）
 
 - [x] 共享 PydanticAI/ChatGPT 运行时接入官方 `InputGuardrail`、`ToolGuardrail`、`OutputGuardrail`，按官方已知凭据格式检查；不新增交易工具或改变交易权限。
 - [x] 补充流式跨片段检查、历史/记忆注入、Skills 加载与缓存恢复检查；HTTP 返回固定 `guardrail_blocked` 失败事件，不泄露异常原文或自动重试。
-- [x] 官方 SDK 离线测试及本机 HTTP/SQLite 联调通过：Core 117、Trading 112、B 4，共 233 项。新增覆盖已知凭据流式各切分点、输入阻断时零模型请求、记忆写入前拦截、普通聊天增量及幂等。
+- [x] 官方 SDK 离线测试及本机 HTTP/SQLite 联调通过：Core 117、YoloTrade 112、YoloBeni 4，共 233 项。新增覆盖已知凭据流式各切分点、输入阻断时零模型请求、记忆写入前拦截、普通聊天增量及幂等。
 
 范围：仅 `pydantic`/`chatgpt` 模式；不承诺识别任意密码、提示注入或交易风险，不清理已有产品原文/步骤快照。本轮没有切换运行中的生产服务或进行真实模型/真机验收。实现和依赖见 [core-python README](../packages/core-python/README.md#凭据防护)。
 
 ## 本轮补充：IMG-01 图片消息（2026-11-04）
 
 - [x] macOS/iOS 共用图片选择、转码压缩、草稿预览和消息内展示；支持纯图片消息、失败重试以及 Agent 图片流式事件。
-- [x] 共享协议、Python Store/API/Runtime、Swift SDK/UI 已实现图片上传、鉴权下载、消息关联和断线补齐；媒体保存在各 Agent 自己的数据目录，未修改或扩展 B Agent。
-- [x] JPEG/PNG/WebP、单图/单消息/像素/存储配额和幂等边界已实现；Core 143、Trading 164、Swift SDK 59、Swift UI 37 项测试通过，macOS arm64 与 iOS Simulator 构建成功。
+- [x] 共享协议、Python Store/API/Runtime、Swift SDK/UI 已实现图片上传、鉴权下载、消息关联和断线补齐；媒体保存在各 Agent 自己的数据目录，未修改或扩展 YoloBeni。
+- [x] JPEG/PNG/WebP、单图/单消息/像素/存储配额和幂等边界已实现；Core 143、YoloTrade 164、Swift SDK 59、Swift UI 37 项测试通过，macOS arm64 与 iOS Simulator 构建成功。
 
 边界：Codex 当前支持图片输入但关闭图片生成；Agent 返回图片的共享链路由确定性 Runtime 完成端到端验收，真实供应商图片输出仍以模型 profile 和后续真实账号验收为准。当前没有媒体删除接口，未附着上传会占用每 Agent 512 MiB 配额；真机相册权限、弱网大图和长期存储回收仍需后续验收。
+
+## 本轮补充：ID-01 产品身份统一（2026-11-04）
+
+- [x] 仓库协调 Skill 统一为 `yolo-agents-coordination`，建立 `main → main-trade/main-beni → 专项开发会话` 层级；跨产品共享层、Git 和最终汇报仍由顶层 `main` 统一负责。
+- [x] 交易产品的目录、运行时、模块、Swift Target、Xcode Project/Scheme、Bundle ID、Keychain 命名空间和文档统一为 `yolo-trade` / `YoloTrade`。
+- [x] 生活助手的目录、运行时、模块、Swift Target、Xcode Project/Scheme、Bundle ID、Keychain 命名空间和文档统一为 `yolo-beni` / `YoloBeni`。
+- [x] 旧产品身份在源码、活动文档、脚本与文件路径中已清除；第三方项目 `TradingAgents` 的正式名称不属于产品身份，保持不变。
+- [x] 重命名后 Core 154、YoloTrade 165、YoloBeni 4、双实例隔离 1 项 Python 测试通过；Swift SDK 61、Swift UI 42、YoloTrade Client 27 项测试通过，YoloBeni Client 构建以及两个产品的 macOS/iOS Simulator 四目标构建通过。
+
+边界：本次只修改仓库代码和构建身份，不自动移动仓库外的既有数据目录，也不迁移旧 App 的 Keychain 配对或沙盒数据；需要保留时另行设计一次性迁移。现有未提交的 YoloTrade 图标工程修改、`design/` 与 `Resources/` 已原样保留。
 
 ## 2. M0：环境与 IBKR 接入准备
 
 - [x] **M0-01 首版范围**：首批固定为 Paper、美股 `STK/SMART/USD`、普通 BUY/SELL、正整数数量、`LMT/DAY`、不含盘前盘后；Live、卖空标记、零股、其他类型均拒绝。
 - [ ] **M0-02 风险参数**：确定金额、敞口/集中度、当日限额、报价偏离及数据有效期，区分拒绝与补充信息；未定参数阻止提交，不阻塞只读。
-- [ ] **M0-03 开发环境**：本机已安装 Xcode 27.1（27A9275）；共享 Swift SDK 共 48 项（47 通过、1 跳过），共享 SwiftUI 23 项、Trading Agent 客户端 22 项通过，Mac arm64 与 iOS Simulator 构建成功；`.venv` 固定 `ib_async==2.1.0`。Gateway 已安装并登录 Paper；Gateway 可写权限、真实订单与 iPhone 真机交互仍待验收。
+- [ ] **M0-03 开发环境**：本机已安装 Xcode 27.1（27A9275）；共享 Swift SDK 共 48 项（47 通过、1 跳过），共享 SwiftUI 23 项、YoloTrade 客户端 22 项通过，Mac arm64 与 iOS Simulator 构建成功；`.venv` 固定 `ib_async==2.1.0`。Gateway 已安装并登录 Paper；Gateway 可写权限、真实订单与 iPhone 真机交互仍待验收。
 - [ ] **M0-04 模拟环境**：Paper 账户、目标账户、回环 API、4002 端口和固定非零 client ID 已准备，实盘执行由代码强制关闭且凭据未进入仓库。尚需取消 Gateway 的 Read-Only API，并核对行情/交易权限。
 - [ ] **M0-05 接入验证**：已完成 `ib_async` 生命周期、启动读取、Paper 执行边界及故障模拟；真实 Gateway 只读连接曾成功。可写预检因 Gateway Read-Only API 被拒绝；取消该设置后继续验证账户、What-if、订单事件和对账。
 - [ ] **M0-06 会话与外部订单**：实测 Mobile/TWS/Client Portal、同/不同用户名及 client ID/Master Client 的会话冲突、行情影响与订单可见性；区分读取/绑定/修改权限和历史窗口。
@@ -85,7 +95,7 @@
 - [ ] **M1-01 工程骨架**：先建独立交易服务、配置模板、日志、依赖锁定与基础检查；聊天服务、SwiftUI 工程随后加入。
 - [ ] **M1-02 领域模型**：先定义账户快照、完整合约、订单/成交、数据状态及稳定 ID；再补会话、工具、意图、审核、授权、任务、提醒和设备关联。
 - [ ] **M1-03 存储**：迁移、事务、唯一约束、事件游标与备份；金额/数量使用明确精度，时间保存 UTC 及原始时区语义。
-- [x] **M1-04 会话 API**：创建、搜索、命名、归档、向前游标历史、`/new` 模型上下文重置、消息幂等、持久事件、SSE/增量补齐及协议版本已实现；见 `../packages/core-python/yolo_agents/api.py`、`../agents/trading-agent/runtime-python/tests/test_api.py` 和 `../packages/protocol/COMMUNICATION_V1.md`，本机 HTTP 与共享层自动化测试通过。外网与真机另见 M5。
+- [x] **M1-04 会话 API**：创建、搜索、命名、归档、向前游标历史、`/new` 模型上下文重置、消息幂等、持久事件、SSE/增量补齐及协议版本已实现；见 `../packages/core-python/yolo_agents/api.py`、`../agents/yolo-trade/runtime-python/tests/test_api.py` 和 `../packages/protocol/COMMUNICATION_V1.md`，本机 HTTP 与共享层自动化测试通过。外网与真机另见 M5。
 - [x] **M1-05 主 Agent**：已实现演示模式、官方 Core/Harness 适配，以及复用 Codex 受管 ChatGPT 登录的隔离聊天模式。Core/Harness 的会话恢复、官方记忆工具、跨会话文本检索及压缩后原文召回已通过真实 SDK 离线模型验证；Codex 已实测 8 个模型目录、真实推理流、模型切换和服务重启续聊。PydanticAI 供应商的中文召回和记忆决策质量仍待实测；两条路径均无交易执行工具。
 - [ ] **M1-06 权限**：分离查询、提案、确认、提交和任务授权；服务端强制校验，所有入口共用规则，Agent 不可改规则或直连券商。
 - [ ] **M1-07 密钥与数据**：设备凭据用 Keychain、后端密钥受保护、日志脱敏；明确云端模型数据范围及供应商留存设置。
@@ -142,7 +152,7 @@
 ## 7. M5：iOS、远程访问与提醒
 
 - [ ] **M5-01 远程访问**：加密、设备注册/认证、凭据轮换与撤销，验证网络中断和重连。
-- [x] **M5-02 设备权限**：平台绑定的一次性配对码、服务端能力校验及撤销已实现；只有有效 Mac 管理设备可创建/预览/确认/提交/单笔撤单，iOS 仅聊天和订单读取，伪造平台不能提权。证据见 `../agents/trading-agent/runtime-python/tests/test_api.py`。
+- [x] **M5-02 设备权限**：平台绑定的一次性配对码、服务端能力校验及撤销已实现；只有有效 Mac 管理设备可创建/预览/确认/提交/单笔撤单，iOS 仅聊天和订单读取，伪造平台不能提权。证据见 `../agents/yolo-trade/runtime-python/tests/test_api.py`。
 - [ ] **M5-03 增量同步**：已实现认证 SSE、断线后的 REST 事件游标补齐、消息向前分页、去重、非法页面原子拒绝、待发消息和有限离线缓存；Swift SDK/UI 单元测试、模拟器真实网络联调，以及 Mac 真实 Codex 回复的 120 个增量事件均通过。真实多设备弱网/长期离线恢复继续验收，缓存以 Mac 数据库为准。
 - [x] **M5-04 Apple 界面首版**：SwiftUI macOS / iOS 聊天、会话、左上角新会话、模型选择、健康状态和原生多行输入区已实现；Mac 已实测输入、发送后清空、模型切换、新会话和真实流式回复，模拟器构建/启动与真实 Keychain、SDK 通信测试通过。iOS 输入焦点问题已从受连接状态影响的 TextField 改为独立 TextEditor，并有状态测试；iPhone 真机键盘仍需实测。订单结果与提醒另行验收。
 - [ ] **M5-05 监控条件**：股票/完整期权合约的高于、低于、上穿、下穿，包含口径、时段、冷却、一次/重复、暂停及过期。

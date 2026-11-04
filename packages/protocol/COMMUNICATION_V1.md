@@ -142,6 +142,6 @@ PydanticAI 路径把已验证图片作为官方 `BinaryContent` 传给模型。�
 
 本协议已定义设备认证、增量补齐和 HTTPS 接口；公网可达性、可信证书配置、iOS 后台推送及真机测试分别验收，不能仅凭本机 HTTP 测试认定完成。
 
-## Trading Agent 扩展
+## YoloTrade 扩展
 
-Paper 订单是交易 Agent 私有接口，见 [Paper 订单协议](../../agents/trading-agent/PAPER_ORDERS.md)。
+Paper 订单是 YoloTrade 私有接口，见 [Paper 订单协议](../../agents/yolo-trade/PAPER_ORDERS.md)。

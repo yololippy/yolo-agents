@@ -345,18 +345,18 @@ class PydanticRuntime(_Runtime):
                     retries=self._retry_policy(),
                     instructions=(
                         "你是个人 AI 助手，当前只开放对话、记忆、历史检索"
-                        + ("、IBKR Paper 只读查询和非执行 Paper 草稿创建。" if self.agent_id == "trading-agent" else "。")
+                        + ("、IBKR Paper 只读查询和非执行 Paper 草稿创建。" if self.agent_id == "yolo-trade" else "。")
                         +
                         ("本服务的模型工具不能确认或执行订单；不得声称模型已经提交订单。"
-                         if self.agent_id == "trading-agent" else
+                         if self.agent_id == "yolo-trade" else
                          "本服务尚无账户、行情或交易执行工具；不得声称已经查询账户或执行订单。")
                         + "记忆只保存用户明确表达的长期偏好与背景，不保存密钥。"
                         "订单授权、风险限额和实时账户状态不能由记忆或历史确认代替。"
                         "历史检索为词法检索，中文可能漏召回；找不到时说明不确定。"
                         "相关历史可按需检索；请区分过去记录与当前事实。"
-                        + (TRADING_TOOL_INSTRUCTIONS if self.agent_id == "trading-agent" else "")
+                        + (TRADING_TOOL_INSTRUCTIONS if self.agent_id == "yolo-trade" else "")
                     ),
-                    **({"tools": pydantic_trading_tools()} if self.agent_id == "trading-agent" else {}),
+                    **({"tools": pydantic_trading_tools()} if self.agent_id == "yolo-trade" else {}),
                     capabilities=[
                         backend.StepPersistence(store=steps, capture_frontier=True),
                         backend.ConversationSearch(backend.SnapshotHistorySource(steps), scope="all", max_matches=5, context_lines=2),
@@ -544,7 +544,7 @@ class PydanticRuntime(_Runtime):
             pieces: list[str] = []
             safe_pieces: list[str] = []
             output_filter = CredentialStreamFilter()
-            order_filter = PaperOrderStreamFilter() if self.agent_id == "trading-agent" else None
+            order_filter = PaperOrderStreamFilter() if self.agent_id == "yolo-trade" else None
             self._before_model_request(conversation_id, user_id, message_id)
             try:
                 with agent.run_stream_sync(model_prompt, **kwargs) as response:
@@ -561,7 +561,7 @@ class PydanticRuntime(_Runtime):
                                 if delta:
                                     pieces.append(delta)
                                     safe = output_filter.feed(delta)
-                                    if self.agent_id == "trading-agent":
+                                    if self.agent_id == "yolo-trade":
                                         for fragment in safe:
                                             for filtered in order_filter.feed(fragment):
                                                 safe_pieces.append(filtered)
@@ -623,7 +623,7 @@ class PydanticRuntime(_Runtime):
                 yield RuntimeMedia(data=output.data, media_type=output.media_type)
                 final_output = "已生成图片。"
                 yield final_output
-            elif self.agent_id == "trading-agent":
+            elif self.agent_id == "yolo-trade":
                 for filtered in order_filter.feed(tail):
                     safe_pieces.append(filtered)
                     yield filtered

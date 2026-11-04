@@ -425,7 +425,7 @@ class CodexRuntimeTests(unittest.TestCase):
         old = json.loads(self.store.get_agent_state(self.cid))["thread_id"]
         runtime.close()
 
-        trading = self.runtime(agent_name="trading-agent")
+        trading = self.runtime(agent_name="yolo-trade")
         second = self.history("continue after enabling the draft tool")
         self.assertEqual("".join(trading.stream_reply(second, self.cid)), "Hello world")
         new = json.loads(self.store.get_agent_state(self.cid))
@@ -500,11 +500,11 @@ class CodexRuntimeTests(unittest.TestCase):
             self.assertFalse(params["allowProviderModelFallback"])
         self.assertEqual(self.requests("command/exec"), [])
 
-    def test_trading_agent_validates_model_proposal_and_creates_only_trusted_draft(self):
+    def test_yolo_trade_validates_model_proposal_and_creates_only_trusted_draft(self):
         from yolo_agents.runtime_tools import RuntimeToolContext
 
         calls, order_id = [], str(uuid4())
-        runtime = self.runtime(agent_name="trading-agent", paper_proposal=True)
+        runtime = self.runtime(agent_name="yolo-trade", paper_proposal=True)
         context = RuntimeToolContext(
             conversation_id=self.cid, user_message_id="message-1", run_id=str(uuid4()),
             caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},
