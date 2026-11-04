@@ -10,6 +10,7 @@ from .agent_runtime import (
     RuntimeGuardrailError, RuntimeStateError,
 )
 from .codex_runtime import CodexBusyError
+from .media import MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, RuntimeMedia
 from .runtime_tools import RuntimeToolContext
 
 
@@ -50,7 +51,7 @@ class ChatService:
         with self.lock:
             return collection.setdefault(conversation_id, threading.Lock())
 
-    def send(self, conversation_id, content, client_message_id, *, caller=None):
+    def send(self, conversation_id, content, client_message_id, *, caller=None, media_ids=()):
         if self.closing.is_set():
             raise RuntimeError("service shutting down")
         with self.conversation_lock(self.accept_locks, conversation_id):
@@ -61,7 +62,8 @@ class ChatService:
                 raise ValueError("conversation is archived")
             for message in self.store.list_messages(conversation_id):
                 if message.get("client_message_id") == client_message_id:
-                    if message["content"] != content:
+                    if (message["content"] != content
+                            or [item["id"] for item in message.get("media", [])] != list(media_ids)):
                         raise ValueError("client_message_id already used with different content")
                     return {"message": message, "run_id": message["run_id"], "status": "duplicate"}
             run_id = str(uuid4())
@@ -69,7 +71,8 @@ class ChatService:
                 # Account mutations hold this lock while idle. Persisting acceptance
                 # and marking the queue active must be one admission boundary.
                 message = self.store.append_message(conversation_id, "user", content,
-                                                    client_message_id=client_message_id, run_id=run_id)
+                                                    client_message_id=client_message_id, run_id=run_id,
+                                                    media_ids=media_ids)
                 public_caller = None if caller is None else {
                     key: caller.get(key) for key in ("id", "platform", "permissions", "revoked_at")
                 }
@@ -174,20 +177,37 @@ class ChatService:
                     cancel_paper_order=self._paper_cancel_tool,
                 )
             chunks, size = [], 0
+            media_ids, media_size = [], 0
             stream = (self.runtime.stream_reply(history, conversation_id, runtime_tools=runtime_tools)
                       if runtime_tools is not None else self.runtime.stream_reply(history, conversation_id))
             for delta in stream:
-                if not isinstance(delta, str):
-                    raise TypeError("runtime delta must be text")
-                size += len(delta)
-                if size > 1_000_000:
-                    raise ValueError("reply exceeded the configured output bound")
-                chunks.append(delta)
-                self.store.append_event("assistant.delta", conversation_id, {"run_id": run_id, "delta": delta})
+                if isinstance(delta, str):
+                    size += len(delta)
+                    if size > 1_000_000:
+                        raise ValueError("reply exceeded the configured output bound")
+                    chunks.append(delta)
+                    self.store.append_event("assistant.delta", conversation_id,
+                                            {"run_id": run_id, "delta": delta})
+                elif isinstance(delta, RuntimeMedia):
+                    if len(media_ids) >= MAX_IMAGES_PER_MESSAGE:
+                        raise ValueError("runtime returned too many images")
+                    media_size += len(delta.data)
+                    if media_size > MAX_MESSAGE_IMAGE_BYTES:
+                        raise ValueError("runtime image bytes exceeded the configured output bound")
+                    media_id = str(uuid4())
+                    media, _ = self.store.create_media(
+                        media_id, delta.data, delta.media_type, source="runtime", run_id=run_id,
+                        filename=delta.filename, alt_text=delta.alt_text,
+                    )
+                    media_ids.append(media_id)
+                    self.store.append_event("assistant.media", conversation_id,
+                                            {"run_id": run_id, "media": media})
+                else:
+                    raise TypeError("runtime delta must be text or image media")
             content = "".join(chunks)
-            if not content.strip():
+            if not content.strip() and not media_ids:
                 raise ValueError("runtime returned an empty reply")
-            self.store.finish_run(conversation_id, run_id, content)
+            self.store.finish_run(conversation_id, run_id, content, media_ids=media_ids)
         except RuntimeGuardrailError:
             self.fail(conversation_id, run_id, "guardrail_blocked", "内容检查已拦截本次回复。请移除消息中的密钥或令牌后重新发送；若未提供凭据，可新建会话重试。")
         except RuntimeConnectionError:
@@ -221,7 +241,10 @@ class ChatService:
                         except RuntimeError:
                             pass
                     if cached is not None:
-                        self.store.finish_run(conversation["id"], message["run_id"], cached)
+                        media_ids = [item["id"] for item in self.store.media_for_run(message["run_id"])]
+                        self.store.finish_run(
+                            conversation["id"], message["run_id"], cached, media_ids=media_ids,
+                        )
                     else:
                         self.fail(conversation["id"], message["run_id"], "run_interrupted", "服务已重启；中断的回复未自动重试，请重新发送。")
 

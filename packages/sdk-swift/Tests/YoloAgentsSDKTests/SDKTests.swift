@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Testing
 @testable import YoloAgentsSDK
 
@@ -7,6 +8,11 @@ private let runID = UUID(uuidString: "20000000-0000-4000-8000-000000000002")!
 private let clientID = UUID(uuidString: "30000000-0000-4000-8000-000000000003")!
 private let now = Date(timeIntervalSince1970: 1_700_000_000)
 private let conversation = Conversation(id: conversationID, title: "测试会话", createdAt: now, updatedAt: now)
+
+private func media(id: UUID = UUID(), filename: String = "chart.png") -> MessageMedia {
+    MessageMedia(id: id, mediaType: "image/png", byteCount: 3, sha256: "fixture",
+                 filename: filename, createdAt: now)
+}
 
 private func message(role: MessageRole = .assistant, content: String = "完整回复", status: MessageStatus = .completed,
                      id: UUID = UUID(), clientMessageID: UUID? = nil, run: UUID? = runID) -> Message {
@@ -73,6 +79,27 @@ private func pairing(deviceID: UUID = UUID()) throws -> PairingResponse {
     #expect((object["created_at"] as? String)?.hasSuffix("Z") == true)
     #expect(object["conversationID"] == nil)
     #expect(try WireJSON.decoder().decode(Message.self, from: data) == original)
+}
+
+@Test func messagesAndOutgoingCacheDecodeBeforeMediaFieldsExisted() throws {
+    let oldMessage = """
+    {"id":"30000000-0000-4000-8000-000000000003","conversation_id":"\(conversationID)",
+    "role":"user","content":"旧缓存","created_at":"2026-10-24T12:00:00Z","status":"pending",
+    "client_message_id":"\(clientID)","run_id":null}
+    """
+    #expect(try WireJSON.decoder().decode(Message.self, from: Data(oldMessage.utf8)).media.isEmpty)
+
+    let oldOutgoing = """
+    {"id":"\(clientID)","conversationID":"\(conversationID)","content":"旧缓存",
+    "createdAt":"2026-10-24T12:00:00Z","status":"needsRetry","runID":null,"error":"待重试"}
+    """
+    #expect(try WireJSON.decoder().decode(OutgoingMessage.self, from: Data(oldOutgoing.utf8)).mediaIDs.isEmpty)
+
+    let oldPartial = """
+    {"id":"\(runID)","conversationID":"\(conversationID)","content":"旧回复",
+    "error":null,"createdAt":"2026-10-24T12:00:00Z"}
+    """
+    #expect(try WireJSON.decoder().decode(PartialReply.self, from: Data(oldPartial.utf8)).media.isEmpty)
 }
 
 @Test(arguments: ["2026-10-24T12:00:00Z", "2026-10-24T12:00:00.123456Z", "2026-10-24T20:00:00+08:00"])
@@ -172,12 +199,84 @@ func invalidServiceAddressesFail(_ value: String) {
     let requests = await transport.requests
     let firstData = try #require(requests[0].httpBody)
     let secondData = try #require(requests[1].httpBody)
-    let firstBody = try #require(JSONSerialization.jsonObject(with: firstData) as? [String: String])
-    let secondBody = try #require(JSONSerialization.jsonObject(with: secondData) as? [String: String])
-    #expect(firstBody == secondBody)
+    let firstBody = try #require(JSONSerialization.jsonObject(with: firstData) as? [String: Any])
+    let secondBody = try #require(JSONSerialization.jsonObject(with: secondData) as? [String: Any])
+    #expect(NSDictionary(dictionary: firstBody).isEqual(to: secondBody))
     #expect(requests[0].httpMethod == "POST")
-    #expect(firstBody["client_message_id"] == clientID.uuidString)
-    #expect(firstBody["content"] == "你好")
+    #expect(firstBody["client_message_id"] as? String == clientID.uuidString)
+    #expect(firstBody["content"] as? String == "你好")
+    #expect(firstBody["media_ids"] as? [String] == [])
+}
+
+@Test func mediaUploadDownloadAndMessageReferencesUseAuthenticatedV1Contract() async throws {
+    let mediaID = UUID(uuidString: "60000000-0000-4000-8000-000000000006")!
+    let bytes = Data([0xff, 0xd8, 0xff, 0xd9])
+    let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    let metadata = MessageMedia(id: mediaID, mediaType: "image/jpeg", byteCount: bytes.count,
+                                sha256: digest, filename: "photo.jpg", createdAt: now)
+    struct UploadResponse: Encodable { let media: MessageMedia }
+    let canonical = Message(id: UUID(), conversationID: conversationID, role: .user, content: "",
+                            createdAt: now, status: .completed, clientMessageID: clientID, media: [metadata])
+    let response = SendMessageResponse(message: canonical, runID: runID, status: "accepted")
+    let transport = RecordingTransport([
+        try encoded(UploadResponse(media: metadata), status: 201),
+        try encoded(response, status: 202),
+        HTTPResult(data: bytes, status: 200),
+    ])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com/base"),
+                        token: "fixture-token", transport: transport)
+
+    #expect(try await api.uploadMedia(clientMediaID: mediaID, data: bytes,
+                                     mediaType: "image/jpeg", filename: "photo.jpg") == metadata)
+    _ = try await api.sendMessage(conversationID: conversationID, clientMessageID: clientID,
+                                  content: "", mediaIDs: [mediaID])
+    #expect(try await api.mediaData(metadata) == bytes)
+
+    let requests = await transport.requests
+    #expect(requests.map { $0.url?.path } == [
+        "/base/v1/media",
+        "/base/v1/conversations/\(conversationID.uuidString)/messages",
+        "/base/v1/media/\(mediaID.uuidString)",
+    ])
+    #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token" })
+    #expect(requests[0].httpBody == bytes)
+    #expect(requests[0].value(forHTTPHeaderField: "Content-Type") == "image/jpeg")
+    #expect(requests[0].value(forHTTPHeaderField: "Content-Length") == String(bytes.count))
+    #expect(requests[0].value(forHTTPHeaderField: "X-Client-Media-ID") == mediaID.uuidString)
+    let body = try #require(JSONSerialization.jsonObject(with: requests[1].httpBody ?? Data()) as? [String: Any])
+    #expect(body["content"] as? String == "")
+    #expect(body["media_ids"] as? [String] == [mediaID.uuidString])
+}
+
+@Test func mediaLimitsRejectInvalidDraftsBeforeNetwork() async throws {
+    let transport = RecordingTransport([])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"),
+                        token: "fixture-token", transport: transport)
+    await #expect(throws: ClientError.invalidMediaType) {
+        try await api.uploadMedia(clientMediaID: UUID(), data: Data([1]), mediaType: "image/heic")
+    }
+    #expect(throws: ClientError.emptyMessage) {
+        try APIClient.validateMessage(content: " \n", mediaIDs: [])
+    }
+    #expect(throws: ClientError.tooManyMediaItems) {
+        try APIClient.validateMessage(content: "", mediaIDs: (0...MediaLimits.maximumItemsPerMessage).map { _ in UUID() })
+    }
+    #expect(await transport.requests.isEmpty)
+}
+
+@Test func mediaUploadRejectsAResponseWithTheWrongId() async throws {
+    let requestedID = UUID()
+    let metadata = MessageMedia(id: UUID(), mediaType: "image/png", byteCount: 3,
+                                sha256: "fixture", createdAt: now)
+    struct UploadResponse: Encodable { let media: MessageMedia }
+    let transport = RecordingTransport([try encoded(UploadResponse(media: metadata), status: 201)])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"),
+                        token: "fixture-token", transport: transport)
+
+    await #expect(throws: ClientError.invalidMediaResponse) {
+        try await api.uploadMedia(clientMediaID: requestedID, data: Data([1, 2, 3]),
+                                  mediaType: "image/png")
+    }
 }
 
 @Test func missingTokenDoesNotReachTransport() async throws {
@@ -222,6 +321,60 @@ func invalidServiceAddressesFail(_ value: String) {
     state = try state.applying(page([event(3, "assistant.completed", EventPayload(message: completed, runID: runID))]))
     #expect(state.partialReplies.isEmpty)
     #expect(state.messages(in: conversationID) == [completed])
+}
+
+@Test func assistantMediaMergesByIdAndCompletionRemainsAuthoritative() throws {
+    let firstID = UUID(uuidString: "60000000-0000-4000-8000-000000000061")!
+    let secondID = UUID(uuidString: "60000000-0000-4000-8000-000000000062")!
+    let first = media(id: firstID, filename: "preview.png")
+    let second = media(id: secondID, filename: "final.png")
+    var state = ClientState()
+
+    state = try state.applying(page([
+        event(1, "assistant.media", EventPayload(media: first, runID: runID)),
+        event(2, "assistant.media", EventPayload(media: first, runID: runID)),
+        event(3, "assistant.media", EventPayload(media: second, runID: runID)),
+    ]))
+    #expect(state.partialReplies.first?.media == [first, second])
+    #expect(state.partialReplies.first?.content == "")
+
+    let completed = Message(id: UUID(), conversationID: conversationID, role: .assistant,
+                            content: "完成", createdAt: now, status: .completed,
+                            runID: runID, media: [second])
+    state = try state.applying(page([
+        event(4, "assistant.completed", EventPayload(message: completed, runID: runID)),
+    ]))
+    #expect(state.partialReplies.isEmpty)
+    #expect(state.messages(in: conversationID).first?.media == [second])
+}
+
+@Test func assistantMediaRequiresRunConversationAndMedia() throws {
+    let item = media()
+    #expect(throws: ClientError.invalidEvent("assistant.media")) {
+        try ClientState().applying(page([
+            event(1, "assistant.media", EventPayload(media: item)),
+        ]))
+    }
+    #expect(throws: ClientError.invalidEvent("assistant.media")) {
+        try ClientState().applying(page([
+            event(1, "assistant.media", EventPayload(runID: runID)),
+        ]))
+    }
+    let missingConversation = ServerEvent(seq: 1, type: "assistant.media", conversationID: nil,
+                                          payload: EventPayload(media: item, runID: runID), createdAt: now)
+    #expect(throws: ClientError.invalidEvent("assistant.media")) {
+        try ClientState().applying(EventsPage(events: [missingConversation], nextCursor: 1, hasMore: false))
+    }
+
+    var state = try ClientState().applying(page([
+        event(1, "assistant.media", EventPayload(media: item, runID: runID)),
+    ]))
+    let otherConversationID = UUID()
+    let mismatched = ServerEvent(seq: 2, type: "assistant.media", conversationID: otherConversationID,
+                                 payload: EventPayload(media: media(), runID: runID), createdAt: now)
+    #expect(throws: ClientError.invalidEvent("assistant.media")) {
+        state = try state.applying(EventsPage(events: [mismatched], nextCursor: 2, hasMore: false))
+    }
 }
 
 @Test func invalidPagesAreAtomicAndDoNotAdvance() throws {

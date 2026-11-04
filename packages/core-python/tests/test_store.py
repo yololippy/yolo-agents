@@ -1,15 +1,22 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime
+import base64
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from yolo_agents.store import Store
 from yolo_agents.agent_runtime import DemoRuntime
 from yolo_agents.service import ChatService
+
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class StoreTests(unittest.TestCase):
@@ -181,11 +188,66 @@ class StoreTests(unittest.TestCase):
 
     def test_output_shapes_are_json_serializable_and_timestamps_are_utc(self):
         message = self.store.append_message(self.cid, "assistant", "response", status="completed", run_id="run-1")
-        self.assertEqual(set(message), {"id", "conversation_id", "role", "content", "created_at", "status", "client_message_id", "run_id"})
+        self.assertEqual(set(message), {"id", "conversation_id", "role", "content", "created_at", "status", "client_message_id", "run_id", "media"})
+        self.assertEqual(message["media"], [])
         self.assertEqual(set(self.conversation), {"id", "title", "created_at", "updated_at", "archived", "model"})
         self.assertTrue(message["created_at"].endswith("Z"))
         self.assertEqual(datetime.fromisoformat(message["created_at"]).utcoffset().total_seconds(), 0)
         json.dumps([self.conversation, message, self.store.list_events()], allow_nan=False)
+
+    def test_media_is_idempotent_private_and_atomically_attached_to_message(self):
+        media_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        metadata, created = self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            filename="chart.png",
+        )
+        self.assertTrue(created)
+        self.assertEqual(metadata["width"], 1)
+        self.assertEqual(metadata["height"], 1)
+        self.assertNotIn("data", metadata)
+        self.assertNotIn("uploader_device_id", metadata)
+        self.assertEqual(self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            filename="chart.png",
+        ), (metadata, False))
+        message = self.store.append_message(
+            self.cid, "user", "", "image-message", media_ids=(media_id,),
+        )
+        self.assertEqual(message["media"], [metadata])
+        self.assertEqual(self.store.read_media(media_id), (metadata, PNG_1X1))
+        event = [item for item in self.store.list_events() if item["type"] == "message.created"][-1]
+        self.assertEqual(event["payload"]["message"]["media"], [metadata])
+        with self.assertRaises(ValueError):
+            self.store.append_message(self.cid, "user", "reuse", media_ids=(media_id,))
+
+    def test_runtime_media_attaches_only_to_completed_assistant_run(self):
+        media_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        metadata, _ = self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="runtime", run_id="run-image",
+            alt_text="one pixel",
+        )
+        message = self.store.finish_run(
+            self.cid, "run-image", "generated", media_ids=(media_id,),
+        )
+        self.assertEqual(message["media"], [metadata])
+        self.assertEqual(self.store.media_for_run("run-image"), [metadata])
+        with self.assertRaises(ValueError):
+            self.store.finish_run(self.cid, "failed-image", "failed", status="failed", media_ids=(media_id,))
+
+    def test_media_store_quota_does_not_reject_an_exact_idempotent_retry(self):
+        media_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        with patch("yolo_agents.store.MAX_MEDIA_STORE_BYTES", len(PNG_1X1)):
+            metadata, _ = self.store.create_media(
+                media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            )
+            self.assertEqual(self.store.create_media(
+                media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            ), (metadata, False))
+            with self.assertRaises(RuntimeError):
+                self.store.create_media(
+                    "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PNG_1X1, "image/png",
+                    source="upload", uploader_device_id="device-1",
+                )
 
     def test_future_schema_is_not_silently_downgraded(self):
         self.store.close()

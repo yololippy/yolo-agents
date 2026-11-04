@@ -36,6 +36,30 @@ private let conversationJSON = """
             ServiceStatusPresentation(title: "IBKR Paper", value: "未连接", tone: .negative,
                                       accessibilityIdentifier: "status.component.ibkr"))
 }
+
+@Test func conversationHomeKeepsPrimaryFirstAndSeparatesArchivedItems() {
+    let primaryID = UUID(uuidString: "10000000-0000-4000-8000-000000000010")!
+    let recentID = UUID(uuidString: "10000000-0000-4000-8000-000000000011")!
+    let archivedID = UUID(uuidString: "10000000-0000-4000-8000-000000000012")!
+    let now = Date()
+    var state = ClientState()
+    state.upsertConversation(Conversation(id: recentID, title: "最近任务", createdAt: now, updatedAt: now))
+    state.upsertConversation(Conversation(id: primaryID, title: "main", createdAt: now,
+                                          updatedAt: now.addingTimeInterval(-100)))
+    state.upsertConversation(Conversation(id: archivedID, title: "旧任务", createdAt: now,
+                                          updatedAt: now.addingTimeInterval(100), archived: true))
+    state.setPrimaryConversation(primaryID)
+
+    let visible = ConversationHomeSections(state: state, query: "", includeArchived: false)
+    #expect(visible.primary.map(\.id) == [primaryID])
+    #expect(visible.recent.map(\.id) == [recentID])
+    #expect(visible.archived.isEmpty)
+
+    let withArchive = ConversationHomeSections(state: state, query: "任务", includeArchived: true)
+    #expect(withArchive.primary.isEmpty)
+    #expect(withArchive.recent.map(\.id) == [recentID])
+    #expect(withArchive.archived.map(\.id) == [archivedID])
+}
 private final class UIStore: SecureStore, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]
@@ -55,6 +79,8 @@ private actor UIHTTP: HTTPTransport {
     private var missedEvent: ServerEvent?
     private var messageErrorCode: URLError.Code?
     private(set) var cursors: [Int64] = []
+    private(set) var uploadedMediaIDs: [String] = []
+    private(set) var submittedMediaIDs: [String] = []
     init(catalogError: Bool = false, rejectModel: Bool = false) {
         self.catalogError = catalogError; self.rejectModel = rejectModel
     }
@@ -70,16 +96,30 @@ private actor UIHTTP: HTTPTransport {
                 "{\"models\":[{\"id\":\"model-a\",\"display_name\":\"Model A\"},{\"id\":\"model-b\",\"display_name\":\"Model B\"}],\"default_model\":\"model-a\",\"auth\":{\"status\":\"authenticated\"}}"
         } else if path == "/v1/conversations" {
             json = "{\"conversations\":[\(conversationJSON)],\"primary_conversation_id\":\"\(testConversationID)\"}"
+        } else if request.httpMethod == "POST", path == "/v1/media" {
+            let id = request.value(forHTTPHeaderField: "X-Client-Media-ID") ?? ""
+            uploadedMediaIDs.append(id)
+            json = """
+            {"media":{"id":"\(id)","kind":"image","media_type":"image/jpeg","byte_count":\(request.httpBody?.count ?? 0),
+            "sha256":"\(String(repeating: "a", count: 64))","filename":"image.jpg","created_at":"2026-10-27T00:00:00Z"}}
+            """
         } else if request.httpMethod == "POST", path.hasSuffix("/messages") {
-            guard let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String],
-                  let clientID = body["client_message_id"], let content = body["content"] else {
+            guard let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any],
+                  let clientID = body["client_message_id"] as? String,
+                  let content = body["content"] as? String else {
                 throw URLError(.cannotParseResponse)
             }
+            let mediaIDs = body["media_ids"] as? [String] ?? []
+            submittedMediaIDs = mediaIDs
+            let mediaJSON = mediaIDs.map {
+                "{\"id\":\"\($0)\",\"kind\":\"image\",\"media_type\":\"image/jpeg\",\"byte_count\":4,\"sha256\":\"\(String(repeating: "a", count: 64))\",\"filename\":\"image.jpg\",\"created_at\":\"2026-10-27T00:00:00Z\"}"
+            }.joined(separator: ",")
             let encodedContent = String(decoding: try JSONEncoder().encode(content), as: UTF8.self)
             json = """
             {"message":{"id":"30000000-0000-4000-8000-000000000003","conversation_id":"\(testConversationID)",
             "role":"user","content":\(encodedContent),
-            "created_at":"2026-10-27T00:00:01Z","status":"completed","client_message_id":"\(clientID)","run_id":null},
+            "created_at":"2026-10-27T00:00:01Z","status":"completed","client_message_id":"\(clientID)","run_id":null,
+            "media":[\(mediaJSON)]},
             "run_id":"\(testRunID)","status":"accepted"}
             """
         } else if path.hasSuffix("/messages") {
@@ -201,6 +241,29 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     continuation.yield(try bytes(delta(2, "你")))
     try await waitUntil { model.partialReplies.first?.content == "你" }
     #expect(model.awaitingReplies.isEmpty)
+}
+
+@Test @MainActor func imageOnlyMessageUploadsBeforeSubmittingAndKeepsCanonicalMedia() async throws {
+    let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+    let streams = UIStreams([
+        SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks,
+                      cancel: { continuation.finish() }),
+    ])
+    let http = UIHTTP()
+    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = ChatModel(repository: repository, transport: http, streamTransport: streams)
+    defer { model.setActive(false) }
+    await model.start()
+    try await waitUntil { model.isOnline }
+    let mediaID = UUID(uuidString: "60000000-0000-4000-8000-000000000006")!
+    let image = DraftImage(id: mediaID, data: Data([0xff, 0xd8, 0xff, 0xd9]),
+                           mediaType: "image/jpeg", filename: "image.jpg")
+
+    #expect(await model.send("", images: [image]))
+    #expect(await http.uploadedMediaIDs == [mediaID.uuidString])
+    #expect(await http.submittedMediaIDs == [mediaID.uuidString])
+    #expect(model.messages.first?.content == "")
+    #expect(model.messages.first?.media.map(\.id) == [mediaID])
 }
 
 @Test @MainActor func catalogServiceErrorIsVisibleWithoutDisablingChat() async throws {

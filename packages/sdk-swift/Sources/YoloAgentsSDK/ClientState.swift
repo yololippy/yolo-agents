@@ -6,18 +6,61 @@ public struct OutgoingMessage: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let conversationID: UUID
     public let content: String
+    public let mediaIDs: [UUID]
     public let createdAt: Date
     public var status: OutgoingStatus
     public var runID: UUID?
     public var error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, conversationID, content, mediaIDs, createdAt, status, runID, error
+    }
+
+    public init(id: UUID, conversationID: UUID, content: String, mediaIDs: [UUID] = [],
+                createdAt: Date, status: OutgoingStatus, runID: UUID? = nil, error: String? = nil) {
+        self.id = id; self.conversationID = conversationID; self.content = content
+        self.mediaIDs = mediaIDs; self.createdAt = createdAt; self.status = status
+        self.runID = runID; self.error = error
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        conversationID = try values.decode(UUID.self, forKey: .conversationID)
+        content = try values.decode(String.self, forKey: .content)
+        mediaIDs = try values.decodeIfPresent([UUID].self, forKey: .mediaIDs) ?? []
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        status = try values.decode(OutgoingStatus.self, forKey: .status)
+        runID = try values.decodeIfPresent(UUID.self, forKey: .runID)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+    }
 }
 
 public struct PartialReply: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let conversationID: UUID
     public var content: String
+    public var media: [MessageMedia]
     public var error: ServiceError?
     public let createdAt: Date
+
+    enum CodingKeys: String, CodingKey { case id, conversationID, content, media, error, createdAt }
+
+    public init(id: UUID, conversationID: UUID, content: String,
+                media: [MessageMedia] = [], error: ServiceError? = nil, createdAt: Date) {
+        self.id = id; self.conversationID = conversationID; self.content = content
+        self.media = media; self.error = error; self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        conversationID = try values.decode(UUID.self, forKey: .conversationID)
+        content = try values.decode(String.self, forKey: .content)
+        media = try values.decodeIfPresent([MessageMedia].self, forKey: .media) ?? []
+        error = try values.decodeIfPresent(ServiceError.self, forKey: .error)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 public struct AwaitingReply: Equatable, Sendable, Identifiable {
@@ -116,12 +159,14 @@ public struct ClientState: Codable, Equatable, Sendable {
         }
     }
     @discardableResult
-    public mutating func enqueue(content: String, conversationID: UUID, id: UUID = UUID(), now: Date = Date()) -> UUID {
+    public mutating func enqueue(content: String, conversationID: UUID, media: [MessageMedia] = [],
+                                 id: UUID = UUID(), now: Date = Date()) -> UUID {
         guard !outgoing.contains(where: { $0.id == id }) else { return id }
         outgoing.append(OutgoingMessage(id: id, conversationID: conversationID, content: content,
+                                        mediaIDs: media.map(\.id),
                                         createdAt: now, status: .submitting))
         upsertMessage(Message(id: id, conversationID: conversationID, role: .user, content: content,
-                             createdAt: now, status: .pending, clientMessageID: id))
+                             createdAt: now, status: .pending, clientMessageID: id, media: media))
         return id
     }
     public mutating func markSubmitting(_ id: UUID) {
@@ -137,7 +182,8 @@ public struct ClientState: Codable, Equatable, Sendable {
               response.message.clientMessageID == clientMessageID,
               response.message.role == .user,
               let index = outgoing.firstIndex(where: { $0.id == clientMessageID }),
-              outgoing[index].conversationID == response.message.conversationID else {
+              outgoing[index].conversationID == response.message.conversationID,
+              outgoing[index].mediaIDs == response.message.media.map(\.id) else {
             throw ClientError.invalidEvent("message.accepted")
         }
         outgoing[index].status = .accepted; outgoing[index].error = nil
@@ -195,11 +241,12 @@ public struct ClientState: Codable, Equatable, Sendable {
                 }
             }
             upsertMessage(message)
-        case "assistant.delta", "assistant.failed":
+        case "assistant.delta", "assistant.media", "assistant.failed":
             guard let runID = event.payload.runID, let conversationID = event.conversationID else {
                 throw ClientError.invalidEvent(event.type)
             }
             if event.type == "assistant.delta", event.payload.delta == nil { throw ClientError.invalidEvent(event.type) }
+            if event.type == "assistant.media", event.payload.media == nil { throw ClientError.invalidEvent(event.type) }
             if event.type == "assistant.failed", event.payload.error == nil { throw ClientError.invalidEvent(event.type) }
             if event.type == "assistant.failed", let message = event.payload.message {
                 guard message.conversationID == conversationID, message.runID == runID,
@@ -218,6 +265,8 @@ public struct ClientState: Codable, Equatable, Sendable {
             if event.type == "assistant.failed" {
                 partial.error = event.payload.error
                 outgoing.removeAll { $0.runID == runID }
+            } else if event.type == "assistant.media", partial.error == nil, let media = event.payload.media {
+                if !partial.media.contains(where: { $0.id == media.id }) { partial.media.append(media) }
             } else if partial.error == nil { partial.content += event.payload.delta ?? "" }
             partialReplies.removeAll { $0.id == runID }
             partialReplies.append(partial)

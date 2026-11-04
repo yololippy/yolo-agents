@@ -1,6 +1,7 @@
 """Offline JSONL subprocess fixtures. Never starts real Codex or contacts a provider."""
 
 from contextlib import closing
+import base64
 import json
 import http.client
 import os
@@ -22,6 +23,11 @@ from yolo_agents.codex_runtime import (
 )
 from yolo_agents.service import ChatService
 from yolo_agents.store import Store
+
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 FAKE_SERVER = r'''
@@ -99,6 +105,14 @@ for line in sys.stdin:
             'sandbox':{'type':'workspaceWrite' if CONFIG.get('unsafe_sandbox') else 'readOnly','networkAccess':False}})
     elif method == 'turn/start':
         turns+=1; tid=params['threadId']; turn='fixture-turn-'+str(turns)
+        local_images=[]
+        for item in params.get('input',[]):
+            if item.get('type') != 'localImage': continue
+            path=Path(item.get('path',''))
+            local_images.append({'path':str(path),'exists':path.is_file(),
+                                 'size':path.stat().st_size if path.is_file() else None,
+                                 'prefix':path.read_bytes()[:8].hex() if path.is_file() else None})
+        if local_images: record({'local_images':local_images})
         result(identifier,{'turn':{'id':turn,'status':'inProgress','items':[]}})
         if CONFIG.get('crash_turn'):sys.exit(7)
         if CONFIG.get('approval_request'):
@@ -379,6 +393,29 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual(self.store.list_messages(self.cid), history)
         rebuilt = [e for e in self.store.list_events() if e["type"] == "agent.thread.rebuilt"]
         self.assertEqual(rebuilt[-1]["payload"]["reason"], "model_changed")
+
+    def test_image_only_input_uses_temporary_local_image_and_removes_it_after_turn(self):
+        media_id = str(uuid4())
+        self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="test-device",
+        )
+        self.store.append_message(
+            self.cid, "user", "", run_id=str(uuid4()), media_ids=(media_id,),
+        )
+        runtime = self.runtime()
+        self.assertEqual("".join(runtime.stream_reply(self.store.list_messages(self.cid), self.cid)),
+                         "Hello world")
+
+        turn = self.requests("turn/start")[-1]
+        self.assertEqual(turn["params"]["input"][0]["type"], "localImage")
+        self.assertEqual(turn["params"]["input"][0]["detail"], "auto")
+        records = [item for item in self.requests() if "local_images" in item]
+        self.assertEqual(len(records), 1)
+        observed = records[0]["local_images"][0]
+        self.assertTrue(observed["exists"])
+        self.assertEqual(observed["size"], len(PNG_1X1))
+        self.assertEqual(observed["prefix"], PNG_1X1[:8].hex())
+        self.assertFalse(Path(observed["path"]).exists())
 
     def test_trading_tool_schema_upgrade_rebuilds_an_existing_thread(self):
         runtime = self.runtime()

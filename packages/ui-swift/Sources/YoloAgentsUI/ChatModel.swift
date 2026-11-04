@@ -290,7 +290,7 @@ public final class ChatModel: ObservableObject {
     }
     private func observe(_ event: ServerEvent) {
         switch event.type {
-        case "assistant.delta", "assistant.completed":
+        case "assistant.delta", "assistant.media", "assistant.completed":
             modelConnectionState = .available
         case "assistant.failed":
             switch event.payload.error?.code {
@@ -417,16 +417,33 @@ public final class ChatModel: ObservableObject {
     }
     /// Persist the intent before the first request. A failed/unknown request can only
     /// be retried with the original UUID, content, and conversation.
-    public func send(_ content: String) async -> Bool {
+    public func send(_ content: String, images: [DraftImage] = []) async -> Bool {
         guard isOnline, !busy, let id = selectedID,
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty else { return false }
         guard state.outgoing.count < 20 else {
             errorMessage = "还有较多消息等待处理，请先核对发送状态。"; return false
         }
+        guard images.count <= MediaLimits.maximumItemsPerMessage else {
+            errorMessage = ClientError.tooManyMediaItems.localizedDescription; return false
+        }
+        guard images.reduce(0, { $0 + $1.data.count }) <= MediaLimits.maximumBytesPerMessage else {
+            errorMessage = ClientError.mediaMessageTooLarge.localizedDescription; return false
+        }
+        busy = true
+        defer { busy = false }
         do {
-            try APIClient.validateMessageContent(content)
+            guard let connection else { return false }
+            let api = client(for: connection)
+            var uploaded: [MessageMedia] = []
+            for image in images {
+                uploaded.append(try await api.uploadMedia(
+                    clientMediaID: image.id, data: image.data,
+                    mediaType: image.mediaType, filename: image.filename
+                ))
+            }
+            try APIClient.validateMessage(content: content, mediaIDs: uploaded.map(\.id))
             var next = state
-            let messageID = next.enqueue(content: content, conversationID: id)
+            let messageID = next.enqueue(content: content, conversationID: id, media: uploaded)
             try commit(next)
             await deliver(messageID)
             return true
@@ -446,7 +463,8 @@ public final class ChatModel: ObservableObject {
         let attempt = generation
         do {
             let response = try await client(for: connection)
-                .sendMessage(conversationID: outgoing.conversationID, clientMessageID: id, content: outgoing.content)
+                .sendMessage(conversationID: outgoing.conversationID, clientMessageID: id,
+                             content: outgoing.content, mediaIDs: outgoing.mediaIDs)
             try check(attempt)
             var next = state; try next.accept(response, clientMessageID: id); try commit(next)
         } catch {
@@ -455,6 +473,10 @@ public final class ChatModel: ObservableObject {
             do { try commit(next) } catch { errorMessage = error.localizedDescription }
             handle(error, attempt: attempt)
         }
+    }
+    public func mediaData(_ media: MessageMedia) async throws -> Data {
+        guard let connection else { throw ClientError.http(status: 401, code: "not_paired", message: "请先配对此设备。") }
+        return try await client(for: connection).mediaData(media)
     }
     private func handle(_ error: Error, attempt: UUID) {
         guard generation == attempt, !isCancellation(error) else { return }

@@ -17,6 +17,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Iterator
 
+from .media import RuntimeMedia
 from .store import Store
 
 
@@ -61,8 +62,10 @@ def _prompt(history: list[dict], conversation_id: str) -> tuple[str, str]:
         if not isinstance(message, dict) or message.get("conversation_id", conversation_id) != conversation_id:
             raise ValueError("History contains a message from another conversation")
     latest = history[-1]
-    if latest.get("role") != "user" or not isinstance(latest.get("content"), str) or not latest["content"].strip():
-        raise ValueError("The latest history message must be a non-empty user message")
+    media = latest.get("media", [])
+    if (latest.get("role") != "user" or not isinstance(latest.get("content"), str)
+            or not isinstance(media, list) or (not latest["content"].strip() and not media)):
+        raise ValueError("The latest history message must contain user text or media")
     if latest.get("status", "completed") in ("failed", "cancelled"):
         raise ValueError("Cannot run a failed or cancelled user message")
     identity = latest.get("id")
@@ -192,9 +195,10 @@ class DemoRuntime(_Runtime):
                 yield from _chunks(cached)
                 return
             turns = sum(message.get("role") == "user" for message in history)
+            display = prompt or f"[收到 {len(history[-1].get('media', []))} 张图片]"
             reply = (
                 "【演示模式｜未连接真实模型或 IBKR】\n"
-                f"已收到第 {turns} 轮消息：{prompt}\n"
+                f"已收到第 {turns} 轮消息：{display}\n"
                 "当前用于验证聊天、持久化和设备同步；不会读取账户、生成真实行情或提交订单。"
             )
             yield from _chunks(reply)
@@ -211,7 +215,8 @@ def _load_pydantic_backend() -> SimpleNamespace:
         for package, version in expected.items():
             if metadata.version(package) != version:
                 raise RuntimeConfigurationError("PydanticAI/Harness 版本与验证基线不一致，请按 packages/core-python/requirements.txt 配置。")
-        from pydantic_ai import Agent, Conversation, ConversationTypeAdapter
+        from pydantic_ai import Agent, BinaryContent, BinaryImage, Conversation, ConversationTypeAdapter
+        from pydantic_ai.exceptions import UserError
         from pydantic_ai.usage import UsageLimits
         from pydantic_ai_harness import ConversationSearch, Memory, StepPersistence, SummarizingCompaction
         from pydantic_ai_harness.compaction import ClearToolResults, TieredCompaction
@@ -223,7 +228,8 @@ def _load_pydantic_backend() -> SimpleNamespace:
             "真实模型模式缺少可用依赖。请在项目虚拟环境安装 packages/core-python/requirements.txt 中的 PydanticAI/Harness；演示模式无需这些依赖。"
         ) from None
     return SimpleNamespace(
-        Agent=Agent, Conversation=Conversation, ConversationTypeAdapter=ConversationTypeAdapter,
+        Agent=Agent, BinaryContent=BinaryContent, BinaryImage=BinaryImage, UserError=UserError,
+        Conversation=Conversation, ConversationTypeAdapter=ConversationTypeAdapter,
         UsageLimits=UsageLimits, ConversationSearch=ConversationSearch, Memory=Memory,
         StepPersistence=StepPersistence, SummarizingCompaction=SummarizingCompaction,
         ClearToolResults=ClearToolResults, TieredCompaction=TieredCompaction,
@@ -239,7 +245,7 @@ class _AgentDeps:
 
 
 class PydanticRuntime(_Runtime):
-    """Text-only agent: official memory/search/compaction, no execution/approval tools.
+    """Multimodal agent: official memory/search/compaction, no execution/approval tools.
 
     Consume and close stream_reply on the same worker thread. One runtime instance
     per local service serializes a conversation; it is not a multi-process lease.
@@ -297,7 +303,10 @@ class PydanticRuntime(_Runtime):
                 steps = backend.SqliteStepStore(database=str(directory / "agent.sqlite3"))
                 notes = backend.SqliteMemoryStore(database=str(directory / "memory.sqlite3"))
                 self._agents[key] = backend.Agent(
-                    self._model_instance(selected), deps_type=_AgentDeps, output_type=str, retries=self._retry_policy(),
+                    self._model_instance(selected), deps_type=_AgentDeps,
+                    output_type=([str, backend.BinaryImage]
+                                 if self._supports_image_output(selected) else str),
+                    retries=self._retry_policy(),
                     instructions=(
                         "你是个人 AI 助手，当前只开放对话、记忆、历史检索"
                         + ("、IBKR Paper 只读查询和非执行 Paper 草稿创建。" if self.agent_id == "trading-agent" else "。")
@@ -348,6 +357,11 @@ class PydanticRuntime(_Runtime):
     def _model_instance(self, model_name):
         return model_name
 
+    def _supports_image_output(self, model_name):
+        # Generic providers are text-output by default. Provider adapters may
+        # opt in only when their pinned model profile advertises image output.
+        return False
+
     def _retry_policy(self):
         return 0
 
@@ -371,6 +385,22 @@ class PydanticRuntime(_Runtime):
 
     def _after_model_saved(self, conversation_id, user_id, message_id):
         pass
+
+    def _user_prompt(self, prompt: str, message: dict) -> Any:
+        media = message.get("media", [])
+        if not media:
+            return prompt
+        content: list[Any] = [prompt] if prompt.strip() else []
+        for item in media:
+            if not isinstance(item, dict) or item.get("kind") != "image":
+                raise RuntimeStateError("消息包含无法识别的媒体记录。")
+            stored, data = self.store.read_media(item.get("id"))
+            if stored != item:
+                raise RuntimeStateError("消息媒体元数据与存储不一致。")
+            content.append(self._backend.BinaryContent(
+                data=data, media_type=stored["media_type"], identifier=stored["id"],
+            ))
+        return content
 
     def close(self) -> None:
         super().close()
@@ -423,7 +453,7 @@ class PydanticRuntime(_Runtime):
             check_text(reply)
         return reply
 
-    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user", *, runtime_tools=None) -> Iterator[str]:
+    def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user", *, runtime_tools=None) -> Iterator[str | RuntimeMedia]:
         from .guardrails import check_text, check_value, CredentialStreamFilter, is_guardrail_error
         from .runtime_tools import PaperOrderStreamFilter, finish_trading_reply
         prompt, message_id = _prompt(history, conversation_id)
@@ -441,7 +471,11 @@ class PydanticRuntime(_Runtime):
             previous = None
             if state is not None:
                 previous = self._conversation_from_state(state, conversation_id)
-                check_value(state['conversation'])
+                # Inspect typed messages so binary image bytes remain bytes rather
+                # than their JSON base64 representation. Usage counters and IDs do
+                # not carry model-visible content; deferred requests were rejected
+                # by _conversation_from_state above.
+                check_value(previous.messages)
             elif len(history) != 1:
                 raise RuntimeStateError("此会话已有产品历史但缺少官方 Agent 状态，请新建真实模型会话。")
             try:
@@ -450,6 +484,7 @@ class PydanticRuntime(_Runtime):
                 prompt, previous = self._prepare_run(history, state, conversation_id, prompt, previous, selected_model)
                 check_text(prompt)
                 agent = self._agent(namespace, selected_model)
+                model_prompt = self._user_prompt(prompt, history[-1])
             except (RuntimeConfigurationError, RuntimeStateError, RuntimeGuardrailError):
                 raise
             except Exception:
@@ -476,22 +511,33 @@ class PydanticRuntime(_Runtime):
             order_filter = PaperOrderStreamFilter() if self.agent_id == "trading-agent" else None
             self._before_model_request(conversation_id, user_id, message_id)
             try:
-                with agent.run_stream_sync(prompt, **kwargs) as response:
-                    deltas = response.stream_text(delta=True, debounce_by=0.05)
+                with agent.run_stream_sync(model_prompt, **kwargs) as response:
+                    outputs = None
+                    image_output = None
+                    streamed_text = ""
                     try:
-                        for delta in deltas:
-                            if not isinstance(delta, str):
-                                raise TypeError("Expected a text delta")
-                            if delta:
-                                pieces.append(delta)
-                                safe = output_filter.feed(delta)
-                                if self.agent_id == "trading-agent":
-                                    for fragment in safe:
-                                        for filtered in order_filter.feed(fragment):
-                                            safe_pieces.append(filtered)
-                                            yield filtered
-                                else:
-                                    yield from safe
+                        outputs = response.stream_output(debounce_by=0.05)
+                        for current in outputs:
+                            if isinstance(current, str):
+                                if image_output is not None or not current.startswith(streamed_text):
+                                    raise RuntimeError("Streamed text output is not a cumulative prefix")
+                                delta, streamed_text = current[len(streamed_text):], current
+                                if delta:
+                                    pieces.append(delta)
+                                    safe = output_filter.feed(delta)
+                                    if self.agent_id == "trading-agent":
+                                        for fragment in safe:
+                                            for filtered in order_filter.feed(fragment):
+                                                safe_pieces.append(filtered)
+                                                yield filtered
+                                    else:
+                                        yield from safe
+                            elif isinstance(current, self._backend.BinaryImage):
+                                if streamed_text or image_output is not None:
+                                    raise RuntimeError("Image output cannot be mixed with text output")
+                                image_output = current
+                            else:
+                                raise TypeError("Expected text or image output")
                     except GeneratorExit:
                         # The pinned SDK's async lifecycle cannot safely receive
                         # GeneratorExit from a synchronous consumer. Close the pump
@@ -500,13 +546,17 @@ class PydanticRuntime(_Runtime):
                     finally:
                         # Close the sync pump before exiting its owning run context,
                         # including when a consumer closes this outer generator.
-                        close_stream = getattr(deltas, "close", None)
+                        close_stream = getattr(outputs, "close", None)
                         if close_stream is not None:
                             close_stream()
                     # Ensure final validation completes before the new state is accepted.
                     output = response.get_output()
-                    if output != "".join(pieces):
-                        raise RuntimeError("Final output disagrees with streamed text")
+                    if isinstance(output, str):
+                        if image_output is not None or output != "".join(pieces):
+                            raise RuntimeError("Final output disagrees with streamed text")
+                    elif (not isinstance(output, self._backend.BinaryImage) or pieces
+                          or image_output is None or output != image_output):
+                        raise RuntimeError("Final output has an unsupported media shape")
                     tail = output_filter.finish()
                     # Sync streaming exposes these public fields rather than result.conversation.
                     # This runtime has text output and no deferred tools, so pending requests are None.
@@ -531,7 +581,11 @@ class PydanticRuntime(_Runtime):
                 raise RuntimeExecutionError(
                     f"真实模型运行失败（{type(exc).__name__}），本次未自动重试或切换到演示模式。"
                 ) from None
-            if self.agent_id == "trading-agent":
+            if isinstance(output, self._backend.BinaryImage):
+                yield RuntimeMedia(data=output.data, media_type=output.media_type)
+                final_output = "已生成图片。"
+                yield final_output
+            elif self.agent_id == "trading-agent":
                 for filtered in order_filter.feed(tail):
                     safe_pieces.append(filtered)
                     yield filtered

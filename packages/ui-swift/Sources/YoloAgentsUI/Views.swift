@@ -37,12 +37,15 @@ public struct YoloAgentsRootView: View {
     private let features: [ChatFeature]
     private let messageAccessory: ChatMessageAccessory?
     private let composerConfiguration: AgentComposerConfiguration
+    private let shellConfiguration: AgentShellConfiguration
     public init(identity: AgentAppIdentity, features: [ChatFeature] = [],
                 messageAccessory: ChatMessageAccessory? = nil,
-                composerConfiguration: AgentComposerConfiguration = .standard) {
+                composerConfiguration: AgentComposerConfiguration = .standard,
+                shellConfiguration: AgentShellConfiguration = .conversationFirst) {
         self.features = features
         self.messageAccessory = messageAccessory
         self.composerConfiguration = composerConfiguration
+        self.shellConfiguration = shellConfiguration
         _model = StateObject(wrappedValue: ChatModel(identity: identity))
     }
     public var body: some View {
@@ -53,7 +56,8 @@ public struct YoloAgentsRootView: View {
                 PairingView(model: model, isSettings: false)
             } else {
                 ChatShell(model: model, features: features, messageAccessory: messageAccessory,
-                          composerConfiguration: composerConfiguration)
+                          composerConfiguration: composerConfiguration,
+                          configuration: shellConfiguration)
             }
         }
         .task { await model.start() }
@@ -199,6 +203,7 @@ private struct ChatShell: View {
     let features: [ChatFeature]
     let messageAccessory: ChatMessageAccessory?
     let composerConfiguration: AgentComposerConfiguration
+    let configuration: AgentShellConfiguration
     @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
@@ -206,13 +211,189 @@ private struct ChatShell: View {
     @ViewState private var selectedFeature: ChatFeature?
     @ViewState private var renameRequest: ConversationRenameRequest? = nil
     @ViewState private var drafts = ComposerDrafts()
+    @ViewState private var compactPath: [UUID] = []
+
+    private var sections: ConversationHomeSections {
+        ConversationHomeSections(state: model.state, query: query, includeArchived: includeArchived)
+    }
+
     private var conversations: [Conversation] {
-        model.state.orderedConversations.filter {
-            (includeArchived || !$0.archived) &&
-            (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query))
+        sections.primary + sections.recent + sections.archived
+    }
+
+    var body: some View {
+        Group {
+            #if os(iOS)
+            compactNavigation
+            #else
+            splitNavigation
+            #endif
+        }
+        .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
+        .sheet(item: $selectedFeature) { feature in
+            if let connection = model.connection { feature.content(connection) }
+        }
+        .sheet(isPresented: $showAccount) {
+            if let connection = model.connection {
+                ChatGPTAccountView(connection: connection, identity: model.identity) {
+                    Task { await model.refreshAccountContext() }
+                }
+            }
+        }
+        .sheet(item: $renameRequest) { request in
+            ConversationRenameView(request: request) { title in
+                renameRequest = nil
+                Task { await model.updateConversation(request.conversation, title: title) }
+            } onCancel: {
+                renameRequest = nil
+            }
         }
     }
-    var body: some View {
+
+    #if os(iOS)
+    private var compactNavigation: some View {
+        NavigationStack(path: $compactPath) {
+            conversationHome
+                .navigationDestination(for: UUID.self) { id in
+                    ChatDetail(model: model, drafts: $drafts,
+                               openSettings: { showSettings = true },
+                               openAccount: { showAccount = true }, features: features,
+                               messageAccessory: messageAccessory,
+                               composerConfiguration: composerConfiguration,
+                               openFeature: { selectedFeature = $0 },
+                               renameConversation: beginRename,
+                               conversationArchived: { compactPath.removeAll() })
+                        .onAppear { model.selectedID = id }
+                }
+        }
+    }
+
+    private var conversationHome: some View {
+        List {
+            if !sections.primary.isEmpty {
+                Section(configuration.primarySectionTitle) {
+                    ForEach(sections.primary) { conversationRow($0) }
+                }
+            }
+            if !sections.recent.isEmpty {
+                Section(configuration.recentSectionTitle) {
+                    ForEach(sections.recent) { conversationRow($0) }
+                }
+            }
+            if !sections.archived.isEmpty {
+                Section(configuration.archivedSectionTitle) {
+                    ForEach(sections.archived) { conversationRow($0) }
+                }
+            }
+            if conversations.isEmpty {
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ContentUnavailableView {
+                        Label("还没有会话", systemImage: "bubble.left.and.bubble.right")
+                    } description: {
+                        Text(model.isOnline ? "创建一个新会话开始聊天。" : "连接恢复后即可创建会话。")
+                    }
+                    .listRowBackground(Color.clear)
+                } else {
+                    ContentUnavailableView.search(text: query)
+                        .listRowBackground(Color.clear)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(configuration.conversationsTitle)
+        .searchable(text: $query, prompt: configuration.searchPrompt)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { createAndOpenConversation() } label: {
+                    Label("新会话", systemImage: "square.and.pencil")
+                }
+                .disabled(!model.isOnline || model.busy)
+                .accessibilityIdentifier("chat.new-conversation")
+                homeMenu
+            }
+        }
+    }
+
+    private func conversationRow(_ conversation: Conversation) -> some View {
+        Button {
+            model.selectedID = conversation.id
+            compactPath.append(conversation.id)
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(conversation.title).font(.body.weight(.medium)).lineLimit(1)
+                        if model.isPrimaryConversation(conversation) {
+                            Image(systemName: "pin.fill")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .accessibilityLabel("主会话")
+                        }
+                    }
+                    Text(conversation.updatedAt, style: .date)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu { conversationActions(conversation) }
+    }
+
+    private var homeMenu: some View {
+        Menu {
+            ForEach(features) { feature in
+                Button { selectedFeature = feature } label: {
+                    Label(feature.title, systemImage: feature.systemImage)
+                }
+            }
+            if !features.isEmpty { Divider() }
+            Button { showAccount = true } label: {
+                Label("ChatGPT 账号", systemImage: "person.crop.circle")
+            }
+            Button { showSettings = true } label: {
+                Label("连接设置", systemImage: "gearshape")
+            }
+            Divider()
+            Button { includeArchived.toggle() } label: {
+                Label(includeArchived ? "隐藏已归档会话" : "显示已归档会话",
+                      systemImage: includeArchived ? "archivebox.fill" : "archivebox")
+            }
+        } label: {
+            Label("更多", systemImage: "ellipsis")
+        }
+        .accessibilityIdentifier("chat.home-menu")
+    }
+
+    @ViewBuilder
+    private func conversationActions(_ conversation: Conversation) -> some View {
+        Button { copyConversationID(conversation.id) } label: {
+            Label("复制会话 ID", systemImage: "doc.on.doc")
+        }
+        Button { beginRename(conversation) } label: {
+            Label("重命名", systemImage: "pencil")
+        }
+        .disabled(!model.isOnline)
+        Button {
+            Task { await model.updateConversation(conversation, archived: !conversation.archived) }
+        } label: {
+            Label(conversation.archived ? "取消归档" : "归档",
+                  systemImage: conversation.archived ? "archivebox.fill" : "archivebox")
+        }
+        .disabled(!model.isOnline || model.isPrimaryConversation(conversation))
+    }
+
+    private func createAndOpenConversation() {
+        Task {
+            await model.createConversation()
+            guard let id = model.selectedID else { return }
+            compactPath.append(id)
+        }
+    }
+    #else
+    private var splitNavigation: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 List(selection: $model.selectedID) {
@@ -237,7 +418,7 @@ private struct ChatShell: View {
                             Button { copyConversationID(conversation.id) } label: {
                                 Label("复制会话 ID", systemImage: "doc.on.doc")
                             }
-                            Button("重命名") { renameRequest = ConversationRenameRequest(conversation) }
+                            Button("重命名") { beginRename(conversation) }
                                 .disabled(!model.isOnline)
                             Button(conversation.archived ? "取消归档" : "归档") {
                                 Task { await model.updateConversation(conversation, archived: !conversation.archived) }
@@ -268,27 +449,14 @@ private struct ChatShell: View {
             ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true },
                        openAccount: { showAccount = true }, features: features,
                        messageAccessory: messageAccessory, composerConfiguration: composerConfiguration,
-                       openFeature: { selectedFeature = $0 })
+                       openFeature: { selectedFeature = $0 }, renameConversation: beginRename,
+                       conversationArchived: {})
         }
-        .sheet(isPresented: $showSettings) { PairingView(model: model, isSettings: true) }
-        .sheet(item: $selectedFeature) { feature in
-            if let connection = model.connection { feature.content(connection) }
-        }
-        .sheet(isPresented: $showAccount) {
-            if let connection = model.connection {
-                ChatGPTAccountView(connection: connection, identity: model.identity) {
-                    Task { await model.refreshAccountContext() }
-                }
-            }
-        }
-        .sheet(item: $renameRequest) { request in
-            ConversationRenameView(request: request) { title in
-                renameRequest = nil
-                Task { await model.updateConversation(request.conversation, title: title) }
-            } onCancel: {
-                renameRequest = nil
-            }
-        }
+    }
+    #endif
+
+    private func beginRename(_ conversation: Conversation) {
+        renameRequest = ConversationRenameRequest(conversation)
     }
 }
 
@@ -344,12 +512,15 @@ private struct ConversationRenameView: View {
 private struct ChatDetail: View {
     @ObservedObject var model: ChatModel
     @Binding var drafts: ComposerDrafts
+    @Environment(\.dismiss) private var dismiss
     let openSettings: () -> Void
     let openAccount: () -> Void
     let features: [ChatFeature]
     let messageAccessory: ChatMessageAccessory?
     let composerConfiguration: AgentComposerConfiguration
     let openFeature: (ChatFeature) -> Void
+    let renameConversation: (Conversation) -> Void
+    let conversationArchived: () -> Void
     @ViewState private var composerDismissRequest = 0
     private var composerAvailability: ComposerAvailability {
         ComposerAvailability(hasConversation: model.selectedID != nil,
@@ -359,7 +530,11 @@ private struct ChatDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            #if os(iOS)
+            if !compactStatusProblems.isEmpty { compactStatusBanner }
+            #else
             connectionBanner
+            #endif
             if model.selectedID == nil {
                 ContentUnavailableView {
                     Label("与你的助手聊聊", systemImage: "bubble.left.and.bubble.right")
@@ -370,8 +545,10 @@ private struct ChatDetail: View {
                         .disabled(!model.isOnline || model.busy)
                 }
             } else {
+                #if os(macOS)
                 modelSelector
                 Divider()
+                #endif
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
@@ -381,6 +558,9 @@ private struct ChatDetail: View {
                             ForEach(model.partialReplies) { reply in
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("助手").font(.caption.bold()).foregroundStyle(.secondary)
+                                    if !reply.media.isEmpty {
+                                        MessageMediaGallery(media: reply.media, model: model)
+                                    }
                                     if !reply.content.isEmpty {
                                         AgentStreamingMarkdownView(reply.content)
                                     }
@@ -412,10 +592,10 @@ private struct ChatDetail: View {
         .navigationTitle(model.selectedConversation?.title ?? model.appName)
         .toolbar {
             #if os(iOS)
-            ToolbarItem(placement: .topBarLeading) { newConversationButton }
+            ToolbarItem(placement: .principal) { compactModelPicker }
+            ToolbarItem(placement: .topBarTrailing) { compactConversationMenu }
             #else
             ToolbarItem(placement: .navigation) { newConversationButton }
-            #endif
             ToolbarItemGroup(placement: .primaryAction) {
                 ForEach(features) { feature in
                     Button { openFeature(feature) } label: { Label(feature.title, systemImage: feature.systemImage) }
@@ -424,13 +604,20 @@ private struct ChatDetail: View {
                 Button(action: openAccount) { Label("ChatGPT 账号", systemImage: "person.crop.circle") }
                 Button(action: openSettings) { Label("连接设置", systemImage: "gearshape") }
             }
+            #endif
         }
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 if let id = model.selectedID {
                     Divider()
                     ChatComposer(conversationID: id, text: Binding(
                         get: { drafts.text(for: id) }, set: { drafts.set($0, for: id) }),
+                        images: Binding(
+                            get: { drafts.images(for: id) },
+                            set: { drafts.setImages($0, for: id) }),
                         isEditable: composerAvailability.canEdit,
                         canSend: composerAvailability.canSend,
                         online: model.isOnline, configuration: composerConfiguration,
@@ -452,10 +639,119 @@ private struct ChatDetail: View {
         guard let submission = drafts.submission(for: id) else { return }
         Task {
             guard model.selectedID == id else { return }
-            let accepted = await model.send(submission.content)
+            let accepted = await model.send(submission.content, images: submission.images)
             drafts.finish(submission, accepted: accepted)
         }
     }
+    #if os(iOS)
+    private var compactModelPicker: some View {
+        Menu {
+            Button {
+                Task { await model.changeModel(.serverDefault) }
+            } label: {
+                if model.selectedConversation?.model == nil {
+                    Label("使用服务默认模型", systemImage: "checkmark")
+                } else {
+                    Text("使用服务默认模型")
+                }
+            }
+            ForEach(model.modelCatalog?.models ?? []) { option in
+                Button {
+                    Task { await model.changeModel(.model(option.id)) }
+                } label: {
+                    if model.selectedConversation?.model == option.id {
+                        Label(option.name, systemImage: "checkmark")
+                    } else {
+                        Text(option.name)
+                    }
+                }
+            }
+            Divider()
+            Button("刷新模型列表") { Task { await model.refreshModels() } }
+                .disabled(model.modelCatalogLoading)
+        } label: {
+            VStack(spacing: 1) {
+                Text(model.selectedConversation?.title ?? model.appName)
+                    .font(.headline).lineLimit(1)
+                HStack(spacing: 3) {
+                    Text(model.selectedModelName)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 210)
+        }
+        .accessibilityLabel("会话与模型")
+        .accessibilityIdentifier("chat.model-picker")
+        .disabled(!model.isOnline || model.busy || model.selectedConversation?.archived == true)
+    }
+
+    private var compactConversationMenu: some View {
+        Menu {
+            if let conversation = model.selectedConversation {
+                Button { renameConversation(conversation) } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+                .disabled(!model.isOnline)
+                Button { copyConversationID(conversation.id) } label: {
+                    Label("复制会话 ID", systemImage: "doc.on.doc")
+                }
+                Button { updateArchiveState(conversation) } label: {
+                    Label(conversation.archived ? "取消归档" : "归档",
+                          systemImage: conversation.archived ? "archivebox.fill" : "archivebox")
+                }
+                .disabled(!model.isOnline || model.isPrimaryConversation(conversation))
+            }
+        } label: {
+            Label("会话操作", systemImage: "ellipsis")
+        }
+        .accessibilityIdentifier("chat.conversation-menu")
+    }
+
+    private func updateArchiveState(_ conversation: Conversation) {
+        let shouldArchive = !conversation.archived
+        Task {
+            await model.updateConversation(conversation, archived: shouldArchive)
+            guard shouldArchive,
+                  model.state.conversations.first(where: { $0.id == conversation.id })?.archived == true else { return }
+            conversationArchived()
+            dismiss()
+        }
+    }
+
+    private var compactStatusProblems: [ServiceStatusPresentation] {
+        var problems: [ServiceStatusPresentation] = []
+        if model.connectionState != .online {
+            problems.append(ServiceStatusPresentation(model.connectionState))
+        }
+        if model.modelConnectionState != .available && model.modelConnectionState != .disabled {
+            problems.append(ServiceStatusPresentation(model.modelConnectionState))
+        }
+        problems.append(contentsOf: model.serviceComponents.filter { $0.state != "ready" }.map(ServiceStatusPresentation.init))
+        return problems
+    }
+
+    private var compactStatusBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(compactStatusProblems.enumerated()), id: \.offset) { _, problem in
+                    Text("\(problem.title)：\(problem.value)").font(.caption).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            if model.connectionState == .authorizationRequired {
+                Button("重新配对", action: openSettings).font(.caption)
+            } else if !model.isOnline {
+                Button("重连") { model.reconnect() }.font(.caption)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.orange.opacity(0.1))
+        .accessibilityIdentifier("chat.status-problems")
+    }
+    #endif
+
     private var modelSelector: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -669,12 +965,17 @@ private struct MessageBubble: View {
                     Spacer()
                     Text(message.createdAt, style: .time)
                 }.font(.caption).foregroundStyle(.secondary)
-                if message.role == .assistant {
-                    AgentMarkdownView(message.content)
-                } else {
-                    Text(message.content)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if !message.media.isEmpty {
+                    MessageMediaGallery(media: message.media, model: model)
+                }
+                if !message.content.isEmpty {
+                    if message.role == .assistant {
+                        AgentMarkdownView(message.content)
+                    } else {
+                        Text(message.content)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 if let accessory, let connection = model.connection {
                     accessory.content(message, connection)

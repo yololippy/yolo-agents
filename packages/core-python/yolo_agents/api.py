@@ -1,6 +1,7 @@
 """Versioned HTTP/SSE API using only Python's standard library."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from email.message import Message
 import json
 import socket
 import time
@@ -10,6 +11,10 @@ from uuid import UUID
 from .auth import AuthError
 from .agent_runtime import RuntimeConfigurationError, RuntimeExecutionError
 from .codex_runtime import CodexBusyError
+from .media import (
+    ALLOWED_IMAGE_TYPES, MAX_IMAGE_BYTES, MediaStorageFullError, MediaValidationError,
+    validate_media_ids,
+)
 
 
 class APIError(Exception):
@@ -65,6 +70,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_media(self, metadata, data):
+        self.send_response(200)
+        self.send_header("Content-Type", metadata["media_type"])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Media-SHA256", metadata["sha256"])
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_media_upload(self):
+        if self.headers.get("Transfer-Encoding"):
+            raise APIError(400, "invalid_body", "不支持此请求体编码。")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal():
+            raise APIError(400, "invalid_body", "图片请求体长度无效。")
+        size = int(lengths[0])
+        if not 0 < size <= MAX_IMAGE_BYTES:
+            raise APIError(413, "media_too_large", "单张图片不能超过 10 MiB。")
+        raw_type = self.headers.get("Content-Type", "")
+        if ";" in raw_type:
+            raise APIError(415, "unsupported_media_type", "图片 Content-Type 不支持参数。")
+        media_type = raw_type.strip().lower()
+        if media_type not in ALLOWED_IMAGE_TYPES:
+            raise APIError(415, "unsupported_media_type", "只接受 JPEG、PNG 或 WebP 图片。")
+        media_id = identifier(self.headers.get("X-Client-Media-ID"))
+        filename = None
+        disposition = self.headers.get("Content-Disposition")
+        if disposition:
+            parsed = Message()
+            parsed["Content-Disposition"] = disposition
+            if parsed.get_content_disposition() != "attachment":
+                raise APIError(400, "invalid_media", "Content-Disposition 必须是 attachment。")
+            filename = parsed.get_filename()
+        data = self.rfile.read(size)
+        if len(data) != size:
+            raise APIError(400, "invalid_body", "图片请求体不完整。")
+        return media_id, data, media_type, filename
+
     def read_json(self):
         if self.headers.get("Transfer-Encoding"):
             raise APIError(400, "invalid_body", "不支持此请求体编码。")
@@ -107,6 +151,12 @@ class Handler(BaseHTTPRequestHandler):
         except (AuthError, APIError) as exc:
             self.close_connection = True
             self.send_json(exc.status, {"error": {"code": exc.code, "message": exc.message}})
+        except MediaValidationError:
+            self.close_connection = True
+            self.send_json(400, {"error": {"code": "invalid_media", "message": "图片格式或尺寸不受支持。"}})
+        except MediaStorageFullError:
+            self.close_connection = True
+            self.send_json(507, {"error": {"code": "media_storage_full", "message": "图片存储空间已满。"}})
         except LookupError:
             self.close_connection = True
             self.send_json(404, {"error": {"code": "not_found", "message": "记录不存在。"}})
@@ -184,6 +234,20 @@ class Handler(BaseHTTPRequestHandler):
                           'can_manage': True, 'app_name': app.app_name, 'agent_id': app.agent_id}
             self.send_json(200, result if action == "login" else {"account": result})
             return
+        if path == "/v1/media" and method == "POST":
+            media_id, data, media_type, filename = self.read_media_upload()
+            caller = self.reauthorize()
+            media, created = app.store.create_media(
+                media_id, data, media_type, source="upload",
+                uploader_device_id=caller["id"], filename=filename,
+            )
+            self.send_json(201 if created else 200, {"media": media})
+            return
+        if path.startswith("/v1/media/") and method == "GET" and path.count("/") == 3:
+            media_id = identifier(path.split("/")[-1])
+            media, data = app.store.read_media(media_id)
+            self.send_media(media, data)
+            return
         if self.server.extension is not None and self.server.extension.route(self, method, path, query, caller):
             return
         if path == "/v1/models" and method == "GET":
@@ -247,12 +311,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if method == "POST":
                     data = self.read_json()
-                    if set(data) - {"content", "client_message_id"}:
-                        raise APIError(400, "invalid_input", "客户端只能提交消息文本和幂等标识。")
-                    content = text_field(data, "content", 16000)
+                    if set(data) - {"content", "client_message_id", "media_ids"}:
+                        raise APIError(400, "invalid_input", "客户端只能提交消息文本、图片和幂等标识。")
+                    content = data.get("content", "")
+                    if not isinstance(content, str) or len(content) > 16000:
+                        raise APIError(400, "invalid_input", "content 必须是长度不超过 16000 的文本。")
+                    content = content.strip()
+                    try:
+                        media_ids = validate_media_ids(data.get("media_ids", []))
+                    except MediaValidationError:
+                        raise APIError(400, "invalid_input", "media_ids 必须是不重复且最多四个 UUID。") from None
+                    if not content and not media_ids:
+                        raise APIError(400, "invalid_input", "消息必须包含文本或图片。")
                     client_message_id = identifier(data.get("client_message_id"))
                     self.reauthorize()
-                    self.send_json(202, app.send(conversation_id, content, client_message_id, caller=caller))
+                    self.send_json(202, app.send(
+                        conversation_id, content, client_message_id, caller=caller, media_ids=media_ids,
+                    ))
                     return
         if path == "/v1/events" and method == "GET":
             try:

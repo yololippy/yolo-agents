@@ -7,7 +7,7 @@ from enum import Enum
 
 import regex
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
-from pydantic_ai.messages import ToolReturn
+from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai_harness import GuardrailResult, InputGuardrail, OutputGuardrail, ToolGuardrail
 from pydantic_ai_harness.guardrails import InputBlocked, ToolBlocked, GuardrailError
 from pydantic_ai_harness.guardrails.detectors import DEFAULT_SECRET_PATTERNS, secret_data, for_tool_result_text
@@ -49,9 +49,9 @@ def check_value(value):
     for text in _strings(value):
         check_text(text)
 
-def _input(text):
+def _input(value):
     try:
-        check_text(text)
+        check_value(value)
     except RuntimeGuardrailError:
         raise InputBlocked(_SAFE) from None
     return True
@@ -74,7 +74,10 @@ def _tool_result(info):
 
 def _output(value):
     try:
-        check_text(value)
+        if isinstance(value, BinaryImage):
+            check_value(value)
+        else:
+            check_text(value)
     except RuntimeGuardrailError:
         return GuardrailResult.block(_SAFE)
     return GuardrailResult.allow()

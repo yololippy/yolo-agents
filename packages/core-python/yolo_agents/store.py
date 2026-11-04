@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 import threading
 from typing import Any, Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+from .media import (
+    MAX_IMAGES_PER_MESSAGE, MAX_MEDIA_STORE_BYTES, MAX_MESSAGE_IMAGE_BYTES,
+    MediaStorageFullError, inspect_image, public_media, validate_filename,
+)
 
 UNSET = object()
 
@@ -66,7 +72,7 @@ class Store:
     def _initialize(self) -> None:
         with self._transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError("Unsupported product database schema; do not downgrade it")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -107,6 +113,21 @@ class Store:
                     created_at TEXT NOT NULL
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS media (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind = 'image'),
+                    media_type TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK (byte_count > 0),
+                    sha256 TEXT NOT NULL, width INTEGER NOT NULL CHECK (width > 0),
+                    height INTEGER NOT NULL CHECK (height > 0), filename TEXT, alt_text TEXT,
+                    created_at TEXT NOT NULL, source TEXT NOT NULL CHECK (source IN ('upload', 'runtime')),
+                    uploader_device_id TEXT, run_id TEXT,
+                    message_id TEXT REFERENCES messages(id), position INTEGER,
+                    data BLOB NOT NULL,
+                    UNIQUE (message_id, position),
+                    CHECK ((message_id IS NULL AND position IS NULL) OR
+                           (message_id IS NOT NULL AND position IS NOT NULL AND position >= 0))
+                )
+            """)
             db.execute("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, seq)")
             db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS assistant_final_run
@@ -115,7 +136,9 @@ class Store:
                 AND status IN ('completed', 'failed')
             """)
             db.execute("CREATE INDEX IF NOT EXISTS events_conversation ON events(conversation_id, seq)")
-            db.execute("PRAGMA user_version = 3")
+            db.execute("CREATE INDEX IF NOT EXISTS media_message ON media(message_id, position)")
+            db.execute("CREATE INDEX IF NOT EXISTS media_run ON media(run_id, created_at)")
+            db.execute("PRAGMA user_version = 4")
 
     def _check_open(self) -> None:
         if self._closed:
@@ -141,9 +164,17 @@ class Store:
         return result
 
     @staticmethod
-    def _message(row: sqlite3.Row) -> dict:
+    def _media(row: sqlite3.Row) -> dict:
+        return public_media(dict(row))
+
+    @classmethod
+    def _message(cls, db: sqlite3.Connection, row: sqlite3.Row) -> dict:
         result = dict(row)
         result.pop("seq", None)
+        media = db.execute(
+            "SELECT * FROM media WHERE message_id = ? ORDER BY position", (result["id"],)
+        ).fetchall()
+        result["media"] = [cls._media(item) for item in media]
         return result
 
     @staticmethod
@@ -302,9 +333,83 @@ class Store:
             self._insert_event(db, "conversation.updated", conversation_id, {"conversation": result})
             return result
 
+    def create_media(
+        self, media_id: str, data: bytes, media_type: str, *, source: str,
+        uploader_device_id: str | None = None, run_id: str | None = None,
+        filename: str | None = None, alt_text: str | None = None,
+    ) -> tuple[dict, bool]:
+        try:
+            media_id = str(UUID(media_id))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("media_id must be a UUID") from None
+        data, media_type, width, height = inspect_image(data, media_type)
+        filename = validate_filename(filename)
+        if source not in ("upload", "runtime"):
+            raise ValueError("unsupported media source")
+        if source == "upload":
+            _text(uploader_device_id, "uploader_device_id")
+            if run_id is not None or alt_text is not None:
+                raise ValueError("uploaded media cannot set runtime fields")
+        else:
+            _text(run_id, "run_id")
+            if uploader_device_id is not None:
+                raise ValueError("runtime media cannot set an uploader")
+            if (alt_text is not None and (not isinstance(alt_text, str) or len(alt_text) > 2000
+                    or any(ord(character) < 32 and character not in "\n\t" for character in alt_text))):
+                raise ValueError("invalid alt_text")
+        digest = hashlib.sha256(data).hexdigest()
+        timestamp = _now()
+        with self._transaction() as db:
+            existing = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            if existing is not None:
+                if (existing["source"], existing["media_type"], existing["byte_count"],
+                        existing["sha256"], existing["filename"], existing["alt_text"],
+                        existing["uploader_device_id"], existing["run_id"]) != (
+                        source, media_type, len(data), digest, filename, alt_text,
+                        uploader_device_id, run_id):
+                    raise ValueError("media_id already identifies different content")
+                return self._media(existing), False
+            used = db.execute("SELECT COALESCE(SUM(byte_count), 0) FROM media").fetchone()[0]
+            if used + len(data) > MAX_MEDIA_STORE_BYTES:
+                raise MediaStorageFullError("media store quota exceeded")
+            db.execute("""
+                INSERT INTO media(
+                    id, kind, media_type, byte_count, sha256, width, height, filename,
+                    alt_text, created_at, source, uploader_device_id, run_id, data
+                ) VALUES (?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                media_id, media_type, len(data), digest, width, height, filename, alt_text,
+                timestamp, source, uploader_device_id, run_id, data,
+            ))
+            row = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            return self._media(row), True
+
+    def read_media(self, media_id: str) -> tuple[dict, bytes]:
+        try:
+            media_id = str(UUID(media_id))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("media_id must be a UUID") from None
+        with self._lock:
+            self._check_open()
+            row = self._db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            if row is None:
+                raise KeyError(media_id)
+            return self._media(row), bytes(row["data"])
+
+    def media_for_run(self, run_id: str) -> list[dict]:
+        _text(run_id, "run_id")
+        with self._lock:
+            self._check_open()
+            rows = self._db.execute(
+                "SELECT * FROM media WHERE source = 'runtime' AND run_id = ? ORDER BY created_at, id",
+                (run_id,),
+            ).fetchall()
+            return [self._media(row) for row in rows]
+
     def append_message(
         self, conversation_id: str, role: str, content: str,
         client_message_id: str | None = None, status: str = "completed", run_id: str | None = None,
+        media_ids: tuple[str, ...] | list[str] = (),
     ) -> dict:
         if role not in ("user", "assistant", "system", "tool"):
             raise ValueError("Unsupported message role")
@@ -313,6 +418,7 @@ class Store:
         for name, value in (("client_message_id", client_message_id), ("run_id", run_id)):
             if value is not None:
                 _text(value, name)
+        media_ids = self._validate_media_ids(media_ids)
         with self._transaction() as db:
             self._require_conversation(db, conversation_id)
             if client_message_id is not None:
@@ -323,12 +429,49 @@ class Store:
                 if existing is not None:
                     if (existing["role"], existing["content"]) != (role, content):
                         raise ValueError("client_message_id already identifies different message content")
-                    return self._message(existing)
-            return self._insert_message(db, conversation_id, role, content, client_message_id, status, run_id)
+                    result = self._message(db, existing)
+                    if [item["id"] for item in result["media"]] != list(media_ids):
+                        raise ValueError("client_message_id already identifies different media")
+                    return result
+            return self._insert_message(
+                db, conversation_id, role, content, client_message_id, status, run_id, media_ids,
+            )
+
+    @staticmethod
+    def _validate_media_ids(media_ids: object) -> tuple[str, ...]:
+        if (not isinstance(media_ids, (tuple, list)) or len(media_ids) > MAX_IMAGES_PER_MESSAGE
+                or len(set(media_ids)) != len(media_ids)):
+            raise ValueError("media IDs are invalid")
+        result = []
+        for value in media_ids:
+            try:
+                normalized = str(UUID(value))
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError("media IDs are invalid") from None
+            result.append(normalized)
+        return tuple(result)
+
+    @staticmethod
+    def _attach_media(
+        db: sqlite3.Connection, message_id: str, media_ids: tuple[str, ...], source: str,
+    ) -> None:
+        total = 0
+        for position, media_id in enumerate(media_ids):
+            row = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            if row is None or row["source"] != source or row["message_id"] is not None:
+                raise ValueError("media is unavailable or already attached")
+            total += row["byte_count"]
+            if total > MAX_MESSAGE_IMAGE_BYTES:
+                raise ValueError("message image bytes exceed the supported range")
+            db.execute(
+                "UPDATE media SET message_id = ?, position = ? WHERE id = ? AND message_id IS NULL",
+                (message_id, position, media_id),
+            )
 
     def _insert_message(
         self, db: sqlite3.Connection, conversation_id: str, role: str, content: str,
         client_message_id: str | None, status: str, run_id: str | None,
+        media_ids: tuple[str, ...] = (),
     ) -> dict:
         timestamp = _now()
         message_id = str(uuid4())
@@ -336,8 +479,12 @@ class Store:
             INSERT INTO messages(id, conversation_id, role, content, created_at, status, client_message_id, run_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (message_id, conversation_id, role, content, timestamp, status, client_message_id, run_id))
+        if media_ids:
+            self._attach_media(
+                db, message_id, media_ids, "upload" if role == "user" else "runtime",
+            )
         db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (timestamp, conversation_id))
-        result = self._message(db.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone())
+        result = self._message(db, db.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone())
         self._insert_event(db, "message.created", conversation_id, {"message": result})
         conversation = self._conversation(self._require_conversation(db, conversation_id))
         self._insert_event(db, "conversation.updated", conversation_id, {"conversation": conversation})
@@ -346,6 +493,7 @@ class Store:
     def finish_run(
         self, conversation_id: str, run_id: str, content: str,
         status: str = "completed", error: Any = None,
+        media_ids: tuple[str, ...] | list[str] = (),
     ) -> dict:
         """Commit one terminal assistant message and its terminal event atomically.
 
@@ -356,6 +504,9 @@ class Store:
         _text(content, "content", allow_empty=True)
         if status not in ("completed", "failed"):
             raise ValueError("A run may finish only as completed or failed")
+        media_ids = self._validate_media_ids(media_ids)
+        if status == "failed" and media_ids:
+            raise ValueError("failed messages cannot attach runtime media")
         with self._transaction() as db:
             self._require_conversation(db, conversation_id)
             existing = db.execute("""
@@ -363,8 +514,10 @@ class Store:
                 AND role = 'assistant' AND status IN ('completed', 'failed')
             """, (conversation_id, run_id)).fetchone()
             if existing is not None:
-                return self._message(existing)
-            result = self._insert_message(db, conversation_id, "assistant", content, None, status, run_id)
+                return self._message(db, existing)
+            result = self._insert_message(
+                db, conversation_id, "assistant", content, None, status, run_id, media_ids,
+            )
             payload = {"run_id": run_id, "message": result}
             if status == "failed":
                 payload["error"] = error
@@ -376,7 +529,7 @@ class Store:
             self._check_open()
             self._require_conversation(self._db, conversation_id)
             rows = self._db.execute("SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq", (conversation_id,))
-            return [self._message(row) for row in rows]
+            return [self._message(self._db, row) for row in rows]
 
     def append_event(self, event_type: str, conversation_id: str | None, payload: dict) -> dict:
         _text(event_type, "event_type")

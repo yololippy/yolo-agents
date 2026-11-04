@@ -32,7 +32,9 @@
 | `POST /v1/conversations` | `{title,model?:string或null}` | 201 `{conversation}` |
 | `PATCH /v1/conversations/{id}` | `{title?, archived?, model?:string或null}` | `{conversation}` |
 | `GET /v1/conversations/{id}/messages` | 无额外参数 | `{messages:[message]}` |
-| `POST /v1/conversations/{id}/messages` | `{client_message_id, content}` | 202 `{message, run_id, status:"accepted"或"duplicate"}` |
+| `POST /v1/media` | 原始图片字节；`Content-Type`、`Content-Length`、`X-Client-Media-ID`，可选 `Content-Disposition: attachment; filename=...` | 首次 201、完全相同的幂等重试 200，均为 `{media}` |
+| `GET /v1/media/{id}` | 已配对设备 | 原始图片字节；响应含 `Content-Type`、`Content-Length`、`X-Media-SHA256`，且禁止缓存 |
+| `POST /v1/conversations/{id}/messages` | `{client_message_id, content, media_ids?:[uuid]}` | 202 `{message, run_id, status:"accepted"或"duplicate"}` |
 | `GET /v1/events` | `after=0&limit=200`，可选 `conversation_id` | `{events, next_cursor, has_more}` |
 | `GET /v1/events?stream=true` | 同上；也可 `Accept: text/event-stream` | SSE 事件流，需认证 |
 
@@ -74,10 +76,16 @@ chatgpt 模式 `account.status` 为 `login_required`、`login_pending`、`authen
 
 模型选择持久化在会话上。PATCH 未提供 model 时保持原值，显式 null 恢复默认。存在已接受/排队运行时切换模型返回 409，待回复完成后再改。Codex 下一轮遇到模型变化会新建受限 thread，携带最多约 64,000 字符的已完成用户/助手文本作为引用上下文，发出 `agent.thread.rebuilt`；产品消息和事件记录完整保留，不重放旧用户请求或工具。缺少上下文的部分仍可在产品历史中浏览，不承诺所有旧消息同时进入模型上下文。
 
-`message={id,conversation_id,role,content,created_at,status,client_message_id,run_id}`。
+`message={id,conversation_id,role,content,created_at,status,client_message_id,run_id,media:[media]}`。
 `role` 为 user/assistant/system；`status` 为 pending/completed/failed。可空字段明确为 null。
 
-消息文本非空、最多 16000 字符，请求体最多 65536 字节。`client_message_id` 由客户端在第一次发送时创建，重试保持不变；相同会话内相同标识和文本返回原请求，不重复运行模型。相同标识但文本不同返回 409。不得把客户端发送的历史、工具调用、权限或确认字段作为服务端事实。
+`media={id,kind:"image",media_type,byte_count,sha256,width,height,filename,alt_text,created_at}`。公开对象不含原始字节、本机路径、上传设备或运行时内部 ID；图片必须通过带设备认证的下载接口获取，不能把字节编码进消息 JSON 或 SSE。
+
+图片只接受 `image/jpeg`、`image/png`、`image/webp`，单张最多 10 MiB、每条消息最多 4 张且合计最多 20 MiB；宽高分别不超过 8192，像素数不超过 25,000,000。服务端同时校验声明的 MIME 与文件头/尺寸。HEIC、GIF 等格式必须由客户端转码后上传。一个 Agent 数据库的媒体总量上限为 512 MiB；达到上限返回 507 `media_storage_full`。当前没有单独删除媒体的接口，未附着的成功上传仍占用该 Agent 的媒体额度。
+
+上传的 `X-Client-Media-ID` 由客户端首次生成并在重试时保持不变。同一个 ID 只有字节、MIME、文件名和上传设备都完全一致才作为幂等成功返回；冲突返回 409。消息的 `media_ids` 必须引用该 Agent 数据库中尚未附着的上传图片，同一图片不能绑定到两条消息。图片与消息在同一 SQLite 事务内绑定，失败不会留下部分消息；图片存储天然位于每个 Agent 自己的数据目录，不跨 Agent 共享。
+
+消息文本最多 16000 字符；只有 `media_ids` 非空时 `content` 才可为空。JSON 请求体最多 65536 字节。`client_message_id` 由客户端在第一次发送时创建，重试保持不变；相同会话内相同标识、文本和媒体列表返回原请求，不重复运行模型。任一不同返回 409。不得把客户端发送的历史、工具调用、权限或确认字段作为服务端事实。
 
 同会话按接收顺序生成回复；不同会话可以并行。发送成功与回复生成成功分开，202 仅代表用户消息已接受。流式过程中失败保留失败状态，不能把已展示的 token 当作保存完毕的最终回复。
 
@@ -90,11 +98,12 @@ chatgpt 模式 `account.status` 为 `login_required`、`login_pending`、`authen
 | `conversation.updated` | `{conversation}` |
 | `message.created` | `{message}` |
 | `assistant.delta` | `{run_id,delta}` |
+| `assistant.media` | `{run_id,media}`；运行时图片字节已经持久化，可立即通过认证下载 |
 | `assistant.completed` | `{run_id,message}` |
 | `assistant.failed` | `{run_id,message,error:{code,message}}` |
 | `agent.thread.rebuilt` | `{reason:"model_changed"或"incomplete_turn",model,context_messages}`；仅告知上下文重建，不暴露 Codex thread ID |
 
-最终消息和其完成/失败事件在同一事务内保存。`message.created` 与随后 `assistant.completed` 可能引用同一消息，客户端按消息 ID 合并，不能重复显示。
+最终消息和其完成/失败事件在同一事务内保存。`message.created` 与随后 `assistant.completed` 可能引用同一消息，客户端按消息 ID 合并，不能重复显示。`assistant.media` 类似文本 delta：它可在最终事件之前到达，但只有最终 `assistant.completed` 才代表本轮成功；失败轮次已经显示的增量或图片不得被当作完整最终回复。最终助手消息的 `media` 会再次列出成功结果中的全部图片，客户端按媒体 ID 合并。
 
 轮询返回 `seq>after` 的事件。只在成功处理事件后推进游标；`has_more=true` 时立即继续取下一页，下一次请求使用返回的 `next_cursor`。同一服务的全局同步使用一个游标；不能把某个会话的过滤游标直接当作全局同步已完成的证明。
 
@@ -113,7 +122,7 @@ data: {"seq":42,"type":"assistant.delta","conversation_id":"…","payload":{"run
 
 ## 错误与恢复边界
 
-错误统一 `{error:{code,message}}`；400 参数错误、401 未认证/撤销/无效配对码、403 权限/交易禁用、404 不存在、409 幂等/归档/忙碌/模式冲突、413 超过请求体限制、415 非 JSON、429 配对限流、500 服务错误、503 Codex 账号服务不可用或操作结果未确认。
+错误统一 `{error:{code,message}}`；400 参数错误、401 未认证/撤销/无效配对码、403 权限/交易禁用、404 不存在、409 幂等/归档/忙碌/模式冲突、413 超过请求体限制、415 内容类型不支持、429 配对限流、500 服务错误、503 Codex 账号服务不可用或操作结果未确认、507 Agent 图片存储额度已满。
 
 错误不返回模型原始异常、账户信息、密钥或服务器文件路径。配对按来源 IP 每分钟最多五次尝试。
 
@@ -124,6 +133,8 @@ data: {"seq":42,"type":"assistant.delta","conversation_id":"…","payload":{"run
 Codex 使用 app-server JSONL 流的 `item/agentMessage/delta` 即时产生既有 `assistant.delta`，不等待 turn 结束再统一输出；failed/interrupted 不能生成 `assistant.completed`。登录缺失产生 `assistant.failed` 的 `login_required` 错误码；它不代表设备配对失效，不应清空设备凭据。Codex 子进程退出、协议超时和不确定运行不会自动重放。
 
 app conversation 与 Codex thread 的映射只保存在后端 Agent 状态中。正常重启后先 `thread/resume` 再创建新 turn；更换模型或上个 turn 未确定完成时，以明确的新 thread 重建引用上下文。不同 Runtime 模式的旧状态不自动混用，切换 demo/pydantic/codex 时应新建产品会话；原会话记录保留。
+
+PydanticAI 路径把已验证图片作为官方 `BinaryContent` 传给模型。运行时图片输出使用官方 `BinaryImage`，但只有官方模型 profile 明确声明 `supports_image_output` 时才开放这一输出类型；其他模型不会伪造图片能力，供应商不支持图片输入时也会显式失败。Codex app-server 路径把后端存储的图片写入权限为 0600 的单轮临时文件，以官方 `localImage` turn input 传入，turn 结束即删除；当前仍关闭 Codex 的 image_generation，不能据此宣称 Codex 会返回图片。共享的 RuntimeMedia、持久化、`assistant.media` 和认证下载链已通过确定性 fake runtime 端到端验证，真实供应商能否生成图片仍以其官方 profile 和后续真实验收为准。
 
 本协议已定义设备认证、增量补齐和 HTTPS 接口；公网可达性、可信证书配置、iOS 后台推送及真机测试分别验收，不能仅凭本机 HTTP 测试认定完成。
 

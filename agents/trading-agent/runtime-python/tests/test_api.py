@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import base64
 import http.client
 import json
 from copy import deepcopy
@@ -31,6 +32,12 @@ from yolo_trading.paper_order_store import PaperOrderStore
 from yolo_trading.paper_orders import OrderError
 from yolo_agents.service import ChatService
 from yolo_agents.store import Store
+from yolo_agents.media import RuntimeMedia
+
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class HTTPTests(unittest.TestCase):
@@ -75,6 +82,27 @@ class HTTPTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def media_request(self, method, path, body=b"", *, token=None, media_id=None,
+                      media_type="image/png", filename=None):
+        headers = {}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        if method == "POST":
+            headers["Content-Type"] = media_type
+            headers["X-Client-Media-ID"] = media_id or str(uuid4())
+            if filename:
+                headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request(method, path, body if method == "POST" else None, headers)
+            response = connection.getresponse()
+            data = response.read()
+            if response.getheader("Content-Type", "").startswith("application/json"):
+                data = json.loads(data)
+            return response.status, data, dict(response.getheaders())
+        finally:
+            connection.close()
+
     def conversation(self):
         status, body = self.request("POST", "/v1/conversations", {"title": "中文会话"}, self.token)
         self.assertEqual(status, 201)
@@ -114,6 +142,73 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(body["catalog_only"])
         self.assertEqual(body["auth"]["status"], "not_required")
         self.assertEqual(body["models"][0]["id"], "demo-local")
+
+    def test_image_upload_message_runtime_output_events_and_authenticated_download(self):
+        media_id = str(uuid4())
+        self.assertEqual(self.media_request(
+            "POST", "/v1/media", PNG_1X1, media_id=media_id,
+        )[0], 401)
+        status, uploaded, _ = self.media_request(
+            "POST", "/v1/media", PNG_1X1, token=self.token, media_id=media_id,
+            filename="input.png",
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(uploaded["media"]["id"], media_id)
+        self.assertEqual(uploaded["media"]["width"], 1)
+        self.assertNotIn("data", json.dumps(uploaded))
+        self.assertEqual(self.media_request(
+            "POST", "/v1/media", PNG_1X1, token=self.token, media_id=media_id,
+            filename="input.png",
+        )[0], 200)
+
+        class ImageRuntime:
+            mode = "fake-image"
+            model_name = "fake-image"
+            def stream_reply(self, history, conversation_id):
+                self.history = history
+                yield "返回图片："
+                yield RuntimeMedia(PNG_1X1, "image/png", "output.png", "一像素图片")
+
+        conversation = self.conversation()
+        runtime = ImageRuntime()
+        self.app.runtime = runtime
+        client_message_id = str(uuid4())
+        status, accepted = self.request(
+            "POST", f"/v1/conversations/{conversation}/messages",
+            {"client_message_id": client_message_id, "content": "", "media_ids": [media_id]},
+            self.token,
+        )
+        self.assertEqual(status, 202)
+        assistant = self.wait_reply(conversation)[0]
+        user = self.store.list_messages(conversation)[0]
+        self.assertEqual(user["content"], "")
+        self.assertEqual(user["media"][0]["id"], media_id)
+        self.assertEqual(runtime.history[-1]["media"], user["media"])
+        self.assertEqual(assistant["content"], "返回图片：")
+        self.assertEqual(len(assistant["media"]), 1)
+        output_id = assistant["media"][0]["id"]
+        events = self.store.list_events(limit=1000)
+        media_event = next(item for item in events if item["type"] == "assistant.media")
+        self.assertEqual(media_event["payload"]["media"]["id"], output_id)
+        completed = next(item for item in events if item["type"] == "assistant.completed")
+        self.assertEqual(completed["payload"]["message"]["media"], assistant["media"])
+
+        self.assertEqual(self.media_request("GET", f"/v1/media/{output_id}")[0], 401)
+        status, downloaded, headers = self.media_request(
+            "GET", f"/v1/media/{output_id}", token=self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(downloaded, PNG_1X1)
+        self.assertEqual(headers["Content-Type"], "image/png")
+
+    def test_image_upload_rejects_mismatched_or_unsupported_content(self):
+        self.assertEqual(self.media_request(
+            "POST", "/v1/media", b"not-a-png", token=self.token, media_id=str(uuid4()),
+        )[0], 400)
+        self.assertEqual(self.media_request(
+            "POST", "/v1/media", PNG_1X1, token=self.token, media_id=str(uuid4()),
+            media_type="image/heic",
+        )[0], 415)
 
     def test_conversation_model_create_patch_and_null_default_persist(self):
         status, body = self.request("POST", "/v1/conversations", {"title": "model choice", "model": "demo-local"}, self.token)

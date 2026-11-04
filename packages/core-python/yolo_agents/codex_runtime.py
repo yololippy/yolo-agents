@@ -14,6 +14,7 @@ from pathlib import Path
 import queue
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qsl, urlsplit
@@ -582,6 +583,29 @@ class CodexRuntime(_Runtime):
                 + _encode(list(reversed(context))) + "\nCurrent user message:\n" + prompt)
         return text, len(context)
 
+    def _turn_input(self, text, message):
+        media = message.get("media", [])
+        inputs = [{"type": "text", "text": text}] if text else []
+        if not media:
+            return inputs, None
+        directory = tempfile.TemporaryDirectory(prefix="turn-media-", dir=self._workspace)
+        suffixes = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+        try:
+            for index, item in enumerate(media):
+                if not isinstance(item, dict) or item.get("kind") != "image":
+                    raise RuntimeStateError("消息包含无法识别的媒体记录。")
+                stored, data = self.store.read_media(item.get("id"))
+                if stored != item or stored["media_type"] not in suffixes:
+                    raise RuntimeStateError("消息媒体元数据与存储不一致。")
+                path = Path(directory.name) / f"{index}-{stored['id']}{suffixes[stored['media_type']]}"
+                path.write_bytes(data)
+                path.chmod(0o600)
+                inputs.append({"type": "localImage", "path": str(path), "detail": "auto"})
+            return inputs, directory
+        except BaseException:
+            directory.cleanup()
+            raise
+
     def stream_reply(self, history, conversation_id, user_id="local-user", *, runtime_tools=None):
         prompt, message_id = _prompt(history, conversation_id)
         with self._chat_activity(), self._lock(conversation_id):
@@ -653,14 +677,18 @@ class CodexRuntime(_Runtime):
                     raise ValueError("dynamic tool call belongs to another turn")
                 return runtime_tools.codex_result(params["tool"], params["arguments"])
 
-            events = client.subscribe(thread_id, dynamic_tool if self.agent_id == "trading-agent" else None)
+            turn_input, turn_media = self._turn_input(text, history[-1])
+            events = None
             turn_id, completed = None, False
             pieces, item_text, current_item = [], {}, None
             safe_pieces: list[str] = []
             order_filter = PaperOrderStreamFilter() if self.agent_id == "trading-agent" else None
             try:
+                events = client.subscribe(
+                    thread_id, dynamic_tool if self.agent_id == "trading-agent" else None,
+                )
                 started = client.call("turn/start", {
-                    "threadId": thread_id, "input": [{"type": "text", "text": text}], "model": model,
+                    "threadId": thread_id, "input": turn_input, "model": model,
                     "cwd": str(self._workspace), "approvalPolicy": "never", "approvalsReviewer": "user",
                     "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                     "runtimeWorkspaceRoots": [], "environments": [],
@@ -771,7 +799,10 @@ class CodexRuntime(_Runtime):
                         completed = True
                         return
             finally:
-                client.unsubscribe(thread_id)
+                if events is not None:
+                    client.unsubscribe(thread_id)
+                if turn_media is not None:
+                    turn_media.cleanup()
                 if not completed:
                     if turn_id and client.alive:
                         try:

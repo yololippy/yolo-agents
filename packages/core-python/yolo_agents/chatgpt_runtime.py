@@ -138,6 +138,10 @@ class ChatGPTRuntime(PydanticRuntime):
         provider.client.timeout = 30
         return OpenAIResponsesModel(model_name, provider=provider, settings={'openai_store': False})
 
+    def _supports_image_output(self, model_name):
+        from pydantic_ai.profiles.openai_chatgpt import openai_chatgpt_model_profile
+        return openai_chatgpt_model_profile(model_name).get('supports_image_output', False) is True
+
     def _retry_policy(self):
         # Harness tools use ModelRetry for recoverable feedback (e.g. reading a
         # nonexistent memory). Let the model correct the tool call; output and

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import YoloAgentsSDK
 @testable import YoloAgentsUI
 
 @Test func composerCopyCanBeCustomizedPerAgentWithoutForkingTheUI() {
@@ -45,4 +46,26 @@ import Testing
     #expect(drafts.text(for: id).isEmpty)
     drafts.set(" \n", for: id)
     #expect(drafts.submission(for: id) == nil)
+}
+
+@Test func imageOnlyDraftsSubmitAndLateChangesArePreserved() throws {
+    var drafts = ComposerDrafts()
+    let id = UUID()
+    let first = DraftImage(data: Data([1, 2, 3]), mediaType: "image/jpeg", filename: "first.jpg")
+    let second = DraftImage(data: Data([4, 5]), mediaType: "image/png", filename: "second.png")
+    drafts.setImages([first], for: id)
+    let submission = try #require(drafts.submission(for: id))
+    #expect(submission.content.isEmpty)
+    #expect(submission.images == [first])
+    drafts.setImages([first, second], for: id)
+    drafts.finish(submission, accepted: true)
+    #expect(drafts.images(for: id) == [first, second])
+}
+
+@Test func imagePreparationUsesTheBytesActualTypeInsteadOfPickerHint() throws {
+    let png = try #require(Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+    let image = try DraftImage.preparing(data: png, sourceMediaType: "image/heic")
+    #expect(image.mediaType == "image/png")
+    #expect(image.data == png)
 }

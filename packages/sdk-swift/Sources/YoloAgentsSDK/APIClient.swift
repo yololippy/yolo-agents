@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum ClientError: Error, LocalizedError, Equatable, Sendable {
     case invalidEndpoint
@@ -13,6 +14,12 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
     case invalidEvent(String)
     case streamOverflow
     case untrustedAuthorizationURL
+    case emptyMessage
+    case invalidMediaType
+    case mediaTooLarge
+    case tooManyMediaItems
+    case mediaMessageTooLarge
+    case invalidMediaResponse
     public var errorDescription: String? {
         switch self {
         case .invalidEndpoint: "服务地址无效，请填写完整地址，且不要包含用户名、密码、参数或片段。"
@@ -27,6 +34,12 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
         case .invalidEvent(let type): "同步事件缺少必要字段：\(type)"
         case .streamOverflow: "实时数据暂时积压，将从已保存的位置重新同步。"
         case .untrustedAuthorizationURL: "服务返回的登录地址不是受信任的官方授权地址，已停止打开浏览器。"
+        case .emptyMessage: "消息需要包含文字或图片。"
+        case .invalidMediaType: "仅支持 JPEG、PNG 或 WebP 图片。"
+        case .mediaTooLarge: "单张图片不能超过 10 MiB。"
+        case .tooManyMediaItems: "每条消息最多可发送 4 张图片。"
+        case .mediaMessageTooLarge: "一条消息中的图片合计不能超过 20 MiB。"
+        case .invalidMediaResponse: "图片数据与服务端记录不一致，请重新加载。"
         }
     }
     public var requiresPairing: Bool {
@@ -141,7 +154,11 @@ public struct URLSessionTransport: HTTPTransport {
 }
 
 private struct ErrorEnvelope: Decodable { let error: ServiceError?; let detail: String? }
-private struct MessageSubmission: Encodable { let client_message_id: UUID; let content: String }
+private struct MessageSubmission: Encodable {
+    let client_message_id: UUID
+    let content: String
+    let media_ids: [UUID]
+}
 
 public struct APIClient: Sendable {
     public let endpoint: ServiceEndpoint
@@ -231,16 +248,75 @@ public struct APIClient: Sendable {
         let response: Response = try await request("GET", path: "conversations/\(conversationID.uuidString)/messages")
         return response.messages
     }
-    public func sendMessage(conversationID: UUID, clientMessageID: UUID, content: String) async throws -> SendMessageResponse {
-        try Self.validateMessageContent(content)
+    public func sendMessage(conversationID: UUID, clientMessageID: UUID, content: String,
+                            mediaIDs: [UUID] = []) async throws -> SendMessageResponse {
+        try Self.validateMessage(content: content, mediaIDs: mediaIDs)
         return try await request("POST", path: "conversations/\(conversationID.uuidString)/messages",
-            body: WireJSON.encoder().encode(MessageSubmission(client_message_id: clientMessageID, content: content)))
+            body: WireJSON.encoder().encode(MessageSubmission(
+                client_message_id: clientMessageID, content: content, media_ids: mediaIDs)))
     }
     public static func validateMessageContent(_ content: String) throws {
         // Python's len(str) counts Unicode scalars, while Swift's String.count counts
         // extended grapheme clusters. Check the server boundary before persisting an intent.
-        let body = try WireJSON.encoder().encode(MessageSubmission(client_message_id: UUID(), content: content))
+        let body = try WireJSON.encoder().encode(MessageSubmission(
+            client_message_id: UUID(), content: content, media_ids: []))
         guard content.unicodeScalars.count <= 16_000, body.count <= 65_536 else { throw ClientError.messageTooLong }
+    }
+    public static func validateMessage(content: String, mediaIDs: [UUID]) throws {
+        try validateMessageContent(content)
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mediaIDs.isEmpty else {
+            throw ClientError.emptyMessage
+        }
+        guard mediaIDs.count <= MediaLimits.maximumItemsPerMessage else { throw ClientError.tooManyMediaItems }
+        guard Set(mediaIDs).count == mediaIDs.count else { throw ClientError.invalidMediaResponse }
+        let body = try WireJSON.encoder().encode(MessageSubmission(
+            client_message_id: UUID(), content: content, media_ids: mediaIDs))
+        guard body.count <= 65_536 else { throw ClientError.messageTooLong }
+    }
+    public func uploadMedia(clientMediaID: UUID, data: Data, mediaType: String,
+                            filename: String? = nil) async throws -> MessageMedia {
+        let normalizedType = mediaType.lowercased()
+        guard MediaLimits.allowedImageTypes.contains(normalizedType) else { throw ClientError.invalidMediaType }
+        guard data.count <= MediaLimits.maximumBytesPerItem else { throw ClientError.mediaTooLarge }
+        var request = try makeRequest("POST", path: "media", body: data)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(normalizedType, forHTTPHeaderField: "Content-Type")
+        request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
+        request.setValue(clientMediaID.uuidString, forHTTPHeaderField: "X-Client-Media-ID")
+        if let filename, !filename.isEmpty {
+            let safe = filename.map { character -> Character in
+                let isControl = character.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+                return isControl || character == "/" || character == "\\" || character == "\"" ? "_" : character
+            }
+            request.setValue("attachment; filename=\"\(String(safe.prefix(255)))\"",
+                             forHTTPHeaderField: "Content-Disposition")
+        }
+        let result = try await transport.send(request)
+        guard (200...299).contains(result.status) else {
+            throw Self.responseError(status: result.status, data: result.data)
+        }
+        struct Response: Decodable { let media: MessageMedia }
+        let media = try WireJSON.decoder().decode(Response.self, from: result.data).media
+        guard media.id == clientMediaID, media.kind == "image", media.mediaType == normalizedType,
+              media.byteCount == data.count else { throw ClientError.invalidMediaResponse }
+        return media
+    }
+    public func mediaData(_ media: MessageMedia) async throws -> Data {
+        guard media.kind == "image", MediaLimits.allowedImageTypes.contains(media.mediaType),
+              media.byteCount > 0, media.byteCount <= MediaLimits.maximumBytesPerItem else {
+            throw ClientError.invalidMediaResponse
+        }
+        let request = try makeRequest("GET", path: "media/\(media.id.uuidString)")
+        let result = try await transport.send(request)
+        guard (200...299).contains(result.status) else {
+            throw Self.responseError(status: result.status, data: result.data)
+        }
+        let digest = SHA256.hash(data: result.data).map { String(format: "%02x", $0) }.joined()
+        guard result.data.count == media.byteCount,
+              digest.caseInsensitiveCompare(media.sha256) == .orderedSame else {
+            throw ClientError.invalidMediaResponse
+        }
+        return result.data
     }
     /// REST catch-up before reconnecting eventStream. Always drain has_more before opening SSE.
     public func events(after cursor: Int64, limit: Int = 200, conversationID: UUID? = nil) async throws -> EventsPage {

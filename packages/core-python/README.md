@@ -4,7 +4,7 @@
 
 ## 当前可以运行的部分
 
-- `Store`：标准库 SQLite，产品会话、原消息、增量事件、独立 Agent 状态；可跨线程使用，同一文件的不同 Store 连接通过 SQLite 事务协调。
+- `Store`：标准库 SQLite，产品会话、原消息、图片媒体、增量事件、独立 Agent 状态；可跨线程使用，同一文件的不同 Store 连接通过 SQLite 事务协调。
 - `DemoRuntime`：无需第三方依赖，所有回复显式带“演示模式／未连接真实模型或 IBKR”，用于验证聊天、持久化和设备同步。
 - `PydanticRuntime`：真实模式适配代码，采用研究文档中的官方 Core/Harness 组合。缺依赖、版本不匹配、密钥/模型配置错误或模型运行失败都会报错，不回退到演示模式。
 - `CodexRuntime`：通过本机 Codex app-server 复用受管 ChatGPT 登录，不需要 API key。仅聊天，关闭工具入口；即时映射 agentMessage 增量，并持久保存会话模型和 Codex thread 映射。使用与验收边界见 [Codex 接入说明](CODEX.md)。
@@ -27,6 +27,8 @@
 | `finish_run(..., status='failed', error=...)` | 同上，但最终事件为 `assistant.failed`，payload 为 `{run_id, message, error}` |
 | `save_agent_state` | 不产生产品事件，不把模型内部状态发送给客户端 |
 
+图片由 `create_media` 先保存，再通过 `append_message(..., media_ids=...)` 或 `finish_run(..., media_ids=...)` 原子绑定到消息。公开消息只含媒体元数据；原始字节由认证 API 单独读取。本地只接受 JPEG/PNG/WebP，单张 10 MiB、每条 4 张/20 MiB，尺寸和像素数也有限制；每个 Agent 数据库最多保存 512 MiB。上传重试使用客户端 UUID 幂等，运行时输出使用独立的 run_id 来源，上传设备和存储字节不会暴露给产品事件。
+
 `append_message` 的 `client_message_id` 在会话内唯一；重复 ID 且 role/content 相同返回原消息，不再写事件；不同内容或角色抛 `ValueError`。不同会话可使用相同 ID。没有幂等 ID 的消息每次追加。
 
 `finish_run` 只接受 completed/failed。一个 `(conversation_id, run_id)` 只能有一条最终助手消息，先提交的最终结果胜出，后续调用返回原结果且不重复事件；同 run 的用户消息不受该唯一约束影响。请通过 `finish_run` 完成运行，避免自行分开写助手行和最终事件。
@@ -42,7 +44,8 @@
 ```python
 runtime = create_runtime(mode, model, data_dir, store)
 # mode/model_name 用于健康状态；不包含模型密钥。
-for delta in runtime.stream_reply(history, conversation_id, user_id="local-user"):
+for item in runtime.stream_reply(history, conversation_id, user_id="local-user"):
+    # item 是文本增量，或运行时返回的 RuntimeMedia 图片。
     ...
 ```
 
@@ -52,7 +55,9 @@ for delta in runtime.stream_reply(history, conversation_id, user_id="local-user"
 - 一个本地服务共享一个 Runtime。Runtime 对同会话运行加锁；服务层仍负责消息接收顺序、排队和跨进程防重入，不能把 Python 锁当成多进程租约。
 - 同步流需要在同一个 worker 线程中创建、迭代并关闭，不要把迭代器分派到多个线程。真实 Agent 按用户和 worker 缓存，避免跨线程共用同一同步流的 provider 客户端。
 - 服务退出时，先停止接收消息并等待服务层 worker 结束，再调用 `runtime.close()`，最后关闭产品 Store。Runtime 会清理自己创建的事件循环；调用者原有的事件循环保持由调用者管理。存在尚未关闭的运行迭代器时，`close()` 会明确拒绝，不能在仍生成回复时释放资源。
-- Runtime 不写最终产品助手消息，由服务层调用 `finish_run`。流式异常必须结束为失败；不得拼接一段演示文字假装真实生成成功。
+- Runtime 不写最终产品助手消息，由服务层持久化 `RuntimeMedia` 并调用 `finish_run`。每张图片先产生 `assistant.media`，最终成功消息再次包含完整媒体元数据；流式异常必须结束为失败，不得拼接一段演示文字假装真实生成成功。
+
+PydanticAI 输入使用官方 `BinaryContent`，输出使用官方 `BinaryImage`；只有模型官方 profile 明确支持图片输出时才配置该输出类型。Codex 输入使用 app-server 的 `localImage`，图片以单轮 0600 临时文件传递并在 turn 后删除；Codex 的 image generation 仍关闭。确定性 fake runtime 覆盖了“返回图片 → 持久化 → 助手消息/事件 → 认证下载”的完整链路，但不替代真实供应商图片输出验收。
 
 真实模式直接使用官方 `Agent`、`Memory`、`SqliteMemoryStore`、`StepPersistence`、`SqliteStepStore`、`ConversationSearch`、`SnapshotHistorySource`、`SummarizingCompaction`。没有另写记忆框架，也没有注册账户或下单工具。
 

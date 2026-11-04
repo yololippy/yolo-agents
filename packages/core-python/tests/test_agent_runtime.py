@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import base64
 from importlib import metadata
 import json
 from pathlib import Path
@@ -16,6 +17,11 @@ from yolo_agents.agent_runtime import (
 from yolo_agents.store import Store
 
 
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
 def official_sdk_available():
     try:
         return metadata.version("pydantic-ai-slim") == "2.61.0" and metadata.version("pydantic-ai-harness") == "0.61.0"
@@ -25,7 +31,11 @@ def official_sdk_available():
 
 def fake_backend():
     """Contract double, not a claim to test the uninstalled official SDK."""
+    from pydantic_ai import BinaryContent, BinaryImage
+    from pydantic_ai.exceptions import UserError
+
     backend = SimpleNamespace(agents=[], components=[], fail_after_first=False)
+    backend.BinaryContent, backend.BinaryImage, backend.UserError = BinaryContent, BinaryImage, UserError
 
     class Usage(SimpleNamespace):
         def __init__(self, **kwargs):
@@ -70,6 +80,12 @@ def fake_backend():
             if backend.fail_after_first:
                 raise OSError("sensitive-provider-error api_key=SECRET")
             yield "测试回复"
+
+        def stream_output(self, **kwargs):
+            yield "真实适配"
+            if backend.fail_after_first:
+                raise OSError("sensitive-provider-error api_key=SECRET")
+            yield "真实适配测试回复"
 
         def get_output(self):
             return "真实适配测试回复"
@@ -499,6 +515,41 @@ class OfficialSDKTests(unittest.TestCase):
         with closing(sqlite3.connect(next(path for path in databases if path.name == "agent.sqlite3"))) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 2)
             self.assertGreater(db.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
+
+    def test_official_model_receives_persisted_image_as_binary_content(self):
+        from pydantic_ai.messages import BinaryContent, UserPromptPart
+        from pydantic_ai.models.function import FunctionModel
+        from uuid import uuid4
+
+        requests = []
+        async def stream(messages, _info):
+            requests.append(list(messages))
+            yield "image received"
+
+        media_id = str(uuid4())
+        self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="test-device",
+        )
+        self.store.append_message(
+            self.cid, "user", "", run_id=str(uuid4()), media_ids=(media_id,),
+        )
+        runtime = self.runtime(FunctionModel(stream_function=stream))
+        reply = "".join(runtime.stream_reply(self.store.list_messages(self.cid), self.cid))
+        self.assertEqual(reply, "image received")
+        prompts = [part for message in requests[0] for part in message.parts
+                   if isinstance(part, UserPromptPart)]
+        self.assertEqual(len(prompts), 1)
+        binaries = [item for item in prompts[0].content if isinstance(item, BinaryContent)]
+        self.assertEqual(len(binaries), 1)
+        self.assertEqual(binaries[0].data, PNG_1X1)
+        self.assertEqual(binaries[0].media_type, "image/png")
+        self.assertEqual(binaries[0].identifier, media_id)
+        self.store.append_message(self.cid, "user", "follow up", run_id=str(uuid4()))
+        self.assertEqual(
+            "".join(runtime.stream_reply(self.store.list_messages(self.cid), self.cid)),
+            "image received",
+        )
+        self.assertEqual(len(requests), 2)
 
     def test_official_memory_tools_and_cross_conversation_history_search(self):
         from collections import deque
