@@ -12,6 +12,7 @@ import hashlib
 from importlib import metadata
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -33,6 +34,10 @@ class RuntimeExecutionError(RuntimeError):
     """A real model run failed; no demo fallback or automatic replay occurred."""
 
 
+class RuntimeProviderError(RuntimeExecutionError):
+    """A provider failure whose pre-sanitized message is safe to show in clients."""
+
+
 class RuntimeConnectionError(RuntimeExecutionError):
     """The cached provider connection failed and was discarded for the next run."""
 
@@ -43,6 +48,37 @@ class RuntimeGuardrailError(RuntimeExecutionError):
 
 class LoginRequiredError(RuntimeConfigurationError):
     """Managed ChatGPT login must be completed locally in Codex."""
+
+
+_SAFE_PROVIDER_FIELD = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+def _public_model_http_error(error: Any) -> str:
+    """Return useful provider metadata without forwarding an arbitrary response body."""
+    status = getattr(error, "status_code", None)
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    body = getattr(error, "body", None)
+    body = body if isinstance(body, dict) else {}
+
+    def safe_field(name: str) -> str | None:
+        value = body.get(name)
+        return value if isinstance(value, str) and _SAFE_PROVIDER_FIELD.fullmatch(value) else None
+
+    code, parameter = safe_field("code"), safe_field("param")
+    fields = [f"HTTP {status}" if status is not None else "HTTP 错误"]
+    if code:
+        fields.append(f"错误码 {code}")
+    if parameter:
+        fields.append(f"参数 {parameter}")
+
+    # Provider messages are not forwarded: they may contain private prompts or
+    # credentials. Known codes receive a fixed local explanation; unknown codes
+    # still expose bounded status/code/parameter metadata for diagnosis.
+    if code == "subscription_sharing_unsupported_capability":
+        explanation = "当前 ChatGPT 订阅授权不支持请求中的 image_generation 工具。"
+    else:
+        explanation = "模型服务拒绝了本次请求；请根据错误码检查模型能力和请求配置。"
+    return f"模型请求失败（{'；'.join(fields)}）：{explanation}"
 
 
 def _encode(value: Any) -> str:
@@ -572,7 +608,9 @@ class PydanticRuntime(_Runtime):
                 # after sleep or a network-path change. Never replay this turn:
                 # discard only its cached Agent so the next explicit user action
                 # creates a fresh provider and connection pool.
-                from pydantic_ai.exceptions import ModelConnectionError
+                from pydantic_ai.exceptions import ModelConnectionError, ModelHTTPError
+                if isinstance(exc, ModelHTTPError):
+                    raise RuntimeProviderError(_public_model_http_error(exc)) from None
                 if isinstance(exc, ModelConnectionError):
                     self._discard_agent(namespace, selected_model, agent)
                     raise RuntimeConnectionError(

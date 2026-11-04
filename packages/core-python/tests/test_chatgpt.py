@@ -300,6 +300,11 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         self.store.append_message(cid, 'user', text, run_id=str(uuid4()))
         return self.store.list_messages(cid)
 
+    def test_subscription_runtime_keeps_image_output_disabled(self):
+        # Image input remains handled by BinaryContent in the shared runtime;
+        # this switch controls only the unsupported image_generation output tool.
+        self.assertFalse(self.runtime._supports_image_output('gpt-6.1-sol'))
+
     def test_model_change_uses_fresh_official_state_with_visible_product_context(self):
         history = self.user('first')
         self.assertEqual(''.join(self.runtime.stream_reply(history, self.cid)), '真实适配测试回复')

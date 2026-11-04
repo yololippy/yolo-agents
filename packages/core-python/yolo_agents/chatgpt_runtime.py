@@ -139,8 +139,10 @@ class ChatGPTRuntime(PydanticRuntime):
         return OpenAIResponsesModel(model_name, provider=provider, settings={'openai_store': False})
 
     def _supports_image_output(self, model_name):
-        from pydantic_ai.profiles.openai_chatgpt import openai_chatgpt_model_profile
-        return openai_chatgpt_model_profile(model_name).get('supports_image_output', False) is True
+        # ChatGPT subscription sharing accepts image inputs, but rejects the
+        # built-in image_generation tool used for image outputs. Keep the Agent's
+        # output schema text-only so multimodal analysis continues to work.
+        return False
 
     def _retry_policy(self):
         # Harness tools use ModelRetry for recoverable feedback (e.g. reading a

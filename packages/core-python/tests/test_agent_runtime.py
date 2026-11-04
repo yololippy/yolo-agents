@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from yolo_agents.agent_runtime import (
     DemoRuntime, RuntimeConfigurationError, RuntimeConnectionError, RuntimeExecutionError,
-    RuntimeStateError, create_runtime,
+    RuntimeProviderError, RuntimeStateError, _public_model_http_error, create_runtime,
 )
 from yolo_agents.store import Store
 
@@ -739,6 +739,25 @@ class OfficialSDKTests(unittest.TestCase):
         messages = self.store.list_messages(self.cid)
         self.assertEqual(len(messages), 1)
         self.assertIsNone(runtime.recover_completed_reply(self.cid, messages[0]["id"]))
+
+    def test_provider_http_error_exposes_only_allowlisted_diagnostics(self):
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        error = ModelHTTPError(400, "gpt-6.1-sol", {
+            "message": "private prompt and credential must not be shown",
+            "code": "subscription_sharing_unsupported_capability",
+            "param": "tools",
+            "private": "secret-token",
+        })
+        message = _public_model_http_error(error)
+        self.assertEqual(message, "模型请求失败（HTTP 400；错误码 subscription_sharing_unsupported_capability；参数 tools）："
+                         "当前 ChatGPT 订阅授权不支持请求中的 image_generation 工具。")
+        self.assertNotIn("private prompt", message)
+        self.assertNotIn("secret-token", message)
+
+        # The dedicated exception marks this already-sanitized text as the only
+        # provider diagnostic the service may publish to clients.
+        self.assertTrue(issubclass(RuntimeProviderError, RuntimeExecutionError))
 
     def test_connection_failure_discards_cached_agent_without_replaying(self):
         from pydantic_ai.exceptions import ModelConnectionError

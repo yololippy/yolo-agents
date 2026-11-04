@@ -14,7 +14,7 @@ from uuid import uuid4
 from pydantic_ai import Agent
 from pydantic_ai.models.function import FunctionModel
 
-from yolo_agents.agent_runtime import RuntimeConnectionError, create_runtime
+from yolo_agents.agent_runtime import RuntimeConnectionError, RuntimeProviderError, create_runtime
 from yolo_agents.api import ChatHTTPServer
 from yolo_agents.auth import DeviceAuth
 from yolo_agents.service import ChatService
@@ -203,6 +203,33 @@ class ConnectionFailureTests(unittest.TestCase):
                             if event["type"] == "assistant.failed"]
                 self.assertEqual(terminal[-1]["payload"]["error"]["code"], "model_connection_reset")
                 self.assertNotIn("private provider", json.dumps(terminal[-1]))
+            finally:
+                service.close()
+                store.close()
+
+
+class ProviderFailureTests(unittest.TestCase):
+    def test_sanitized_provider_diagnostic_is_visible_in_agent_message(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder) / "app.sqlite3")
+            conversation = store.create_conversation("provider failure")["id"]
+            public = ("模型请求失败（HTTP 400；错误码 subscription_sharing_unsupported_capability；参数 tools）："
+                      "当前 ChatGPT 订阅授权不支持请求中的 image_generation 工具。")
+
+            class Runtime:
+                def stream_reply(self, *_args):
+                    raise RuntimeProviderError(public)
+
+            service = ChatService(store, Runtime())
+            try:
+                service.send(conversation, "hello", str(uuid4()))
+                service.close()
+                message = store.list_messages(conversation)[-1]
+                self.assertEqual(message["status"], "failed")
+                self.assertEqual(message["content"], public)
+                terminal = [event for event in store.list_events(conversation_id=conversation)
+                            if event["type"] == "assistant.failed"][-1]
+                self.assertEqual(terminal["payload"]["error"], {"code": "agent_failed", "message": public})
             finally:
                 service.close()
                 store.close()

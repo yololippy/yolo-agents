@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from .agent_runtime import (
     LoginRequiredError, RuntimeConfigurationError, RuntimeConnectionError,
-    RuntimeGuardrailError, RuntimeStateError,
+    RuntimeGuardrailError, RuntimeProviderError, RuntimeStateError,
 )
 from .codex_runtime import CodexBusyError
 from .media import MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, RuntimeMedia
@@ -212,6 +212,11 @@ class ChatService:
             self.fail(conversation_id, run_id, "guardrail_blocked", "内容检查已拦截本次回复。请移除消息中的密钥或令牌后重新发送；若未提供凭据，可新建会话重试。")
         except RuntimeConnectionError:
             self.fail(conversation_id, run_id, "model_connection_reset", "模型连接已自动重置；本次消息未自动重试，请重新发送。")
+        except RuntimeProviderError as exc:
+            # RuntimeProviderError is the only provider exception allowed to
+            # cross this boundary; its message contains allowlisted metadata and
+            # fixed local wording, never the provider's arbitrary response body.
+            self.fail(conversation_id, run_id, "agent_failed", str(exc))
         except LoginRequiredError:
             self.fail(conversation_id, run_id, "login_required", "请先在 Mac 完成当前 Agent 的 ChatGPT 登录，再发送新消息。")
         except RuntimeStateError:
