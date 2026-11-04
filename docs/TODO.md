@@ -1,8 +1,8 @@
 # IBKR AI 助手：开发任务与验收
 
-更新日期：2026-11-02
+更新日期：2026-11-04
 
-状态：Agent/产品存储、聊天通信和 Apple 客户端首版已完成本机验收；IBKR Paper 股票限价单的后端状态机、Mac 确认界面、iOS 只读界面和模拟故障测试已实现，Live 执行关闭。本机 Gateway 已安装并登录 Paper，但其 Read-Only API 仍开启，因此真实 What-if、模拟提交/成交/撤单尚未验收。
+状态：Agent/产品存储、聊天通信和 Apple 客户端首版已完成本机验收，双端图片上传与 Agent 图片返回链路已通过自动化测试及 macOS/iOS 构建；IBKR Paper 股票限价单的后端状态机、Mac 确认界面、iOS 只读界面和模拟故障测试已实现，Live 执行关闭。本机 Gateway 已安装并登录 Paper，但其 Read-Only API 仍开启，因此真实 What-if、模拟提交/成交/撤单尚未验收。
 
 需求、架构、IBKR 接入和认证规则统一见 [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md)。本文件是唯一活跃任务清单；归档调研中的旧 TODO 不再跟踪。保留已有任务 ID，完成时补充实现位置、版本、步骤和脱敏证据后再勾选。
 
@@ -54,6 +54,14 @@
 - [x] 官方 SDK 离线测试及本机 HTTP/SQLite 联调通过：Core 117、Trading 112、B 4，共 233 项。新增覆盖已知凭据流式各切分点、输入阻断时零模型请求、记忆写入前拦截、普通聊天增量及幂等。
 
 范围：仅 `pydantic`/`chatgpt` 模式；不承诺识别任意密码、提示注入或交易风险，不清理已有产品原文/步骤快照。本轮没有切换运行中的生产服务或进行真实模型/真机验收。实现和依赖见 [core-python README](../packages/core-python/README.md#凭据防护)。
+
+## 本轮补充：IMG-01 图片消息（2026-11-04）
+
+- [x] macOS/iOS 共用图片选择、转码压缩、草稿预览和消息内展示；支持纯图片消息、失败重试以及 Agent 图片流式事件。
+- [x] 共享协议、Python Store/API/Runtime、Swift SDK/UI 已实现图片上传、鉴权下载、消息关联和断线补齐；媒体保存在各 Agent 自己的数据目录，未修改或扩展 B Agent。
+- [x] JPEG/PNG/WebP、单图/单消息/像素/存储配额和幂等边界已实现；Core 143、Trading 164、Swift SDK 59、Swift UI 37 项测试通过，macOS arm64 与 iOS Simulator 构建成功。
+
+边界：Codex 当前支持图片输入但关闭图片生成；Agent 返回图片的共享链路由确定性 Runtime 完成端到端验收，真实供应商图片输出仍以模型 profile 和后续真实账号验收为准。当前没有媒体删除接口，未附着上传会占用每 Agent 512 MiB 配额；真机相册权限、弱网大图和长期存储回收仍需后续验收。
 
 ## 2. M0：环境与 IBKR 接入准备
 

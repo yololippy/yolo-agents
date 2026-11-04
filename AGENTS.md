@@ -37,6 +37,12 @@ apps/{trading-agent,b-agent}/{ios,macos,xcode}/
 
 IBKR 集成目前属于 `trading-agent`，应继续放在 `agents/trading-agent/runtime-python/`；只有另一个 Agent 出现真实复用需求时，才考虑抽取为共享 Package。
 
+## 多 Agent 复用原则
+
+- 开发任何新功能时，必须先评估协议、领域无关的运行时能力、Swift SDK 和通用 UI 是否能被多个 Agent 复用；可复用部分应放入职责匹配的 `packages/`，并通过配置、能力声明或依赖注入适配具体 Agent，不得在共享层写死 `trading-agent` 的名称、身份、目录、端口或私有业务规则。
+- Agent 私有的策略、账户数据、券商集成、权限和产品入口继续保留在各自的 `agents/<agent-name>/` 与 `apps/<agent-name>/`。共享能力与 Agent 私有接入必须保持清晰边界，数据、凭据、缓存和运行状态按 Agent 身份隔离。
+- 默认只为当前用户指定的 Agent 接入和验收新功能。除非用户明确要求，不得为了证明可复用性而修改、扩展、构建、联调或验收其他 Agent；应以共享接口和测试证明未来可接入性。
+
 ## 当前开发范围
 
 - 默认只开发 `trading-agent` 及其实际需要的共享 Package、协议和客户端能力。

@@ -1,8 +1,8 @@
 # IBKR AI 助手：需求与架构
 
-更新日期：2026-11-02
+更新日期：2026-11-04
 
-状态：Agent/产品存储、聊天通信 API 与 Apple 客户端首版已完成本机验收；Codex 真实聊天和 Mac UI 已实测。IBKR Paper 股票限价单的后端状态机、Mac 明确确认和 iOS 只读界面已实现，Live 强制关闭。本机 Gateway 已安装并登录 Paper；真实可写连接仍被 Gateway 的 Read-Only API 阻止，尚未发出任何模拟订单。
+状态：Agent/产品存储、聊天通信 API 与 Apple 客户端首版已完成本机验收，macOS/iOS 图片上传、Agent 图片返回链路已通过自动化测试与双端构建；Codex 真实聊天和 Mac UI 已实测。IBKR Paper 股票限价单的后端状态机、Mac 明确确认和 iOS 只读界面已实现，Live 强制关闭。本机 Gateway 已安装并登录 Paper；真实可写连接仍被 Gateway 的 Read-Only API 阻止，尚未发出任何模拟订单。
 
 本文是当前需求与设计的唯一依据；开发任务、进度和验收统一见 [TODO.md](TODO.md)。`../archive/` 中的旧调研仅保留证据，不作为当前选型或开发要求。下文区分已确认需求、设计方向、官方规则和待实测边界。
 
@@ -11,6 +11,7 @@
 供个人使用、常驻 Mac 的对话式 IBKR 助手，已确认需求：
 
 - Mac 端聊天、切换会话，聊天及工具记录存数据库。
+- Mac 与 iPhone 均可向 Agent 发送图片，并展示 Agent 返回的图片；媒体按 Agent 身份隔离存储和鉴权同步。
 - 查询账户、持仓、挂单和行情；下单前审核合理性，不合理时拦截并解释。
 - 支持提前授权的定时订单，用户乘机或客户端离线时由后台执行检查。
 - 支持股票和具体期权合约的价格监控、提醒。
@@ -38,7 +39,7 @@ flowchart LR
     Trade --> DB
 ```
 
-- **聊天应用服务**负责会话、模型调用、AI 审核和受控工具接口；主 Agent 已选 PydanticAI Core＋官方 Harness，记忆/检索/压缩方案见 [Agent 方案](RESEARCH_PYDANTICAI.md)。当前同时提供本地演示、PydanticAI 和 Codex app-server 模式；Codex 复用 Mac 上受管 ChatGPT 登录且已完成真实模型验收，PydanticAI 供应商仍需单独配置与验证。
+- **聊天应用服务**负责会话、模型调用、AI 审核、图片媒体和受控工具接口；主 Agent 已选 PydanticAI Core＋官方 Harness，记忆/检索/压缩方案见 [Agent 方案](RESEARCH_PYDANTICAI.md)。当前同时提供本地演示、PydanticAI 和 Codex app-server 模式；PydanticAI 图片输入使用官方二进制内容、图片输出按模型 profile 开放，Codex 支持图片输入但当前关闭图片生成。Codex 复用 Mac 上受管 ChatGPT 登录且已完成真实文本模型验收，PydanticAI 供应商及真实图片输出仍需单独配置与验证。
 - **独立交易服务**统一持有 IBKR 连接，负责账户事实、程序风控、授权校验、订单、定时任务、行情监控和恢复。当前已实现显式环境配置、Paper 启动读取、What-if、订单状态/事件、独立账本及 Mac 管理设备确认；Live 强制关闭。当前 Host 与聊天仍同进程，独立守护、自动重连和跨重启主动对账属于后续工作。 Paper 专用双端模型、请求和界面归属 `apps/trading-agent/client-swift/`，共享 SDK/UI 只提供通用传输和功能入口。
 - **IB Gateway**是官方程序，管理券商登录和连接。第一版均在同一台 Mac 上运行，交易服务内部先按模块划分。
 - **数据库**保存会话、消息、工具调用、订单意图及版本、授权、审核、券商订单/成交、自动化任务和审计。券商实际状态是对账依据；模型摘要不作为交易账本。
