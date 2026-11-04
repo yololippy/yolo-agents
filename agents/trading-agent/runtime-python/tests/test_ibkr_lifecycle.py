@@ -379,7 +379,7 @@ class LifecycleTests(unittest.TestCase):
                     extension_seen.append(extension)
                     self.wait(lambda: extension.broker_health()["connected"])
                     self.assertEqual(agent_name, "trading-agent")
-                    self.assertEqual(app_name, "Trading Agent")
+                    self.assertEqual(app_name, "有路交易")
                     if failure is not None:
                         raise failure
                     return 7

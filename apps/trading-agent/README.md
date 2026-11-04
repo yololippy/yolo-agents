@@ -216,7 +216,7 @@ iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Wri
 
 ## 独立 App 身份与 ChatGPT 账号（2026-10-28）
 
-`TradingAgentRootView` 注入 trading-agent 身份、Trading Agent 名称、默认端口 8765，沿用原有 `com.tradingagent.apple.v1` Keychain service 和缓存键，不迁移或清除已有配对。B 使用完全独立的 service、键空间和端口 8766。新服务须匹配 Agent ID；只有 Trading 显式允许缺少身份的旧服务，并在连接设置中说明。账号和 Paper 页面都会在发送设备凭据前阻断明确属于其他 Agent 的健康响应。
+`TradingAgentRootView` 注入 trading-agent 身份、“有路交易”（`Yolo Trade`）名称、默认端口 8765，沿用原有 `com.tradingagent.apple.v1` Keychain service 和缓存键，不迁移或清除已有配对。名称由 Trading 私有产品常量和 Xcode `Brand.xcconfig` 集中管理；B 使用完全独立的名称、service、键空间和端口 8766。新服务须匹配 Agent ID；只有 Trading 显式允许缺少身份的旧服务，并在连接设置中说明。账号和 Paper 页面都会在发送设备凭据前阻断明确属于其他 Agent 的健康响应。
 
 “ChatGPT 账号”默认使用 `/v1/account`、`/login`、`/login/cancel`、`/logout`。取消或超时会调用后端取消接口，失败保持未确认提示；Provider 退出只针对当前 Agent，旧 Codex 模式保留真实影响说明。访问令牌需刷新及未授予套餐权限两种状态仍可明确退出，远程撤销未确认不会显示成已撤销。iOS 仅查看模型目录中的脱敏状态，所有 OAuth 凭据留在后端。
 

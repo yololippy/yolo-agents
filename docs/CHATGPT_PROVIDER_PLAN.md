@@ -13,7 +13,7 @@
 | 内容 | Trading Agent | B Agent |
 | --- | --- | --- |
 | 固定实例 ID | `trading-agent` | `b-agent` |
-| 用户看到的授权名称 | `Trading Agent` | `B Agent` |
+| 用户看到的授权名称 | `有路交易`（`Yolo Trade`） | `B Agent` |
 | 默认回环服务端口 | `8765` | `8766` |
 | 默认 Mac 数据目录 | `~/Library/Application Support/YoloAgents/trading-agent/` | `~/Library/Application Support/YoloAgents/b-agent/` |
 | OAuth 注册、令牌、退出 | 本实例独立 | 本实例独立 |

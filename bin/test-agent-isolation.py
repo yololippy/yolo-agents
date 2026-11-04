@@ -111,7 +111,11 @@ class AgentIsolationTests(unittest.TestCase):
                 status, created = first.request("conversations", token=first_token, data={"title": "keep-local-history"})
                 self.assertEqual(status, 201)
                 conversation_id = created["conversation"]["id"]
-                self.assertEqual(second.request("conversations", token=second_token)[1]["conversations"], [])
+                other_payload = second.request("conversations", token=second_token)[1]
+                self.assertEqual(len(other_payload["conversations"]), 1)
+                self.assertEqual(other_payload["conversations"][0]["title"], "主会话")
+                other_primary_id = other_payload["primary_conversation_id"]
+                self.assertEqual(other_payload["conversations"][0]["id"], other_primary_id)
                 self.assertEqual(second.request("orders", token=second_token)[0], 404)
             # Same owned data survives an explicit mode switch; no Codex token is imported.
             with ExitStack() as stack:
@@ -138,7 +142,7 @@ class AgentIsolationTests(unittest.TestCase):
                 self.assertEqual(a_url.hostname, "auth.openai.com")
                 self.assertEqual(b_url.hostname, "auth.openai.com")
                 a_query, b_query = parse_qs(a_url.query), parse_qs(b_url.query)
-                self.assertEqual(a_query["agent_name_hint"], ["Trading Agent"])
+                self.assertEqual(a_query["agent_name_hint"], ["有路交易"])
                 self.assertEqual(b_query["agent_name_hint"], ["B Agent"])
                 self.assertNotEqual(a_query["state"], b_query["state"])
                 self.assertNotEqual(a_query["redirect_uri"], b_query["redirect_uri"])
@@ -148,9 +152,15 @@ class AgentIsolationTests(unittest.TestCase):
                 self.assertEqual(cancelled[0], 200)
                 self.assertEqual(cancelled[1]["account"]["error"]["code"], "login_cancelled")
                 self.assertIsInstance(cancelled[1]["account"]["error"]["message"], str)
-                rows = first.request("conversations", token=first_token)[1]["conversations"]
-                self.assertEqual([row["id"] for row in rows], [conversation_id])
-                self.assertEqual(second.request("conversations", token=second_token)[1]["conversations"], [])
+                first_payload = first.request("conversations", token=first_token)[1]
+                row_ids = [row["id"] for row in first_payload["conversations"]]
+                self.assertEqual(set(row_ids), {conversation_id, first_payload["primary_conversation_id"]})
+                self.assertEqual(len(row_ids), 2)
+                other_payload = second.request("conversations", token=second_token)[1]
+                other_row_ids = [row["id"] for row in other_payload["conversations"]]
+                self.assertEqual(
+                    set(other_row_ids), {other_primary_id, other_payload["primary_conversation_id"]})
+                self.assertEqual(len(other_row_ids), 2)
             # Cross-agent ownership must fail before creating a trading ledger in B's directory.
             existing = sorted(p.name for p in other.iterdir())
             attempted = subprocess.run([sys.executable, "-m", "yolo_trading", "--mode", "demo", "--port", "0",

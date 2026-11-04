@@ -45,7 +45,7 @@ PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/py
 
 ## 独立 ChatGPT 授权
 
-默认运行模式为 `chatgpt`，以 `Trading Agent` 名称发起本应用授权；默认数据目录为 `~/Library/Application Support/YoloAgents/trading-agent/`，端口 `8765`。Mac 与 iOS 共用本实例后端。`--mode codex` 保留为显式兼容路径，不会把 Codex 凭据复制到 Provider。迁移前保护旧数据并核对原启动参数，见 [Provider 迁移方案](../../docs/CHATGPT_PROVIDER_PLAN.md)。
+默认运行模式为 `chatgpt`，以“有路交易”（英文名 `Yolo Trade`）发起本应用授权；名称集中定义在私有模块 `yolo_trading/product.py`，不会影响其他 Agent。默认数据目录为 `~/Library/Application Support/YoloAgents/trading-agent/`，端口 `8765`。Mac 与 iOS 共用本实例后端。`--mode codex` 保留为显式兼容路径，不会把 Codex 凭据复制到 Provider。迁移前保护旧数据并核对原启动参数，见 [Provider 迁移方案](../../docs/CHATGPT_PROVIDER_PLAN.md)。
 
 ```sh
 PYTHONPATH=packages/core-python:agents/trading-agent/runtime-python .venv/bin/python -m yolo_trading --mode chatgpt

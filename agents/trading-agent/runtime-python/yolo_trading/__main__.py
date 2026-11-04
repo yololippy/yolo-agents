@@ -11,9 +11,7 @@ from .api_extension import TradingAPIExtension
 from .ibkr import IBKRAdapter
 from .ibkr_config import ENV_PREFIX, IBKRConfigurationError, load_ibkr_config
 from .ibkr_lifecycle import IBKRBrokerLifecycle
-
-AGENT_ID = "trading-agent"
-APP_NAME = "Trading Agent"
+from .product import AGENT_ID, DISPLAY_NAME
 
 
 def add_trading_arguments(parser) -> None:
@@ -61,7 +59,7 @@ def run_trading_host(args, broker) -> int:
     """Keep the broker private to this Agent and close it on every Host exit."""
     data_dir = getattr(args, "data_dir", None)
     if data_dir is not None:
-        data_dir = prepare_agent_directory(data_dir, AGENT_ID, APP_NAME,
+        data_dir = prepare_agent_directory(data_dir, AGENT_ID, DISPLAY_NAME,
             adopt_existing=getattr(args, "adopt_existing_data", False))
         args.data_dir = data_dir
     lifecycle = IBKRBrokerLifecycle(broker) if broker is not None else None
@@ -71,14 +69,14 @@ def run_trading_host(args, broker) -> int:
         if lifecycle is not None:
             extension.prepare_broker_recovery()
             lifecycle.start()
-        return run_host(args, extension=extension, agent_name=AGENT_ID, app_name=APP_NAME)
+        return run_host(args, extension=extension, agent_name=AGENT_ID, app_name=DISPLAY_NAME)
     finally:
         if lifecycle is not None and not lifecycle.close():
             print("IBKR background shutdown could not be confirmed; check Gateway and Host process.", file=sys.stderr)
 
 
 def build_parser():
-    parser = create_parser(__doc__, agent_name=AGENT_ID, app_name=APP_NAME, default_port=8765)
+    parser = create_parser(__doc__, agent_name=AGENT_ID, app_name=DISPLAY_NAME, default_port=8765)
     parser.set_defaults(mode="chatgpt")
     add_trading_arguments(parser)
     return parser

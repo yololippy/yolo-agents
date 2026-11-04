@@ -2,7 +2,7 @@
 
 此模块属于 Trading Agent，由 macOS 和 iOS 入口共同使用，不是跨 Agent 共享包。`TradingAgentRootView` 向共享聊天壳注入订单入口；`PaperAPIClient`、`PaperHealth`、订单模型、Writer 与界面均在这里。公共聊天与传输继续依赖 `packages/ui-swift` 和 `packages/sdk-swift`。
 
-根视图注入 `trading-agent` 身份、Trading Agent 名称、端口 8765 及原有 `com.tradingagent.apple.v1` Keychain service，保留配对和历史。仅此 App 显式允许缺少身份的旧服务，并在连接设置中说明兼容边界；明确返回其他 Agent 时拒绝。订单健康检查和 Writer 也拒绝其他 Agent。
+根视图注入 `trading-agent` 身份、“有路交易”名称、端口 8765 及原有 `com.tradingagent.apple.v1` Keychain service，保留配对和历史。Agent ID 与中英文名称由私有的 `TradingAgentProduct` 集中管理；Bundle ID 由 Xcode 私有的 `Brand.xcconfig` 集中管理。它们不进入共享 SDK/UI，也不影响 B Agent。仅此 App 显式允许缺少身份的旧服务，并在连接设置中说明兼容边界；明确返回其他 Agent 时拒绝。订单健康检查和 Writer 也拒绝其他 Agent。
 
 订单协议见 [Paper 订单 v1](../../../agents/trading-agent/PAPER_ORDERS.md)。
 
