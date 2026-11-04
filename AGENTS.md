@@ -50,6 +50,10 @@ IBKR 集成目前属于 `trading-agent`，应继续放在 `agents/trading-agent/
 - 除非用户明确指定开发 `b-agent`，不得修改或扩展 `agents/b-agent/`、`apps/b-agent/` 的功能，也不得把 B Agent 构建、联调、真实授权或验收作为当前任务的默认范围。
 - 共享代码变更应保持现有多 Agent 边界清晰，但“兼容 B Agent”不等于要求同步为 B Agent 增加产品功能。
 
+## 多会话协作
+
+用户已要求只由标题精确为 `main` 的本仓库会话协调 Ibkr、Agent、iOS 及按需创建的其他开发会话。`agents/`、`apps/`、`packages/` 产品代码改动默认由 main 新建或派发给非 main 开发会话实施；用户明确要求 main 直接修改时，以该次指令为准。跨会话分工时读取 [trading-agent-coordination](.agents/skills/trading-agent-coordination/SKILL.md)，按其中的目录归属协调写入。当前授权范围以 TODO、仓库规则和用户指令为准；会话 ID 仅保存在 Git 忽略的 `.agents/runtime/trading-agent-coordination/team.local.md`，不写入 skill 或版本控制文件。
+
 ## 重构要求
 
 调整目录时，必须在同一个改动中同步更新导入路径、Package manifest、Xcode 本地 Package 引用、脚本和文档。完成后再执行相关 Python 测试、Swift Package 测试/构建及 Xcode 构建，验证无误后才汇报完成。

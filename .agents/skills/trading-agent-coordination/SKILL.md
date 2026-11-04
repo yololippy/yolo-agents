@@ -11,6 +11,7 @@ description: "在 yolo-agents 仓库中，只由标题精确为 main 的主会�
 
 - 只有标题精确为 `main` 且工作目录为 `/Users/yololippy/project/yolo-agents` 的当前会话可以担任主会话；其他会话不得自行改名取得权限。
 - main 是唯一可以创建、派遣、等待、读取和管理开发会话的会话，也是唯一负责跨模块协调、结果集成、根目录 TODO 更新、Git 操作和用户总汇报的会话。
+- `agents/`、`apps/`、`packages/` 产品代码改动默认由 main 新建或派发给非 main 开发会话实施，main 负责调研、方案、分工、审阅和集成验证；用户明确要求 main 直接修改时，以该次指令为准，不再创建或转派开发会话。
 - 非 main 会话不得联系 main 或其他开发会话，不得创建、派遣、等待、读取或管理其他 Agent，也不得继续分派任务；只执行 main 直接派发的任务，并在自己的最终回复中报告。
 - 用户已授权 main 在当前开发范围内复用现有角色会话，或在没有合适活动会话时按需创建专项开发会话；这不扩大用户已授权的产品范围。
 - 归档表示会话已经退役。main 不查询、读取、复用或取消归档会话；没有合适的活动会话时直接新建。
@@ -24,7 +25,7 @@ description: "在 yolo-agents 仓库中，只由标题精确为 main 的主会�
 
 | 会话 | 负责内容 | 默认可写范围（开发获授权后） |
 | --- | --- | --- |
-| main | 拆分任务、协调接口、集成、验收、用户沟通、Git 操作 | 根目录文档、`.agents/`、`docs/` 及统一配置 |
+| main | 拆分任务、协调接口、审阅、集成验收、用户沟通、Git 操作 | 根目录文档、`.agents/`、`docs/` 及统一配置；产品代码默认交给非 main 开发会话，用户明确指定时可直接修改 |
 | Ibkr | 券商接入、账户事实、订单、对账与交易规则 | `agents/trading-agent/runtime-python/` 中由 main 指定的 IBKR 与交易私有文件 |
 | Agent | Agent 运行时、会话、记忆、受控工具、服务端协议实现 | `packages/core-python/`、`packages/protocol/`，以及 main 明确指定的 Agent 私有文件 |
 | iOS | 共享 Swift SDK/UI、Trading Agent 的 Mac/iPhone 客户端和 Xcode 工程 | `packages/sdk-swift/`、`packages/ui-swift/`、`apps/trading-agent/` |
