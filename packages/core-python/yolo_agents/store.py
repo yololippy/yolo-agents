@@ -72,7 +72,7 @@ class Store:
     def _initialize(self) -> None:
         with self._transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise RuntimeError("Unsupported product database schema; do not downgrade it")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -114,6 +114,13 @@ class Store:
                 )
             """)
             db.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_context_boundaries (
+                    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+                    start_after_seq INTEGER NOT NULL CHECK (start_after_seq >= 0),
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            db.execute("""
                 CREATE TABLE IF NOT EXISTS media (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind = 'image'),
                     media_type TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK (byte_count > 0),
@@ -138,7 +145,7 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS events_conversation ON events(conversation_id, seq)")
             db.execute("CREATE INDEX IF NOT EXISTS media_message ON media(message_id, position)")
             db.execute("CREATE INDEX IF NOT EXISTS media_run ON media(run_id, created_at)")
-            db.execute("PRAGMA user_version = 4")
+            db.execute("PRAGMA user_version = 5")
 
     def _check_open(self) -> None:
         if self._closed:
@@ -530,6 +537,97 @@ class Store:
             self._require_conversation(self._db, conversation_id)
             rows = self._db.execute("SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq", (conversation_id,))
             return [self._message(self._db, row) for row in rows]
+
+    def list_messages_page(
+        self, conversation_id: str, *, before: int | None = None, limit: int = 50,
+    ) -> dict:
+        """Return one stable newest-first cursor page in chronological display order."""
+        if before is not None and (type(before) is not int or before <= 0):
+            raise ValueError("before must be a positive integer")
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be an integer from 1 through 200")
+        with self._lock:
+            self._check_open()
+            self._require_conversation(self._db, conversation_id)
+            sql = "SELECT * FROM messages WHERE conversation_id = ?"
+            params: list[Any] = [conversation_id]
+            if before is not None:
+                sql += " AND seq < ?"
+                params.append(before)
+            rows = self._db.execute(
+                sql + " ORDER BY seq DESC LIMIT ?", (*params, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            visible = rows[:limit]
+            next_cursor = visible[-1]["seq"] if has_more and visible else None
+            return {
+                "messages": [self._message(self._db, row) for row in reversed(visible)],
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+            }
+
+    def list_context_messages(self, conversation_id: str) -> list[dict]:
+        """Return only product messages in the current model-context epoch."""
+        with self._lock:
+            self._check_open()
+            self._require_conversation(self._db, conversation_id)
+            rows = self._db.execute("""
+                SELECT * FROM messages
+                WHERE conversation_id = ? AND seq > COALESCE((
+                    SELECT start_after_seq FROM conversation_context_boundaries
+                    WHERE conversation_id = ?
+                ), 0)
+                ORDER BY seq
+            """, (conversation_id, conversation_id)).fetchall()
+            return [self._message(self._db, row) for row in rows]
+
+    def reset_model_context(
+        self, conversation_id: str, client_message_id: str, run_id: str,
+        response_text: str,
+    ) -> dict:
+        """Atomically mark a fresh model epoch without deleting product history."""
+        _text(client_message_id, "client_message_id")
+        _text(run_id, "run_id")
+        _text(response_text, "response_text")
+        with self._transaction() as db:
+            conversation = self._require_conversation(db, conversation_id)
+            if conversation["archived"]:
+                raise ValueError("conversation is archived")
+            if db.execute(
+                "SELECT 1 FROM primary_conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone() is None:
+                raise ValueError("only a primary conversation can reset model context")
+            existing = db.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? AND client_message_id = ?",
+                (conversation_id, client_message_id),
+            ).fetchone()
+            if existing is not None:
+                if (existing["role"], existing["content"]) != ("user", "/new"):
+                    raise ValueError("client_message_id already identifies different message content")
+                return self._message(db, existing)
+
+            user = self._insert_message(
+                db, conversation_id, "user", "/new", client_message_id, "completed", run_id,
+            )
+            db.execute("DELETE FROM agent_states WHERE conversation_id = ?", (conversation_id,))
+            assistant = self._insert_message(
+                db, conversation_id, "assistant", response_text, None, "completed", run_id,
+            )
+            self._insert_event(db, "assistant.completed", conversation_id, {
+                "run_id": run_id, "message": assistant,
+            })
+            boundary = db.execute(
+                "SELECT seq FROM messages WHERE id = ?", (assistant["id"],),
+            ).fetchone()["seq"]
+            db.execute("""
+                INSERT INTO conversation_context_boundaries(conversation_id, start_after_seq, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    start_after_seq = excluded.start_after_seq,
+                    updated_at = excluded.updated_at
+            """, (conversation_id, boundary, _now()))
+            return user
 
     def append_event(self, event_type: str, conversation_id: str | None, payload: dict) -> dict:
         _text(event_type, "event_type")

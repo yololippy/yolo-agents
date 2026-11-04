@@ -150,6 +150,56 @@ private actor UIStreams: SSETransport {
         return connections.removeFirst()
     }
 }
+
+private actor PagingUIHTTP: HTTPTransport {
+    let latest: Message
+    let older: Message
+    private(set) var messageCursors: [Int64?] = []
+
+    init(latest: Message, older: Message) {
+        self.latest = latest; self.older = older
+    }
+
+    func send(_ request: URLRequest) async throws -> HTTPResult {
+        let path = request.url!.path
+        if path == "/v1/health" {
+            return HTTPResult(data: Data("""
+            {"status":"ok","api_version":1,"server_id":"\(serverID)","agent_mode":"codex",
+            "model":null,"trade_execution_enabled":false}
+            """.utf8), status: 200)
+        }
+        if path == "/v1/models" {
+            return HTTPResult(data: Data("""
+            {"models":[{"id":"model-a","display_name":"Model A"}],"default_model":"model-a",
+            "auth":{"status":"authenticated"}}
+            """.utf8), status: 200)
+        }
+        if path == "/v1/conversations" {
+            return HTTPResult(data: Data("""
+            {"conversations":[\(conversationJSON)],"primary_conversation_id":"\(testConversationID)"}
+            """.utf8), status: 200)
+        }
+        if path.hasSuffix("/messages") {
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let cursor = items.first(where: { $0.name == "before" })?.value.flatMap(Int64.init)
+            messageCursors.append(cursor)
+            let page = cursor == nil
+                ? MessagesPage(messages: [latest], nextCursor: 51, hasMore: true)
+                : MessagesPage(messages: [older], nextCursor: nil, hasMore: false)
+            return try encodedUI(page)
+        }
+        if path == "/v1/events" {
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let cursor = items.first(where: { $0.name == "after" })?.value.flatMap(Int64.init) ?? 0
+            return try encodedUI(EventsPage(events: [], nextCursor: cursor, hasMore: false))
+        }
+        throw URLError(.unsupportedURL)
+    }
+
+    private func encodedUI<T: Encodable>(_ value: T) throws -> HTTPResult {
+        HTTPResult(data: try WireJSON.encoder().encode(value), status: 200)
+    }
+}
 private func fixtureConnection() throws -> PairedConnection {
     let json = """
     {"device":{"id":"50000000-0000-4000-8000-000000000005","name":"Fixture","platform":"macos",
@@ -455,6 +505,35 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     await model.loadSelectedMessages()
     #expect(model.errorMessage != nil)
     #expect(model.errorMessage != URLError(.cancelled).localizedDescription)
+}
+
+@Test @MainActor func conversationLoadsLatestPageThenFetchesOlderMessages() async throws {
+    let latest = Message(
+        id: UUID(), conversationID: testConversationID, role: .assistant, content: "latest",
+        createdAt: Date(timeIntervalSince1970: 2), status: .completed
+    )
+    let older = Message(
+        id: UUID(), conversationID: testConversationID, role: .user, content: "older",
+        createdAt: Date(timeIntervalSince1970: 1), status: .completed
+    )
+    let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+    let streams = UIStreams([
+        SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks,
+                      cancel: { continuation.finish() }),
+    ])
+    let http = PagingUIHTTP(latest: latest, older: older)
+    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = ChatModel(repository: repository, transport: http, streamTransport: streams)
+    defer { model.setActive(false) }
+    await model.start()
+    try await waitUntil { model.isOnline && model.messages == [latest] }
+    #expect(model.canLoadEarlierMessages)
+    #expect(model.earlierMessagesCursor == 51)
+
+    await model.loadEarlierMessages()
+    #expect(model.messages == [older, latest])
+    #expect(!model.canLoadEarlierMessages)
+    #expect(await http.messageCursors == [nil, 51])
 }
 
 @Test @MainActor func inactiveStartupRestoresHistoryWithoutOpeningAStream() async throws {

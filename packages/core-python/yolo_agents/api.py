@@ -15,6 +15,7 @@ from .media import (
     ALLOWED_IMAGE_TYPES, MAX_IMAGE_BYTES, MediaStorageFullError, MediaValidationError,
     validate_media_ids,
 )
+from .service import ContextResetError
 
 
 class APIError(Exception):
@@ -160,6 +161,9 @@ class Handler(BaseHTTPRequestHandler):
         except LookupError:
             self.close_connection = True
             self.send_json(404, {"error": {"code": "not_found", "message": "记录不存在。"}})
+        except ContextResetError as exc:
+            self.close_connection = True
+            self.send_json(409, {"error": {"code": exc.code, "message": exc.message}})
         except ValueError:
             self.close_connection = True
             self.send_json(409, {"error": {"code": "conflict", "message": "请求与已保存的数据冲突。"}})
@@ -307,7 +311,30 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 5 and parts[4] == "messages":
                 if method == "GET":
-                    self.send_json(200, {"messages": app.store.list_messages(conversation_id)})
+                    if not query:
+                        self.send_json(200, {
+                            "messages": app.store.list_messages(conversation_id),
+                            "next_cursor": None, "has_more": False,
+                        })
+                        return
+                    if set(query) - {"before", "limit"}:
+                        raise APIError(400, "invalid_input", "消息分页参数无效。")
+                    try:
+                        before_values = query.get("before", [])
+                        limit_values = query.get("limit", ["50"])
+                        if len(before_values) > 1 or len(limit_values) != 1:
+                            raise ValueError
+                        before = int(before_values[0]) if before_values else None
+                        limit = int(limit_values[0])
+                        page = app.store.list_messages_page(
+                            conversation_id, before=before, limit=limit,
+                        )
+                    except ValueError:
+                        raise APIError(
+                            400, "invalid_input",
+                            "before 必须为正整数，limit 必须为 1 至 200。",
+                        ) from None
+                    self.send_json(200, page)
                     return
                 if method == "POST":
                     data = self.read_json()
@@ -323,6 +350,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise APIError(400, "invalid_input", "media_ids 必须是不重复且最多四个 UUID。") from None
                     if not content and not media_ids:
                         raise APIError(400, "invalid_input", "消息必须包含文本或图片。")
+                    if content == "/new" and media_ids:
+                        raise APIError(400, "invalid_input", "/new 不能同时附带图片。")
                     client_message_id = identifier(data.get("client_message_id"))
                     self.reauthorize()
                     self.send_json(202, app.send(

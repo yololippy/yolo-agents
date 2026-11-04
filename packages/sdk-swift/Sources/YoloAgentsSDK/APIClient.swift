@@ -11,6 +11,7 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
     case agentIdentityMismatch
     case agentIdentityUnavailable
     case invalidEventPage
+    case invalidMessagePage
     case invalidEvent(String)
     case streamOverflow
     case untrustedAuthorizationURL
@@ -31,6 +32,7 @@ public enum ClientError: Error, LocalizedError, Equatable, Sendable {
         case .agentIdentityMismatch: "服务属于另一个 Agent，已停止连接。请核对当前 App 的服务地址。"
         case .agentIdentityUnavailable: "此服务未提供 Agent 身份，当前 App 无法安全连接。请更新服务端。"
         case .invalidEventPage: "同步数据的顺序或游标无效，已停止推进游标。"
+        case .invalidMessagePage: "消息分页数据无效，已停止加载更早消息。"
         case .invalidEvent(let type): "同步事件缺少必要字段：\(type)"
         case .streamOverflow: "实时数据暂时积压，将从已保存的位置重新同步。"
         case .untrustedAuthorizationURL: "服务返回的登录地址不是受信任的官方授权地址，已停止打开浏览器。"
@@ -247,6 +249,22 @@ public struct APIClient: Sendable {
         struct Response: Decodable { let messages: [Message] }
         let response: Response = try await request("GET", path: "conversations/\(conversationID.uuidString)/messages")
         return response.messages
+    }
+    public func messagePage(conversationID: UUID, before: Int64? = nil,
+                            limit: Int = 50) async throws -> MessagesPage {
+        if let before, before <= 0 { throw ClientError.invalidMessagePage }
+        var query = [URLQueryItem(name: "limit", value: String(min(200, max(1, limit))))]
+        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
+        let page: MessagesPage = try await request(
+            "GET", path: "conversations/\(conversationID.uuidString)/messages", query: query
+        )
+        guard page.messages.allSatisfy({ $0.conversationID == conversationID }),
+              page.nextCursor.map({ $0 > 0 }) ?? true,
+              before.map({ upper in page.nextCursor.map({ $0 < upper }) ?? true }) ?? true,
+              !page.hasMore || page.nextCursor != nil else {
+            throw ClientError.invalidMessagePage
+        }
+        return page
     }
     public func sendMessage(conversationID: UUID, clientMessageID: UUID, content: String,
                             mediaIDs: [UUID] = []) async throws -> SendMessageResponse {

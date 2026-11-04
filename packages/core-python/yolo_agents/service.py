@@ -14,6 +14,12 @@ from .media import MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, RuntimeMedia
 from .runtime_tools import RuntimeToolContext
 
 
+class ContextResetError(Exception):
+    def __init__(self, code, message):
+        self.code, self.message = code, message
+        super().__init__(message)
+
+
 class ChatService:
     def __init__(self, store, runtime, workers=4):
         self.store, self.runtime = store, runtime
@@ -67,6 +73,19 @@ class ChatService:
                         raise ValueError("client_message_id already used with different content")
                     return {"message": message, "run_id": message["run_id"], "status": "duplicate"}
             run_id = str(uuid4())
+            if content == "/new" and not media_ids:
+                if not self.store.is_primary_conversation(conversation_id):
+                    raise ContextResetError("primary_only", "/new 只用于主会话。")
+                with self.lock:
+                    if conversation_id in self.active:
+                        raise ContextResetError(
+                            "conversation_busy", "请等待当前回复完成后再使用 /new。",
+                        )
+                    message = self.store.reset_model_context(
+                        conversation_id, client_message_id, run_id,
+                        "已开启新的模型上下文。历史记录与长期记忆均已保留。",
+                    )
+                return {"message": message, "run_id": run_id, "status": "accepted"}
             with self.lock:
                 # Account mutations hold this lock while idle. Persisting acceptance
                 # and marking the queue active must be one admission boundary.
@@ -131,7 +150,7 @@ class ChatService:
             self.reply(conversation_id, run_id, caller)
 
     def history(self, conversation_id, run_id):
-        messages = self.store.list_messages(conversation_id)
+        messages = self.store.list_context_messages(conversation_id)
         assistants = {m.get("run_id"): m for m in messages if m["role"] == "assistant" and m["status"] == "completed"}
         result = []
         for message in messages:

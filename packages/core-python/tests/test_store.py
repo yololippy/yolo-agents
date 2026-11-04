@@ -6,12 +6,14 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from yolo_agents.store import Store
 from yolo_agents.agent_runtime import DemoRuntime
-from yolo_agents.service import ChatService
+from yolo_agents.service import ChatService, ContextResetError
 
 
 PNG_1X1 = base64.b64decode(
@@ -97,6 +99,30 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(messages, created)
         self.assertEqual([e["seq"] for e in events], sorted({e["seq"] for e in events}))
 
+    def test_message_pages_are_stable_chronological_and_keep_legacy_history(self):
+        messages = [
+            self.store.append_message(self.cid, "user", f"message {index}", f"id-{index}")
+            for index in range(7)
+        ]
+        first = self.store.list_messages_page(self.cid, limit=3)
+        self.assertEqual(first["messages"], messages[4:])
+        self.assertTrue(first["has_more"])
+        second = self.store.list_messages_page(
+            self.cid, before=first["next_cursor"], limit=3,
+        )
+        self.assertEqual(second["messages"], messages[1:4])
+        self.assertTrue(second["has_more"])
+        third = self.store.list_messages_page(
+            self.cid, before=second["next_cursor"], limit=3,
+        )
+        self.assertEqual(third, {
+            "messages": messages[:1], "next_cursor": None, "has_more": False,
+        })
+        self.assertEqual(self.store.list_messages(self.cid), messages)
+        for before, limit in ((0, 3), (True, 3), (None, 0), (None, 201)):
+            with self.assertRaises(ValueError):
+                self.store.list_messages_page(self.cid, before=before, limit=limit)
+
     def test_search_is_literal_unicode_and_includes_retained_product_messages(self):
         self.store.update_conversation(self.cid, title="Straße % notes")
         self.store.append_message(self.cid, "user", "我偏好低风险投资_长期")
@@ -139,6 +165,116 @@ class StoreTests(unittest.TestCase):
         self.assertNotEqual(first["id"], second["id"])
         self.assertEqual(second["title"], "主会话")
         self.assertEqual(len(self.store.list_conversations()), 2)
+
+    def test_new_resets_only_primary_model_context_and_preserves_full_history(self):
+        self.store.ensure_primary_conversation("owner-a", self.cid)
+        old_user = self.store.append_message(
+            self.cid, "user", "old question", "old-client", run_id="old-run",
+        )
+        old_assistant = self.store.finish_run(self.cid, "old-run", "old answer")
+        self.store.save_agent_state(self.cid, '{"conversation":{"messages":["old"]}}')
+
+        reset = self.store.reset_model_context(
+            self.cid, "reset-client", "reset-run", "context reset",
+        )
+        full = self.store.list_messages(self.cid)
+        self.assertEqual(full[:2], [old_user, old_assistant])
+        self.assertEqual([message["content"] for message in full[2:]], ["/new", "context reset"])
+        self.assertEqual(reset, full[2])
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+        self.assertEqual(self.store.list_context_messages(self.cid), [])
+
+        cursor = self.store.list_events()[-1]["seq"]
+        duplicate = self.store.reset_model_context(
+            self.cid, "reset-client", "different-run", "context reset",
+        )
+        self.assertEqual(duplicate, reset)
+        self.assertEqual(self.store.list_events(after=cursor), [])
+        self.assertEqual(self.store.list_messages(self.cid), full)
+
+        other = self.store.create_conversation("task")
+        with self.assertRaises(ValueError):
+            self.store.reset_model_context(
+                other["id"], "task-reset", "task-run", "context reset",
+            )
+
+    def test_new_context_boundary_is_used_by_the_next_model_run(self):
+        self.store.ensure_primary_conversation("owner-a", self.cid)
+        self.store.append_message(
+            self.cid, "user", "old question", "old-client", run_id="old-run",
+        )
+        self.store.finish_run(self.cid, "old-run", "old answer")
+        self.store.save_agent_state(self.cid, '{"saved":true}')
+
+        class Runtime:
+            histories = []
+
+            def stream_reply(inner, history, *_args, **_kwargs):
+                inner.histories.append(history)
+                yield "fresh answer"
+
+        runtime = Runtime()
+        service = ChatService(self.store, runtime, workers=1)
+        try:
+            reset = service.send(self.cid, "/new", "reset-client")
+            self.assertEqual(reset["status"], "accepted")
+            self.assertIsNone(self.store.get_agent_state(self.cid))
+            service.send(self.cid, "fresh question", "fresh-client")
+            deadline = time.monotonic() + 3
+            while not runtime.histories and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(len(runtime.histories), 1)
+            self.assertEqual(
+                [(message["role"], message["content"]) for message in runtime.histories[0]],
+                [("user", "fresh question")],
+            )
+        finally:
+            service.close()
+
+    def test_new_is_rejected_while_the_primary_conversation_is_running(self):
+        self.store.ensure_primary_conversation("owner-a", self.cid)
+        started, release = threading.Event(), threading.Event()
+
+        class Runtime:
+            def stream_reply(inner, *_args, **_kwargs):
+                started.set()
+                release.wait(3)
+                yield "answer"
+
+        service = ChatService(self.store, Runtime(), workers=1)
+        try:
+            service.send(self.cid, "question", "question-client")
+            self.assertTrue(started.wait(1))
+            with self.assertRaises(ContextResetError) as caught:
+                service.send(self.cid, "/new", "reset-client")
+            self.assertEqual(caught.exception.code, "conversation_busy")
+            self.assertEqual(
+                [message["content"] for message in self.store.list_messages(self.cid)],
+                ["question"],
+            )
+        finally:
+            release.set()
+            service.close()
+
+    def test_new_rolls_back_state_history_and_boundary_when_terminal_event_fails(self):
+        self.store.ensure_primary_conversation("owner-a", self.cid)
+        self.store.save_agent_state(self.cid, '{"saved":true}')
+        before_messages = self.store.list_messages(self.cid)
+        before_events = self.store.list_events()
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("""
+                CREATE TRIGGER fail_reset_terminal BEFORE INSERT ON events
+                WHEN NEW.type = 'assistant.completed'
+                BEGIN SELECT RAISE(ABORT, 'simulated reset failure'); END
+            """)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.reset_model_context(
+                self.cid, "reset-client", "reset-run", "context reset",
+            )
+        self.assertEqual(self.store.get_agent_state(self.cid), '{"saved":true}')
+        self.assertEqual(self.store.list_messages(self.cid), before_messages)
+        self.assertEqual(self.store.list_events(), before_events)
+        self.assertEqual(self.store.list_context_messages(self.cid), [])
 
     def test_service_lazily_promotes_latest_compatible_conversation(self):
         latest = self.store.create_conversation("最近任务")

@@ -571,6 +571,29 @@ private struct ChatDetail: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
+                            if model.canLoadEarlierMessages || model.loadingEarlierMessages {
+                                Button {
+                                    Task { await model.loadEarlierMessages() }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        if model.loadingEarlierMessages {
+                                            ProgressView().controlSize(.small)
+                                        } else {
+                                            Image(systemName: "arrow.up.circle")
+                                        }
+                                        Text(model.loadingEarlierMessages ? "正在加载更早消息…" : "加载更早消息")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(model.loadingEarlierMessages)
+                                .accessibilityIdentifier("chat.load-earlier-messages")
+                                .task(id: model.earlierMessagesCursor) {
+                                    await model.loadEarlierMessages()
+                                }
+                            }
                             ForEach(model.messages) { message in
                                 MessageBubble(message: message, model: model, accessory: messageAccessory)
                                     .id(ConversationScrollTarget.message(message.id))

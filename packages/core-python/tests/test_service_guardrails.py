@@ -157,6 +157,59 @@ class GuardrailHTTPTests(unittest.TestCase):
         self.assertEqual(text, "".join(self.output))
         self.assertEqual(final[0]["payload"]["message"]["content"], text)
 
+    def test_primary_new_completes_without_model_call_and_task_new_is_rejected(self):
+        self.app.ensure_primary_conversation()
+        self.store.save_agent_state(self.cid, '{"saved":true}')
+        status, accepted = self.send("/new")
+        self.assertEqual(status, 202)
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(self.requests, [])
+        messages = self.store.list_messages(self.cid)
+        self.assertEqual([message["content"] for message in messages], [
+            "/new", "已开启新的模型上下文。历史记录与长期记忆均已保留。",
+        ])
+        self.assertEqual(self.store.list_context_messages(self.cid), [])
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+
+        status, created = self.request("POST", "/v1/conversations", {"title": "task"})
+        self.assertEqual(status, 201)
+        task_id = created["conversation"]["id"]
+        status, body = self.request(
+            "POST", f"/v1/conversations/{task_id}/messages",
+            {"content": "/new", "client_message_id": str(uuid4())},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"]["code"], "primary_only")
+
+    def test_messages_endpoint_pages_backwards_and_legacy_get_stays_complete(self):
+        created = [
+            self.store.append_message(self.cid, "user", f"page-{index}", str(uuid4()))
+            for index in range(5)
+        ]
+        status, latest = self.request(
+            "GET", f"/v1/conversations/{self.cid}/messages?limit=2",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(latest["messages"], created[-2:])
+        self.assertTrue(latest["has_more"])
+        status, older = self.request(
+            "GET", f"/v1/conversations/{self.cid}/messages?limit=2&before={latest['next_cursor']}",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(older["messages"], created[1:3])
+        status, legacy = self.request(
+            "GET", f"/v1/conversations/{self.cid}/messages",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(legacy["messages"], created)
+        self.assertFalse(legacy["has_more"])
+
+        status, invalid = self.request(
+            "GET", f"/v1/conversations/{self.cid}/messages?before=0&limit=201",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(invalid["error"]["code"], "invalid_input")
+
     def test_safe_text_arrives_before_model_finishes(self):
         self.output = ["这是普通的中文分析。\n" * 80]
         self.finish_gate = threading.Event()

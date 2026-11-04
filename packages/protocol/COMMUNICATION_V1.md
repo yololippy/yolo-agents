@@ -31,7 +31,7 @@
 | `GET /v1/conversations` | 可选 `query`、`include_archived=true` | `{conversations:[conversation],primary_conversation_id}`；主会话按当前 Agent/授权主体惰性创建或迁移 |
 | `POST /v1/conversations` | `{title,model?:string或null}` | 201 `{conversation}` |
 | `PATCH /v1/conversations/{id}` | `{title?, archived?, model?:string或null}` | `{conversation}` |
-| `GET /v1/conversations/{id}/messages` | 无额外参数 | `{messages:[message]}` |
+| `GET /v1/conversations/{id}/messages` | 新客户端使用 `limit=1..200`，可选 `before=<positive seq>` | `{messages:[message],next_cursor,has_more}`；消息按时间正序返回，游标向更早历史移动；无参数调用为旧 v1 客户端保留完整列表兼容行为 |
 | `POST /v1/media` | 原始图片字节；`Content-Type`、`Content-Length`、`X-Client-Media-ID`，可选 `Content-Disposition: attachment; filename=...` | 首次 201、完全相同的幂等重试 200，均为 `{media}` |
 | `GET /v1/media/{id}` | 已配对设备 | 原始图片字节；响应含 `Content-Type`、`Content-Length`、`X-Media-SHA256`，且禁止缓存 |
 | `POST /v1/conversations/{id}/messages` | `{client_message_id, content, media_ids?:[uuid]}` | 202 `{message, run_id, status:"accepted"或"duplicate"}` |
@@ -43,6 +43,8 @@
 `conversation={id,title,created_at,updated_at,archived,model}`；`model` 可空，null 表示使用服务端默认模型。旧数据库升级后该字段默认 null，不删除消息或重置事件游标。
 
 `primary_conversation_id` 是当前 Agent 和授权主体的稳定主会话 UUID。主会话可重命名但不能归档；POST 创建的会话均为普通任务会话。客户端冷启动默认选择主会话，前后台恢复和断线重连保持当前选择。产品消息保持完整；Harness 自动上下文压缩不删除产品历史。详细设计见 [`docs/PRIMARY_CONVERSATION.md`](../../docs/PRIMARY_CONVERSATION.md)。
+
+新客户端首次进入会话时请求最近 50 条消息；`has_more=true` 时，使用 `next_cursor` 作为下一次 `before`，在用户向上滚动到顶部时加载更早一页。`before` 是服务端内部消息顺序的排他上界，不是设备时间或消息 UUID。客户端按消息 ID 合并分页、缓存和事件，不能因页面重叠重复显示消息。旧客户端不带分页参数时仍可读取完整列表，但新实现不得继续依赖这一兼容路径。
 
 为兼容尚未重启或尚未升级的 v1 服务，客户端必须允许 `GET /v1/conversations` 暂时缺少 `primary_conversation_id`，此时继续显示会话并回退选择第一个未归档会话；不得把这个可选新增字段的缺失当成整条连接失效。升级后的服务仍必须返回该字段。
 
@@ -86,6 +88,8 @@ chatgpt 模式 `account.status` 为 `login_required`、`login_pending`、`authen
 上传的 `X-Client-Media-ID` 由客户端首次生成并在重试时保持不变。同一个 ID 只有字节、MIME、文件名和上传设备都完全一致才作为幂等成功返回；冲突返回 409。消息的 `media_ids` 必须引用该 Agent 数据库中尚未附着的上传图片，同一图片不能绑定到两条消息。图片与消息在同一 SQLite 事务内绑定，失败不会留下部分消息；图片存储天然位于每个 Agent 自己的数据目录，不跨 Agent 共享。
 
 消息文本最多 16000 字符；只有 `media_ids` 非空时 `content` 才可为空。JSON 请求体最多 65536 字节。`client_message_id` 由客户端在第一次发送时创建，重试保持不变；相同会话内相同标识、文本和媒体列表返回原请求，不重复运行模型。任一不同返回 409。不得把客户端发送的历史、工具调用、权限或确认字段作为服务端事实。
+
+主会话中的精确纯文本 `/new` 是上下文重置命令：服务端保留相同 `conversation_id` 和全部产品历史，在同一事务中保存 `/new` 与完成确认、清除当前可继续的模型会话状态，并设置新的短期上下文起点。它不清除长期 Memory、Harness 历史、图片、订单或审计。任务会话返回 409 `primary_only`；当前仍有已接受、排队或正在生成的回复时返回 409 `conversation_busy`；附带图片返回 400。命令本身不调用模型，幂等重试不重复重置。下一条普通消息只自动携带新起点之后的产品消息；保留的旧历史仍可浏览、搜索或由受控历史检索按需召回。
 
 同会话按接收顺序生成回复；不同会话可以并行。发送成功与回复生成成功分开，202 仅代表用户消息已接受。流式过程中失败保留失败状态，不能把已展示的 token 当作保存完毕的最终回复。
 

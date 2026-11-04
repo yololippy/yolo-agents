@@ -180,6 +180,26 @@ public struct Message: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct MessagesPage: Codable, Equatable, Sendable {
+    public let messages: [Message]
+    public let nextCursor: Int64?
+    public let hasMore: Bool
+    public init(messages: [Message], nextCursor: Int64?, hasMore: Bool) {
+        self.messages = messages; self.nextCursor = nextCursor; self.hasMore = hasMore
+    }
+    enum CodingKeys: String, CodingKey {
+        case messages
+        case nextCursor = "next_cursor", hasMore = "has_more"
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        messages = try values.decode([Message].self, forKey: .messages)
+        nextCursor = try values.decodeIfPresent(Int64.self, forKey: .nextCursor)
+        // A pre-pagination v1 service returns only `messages`; treat it as one complete page.
+        hasMore = try values.decodeIfPresent(Bool.self, forKey: .hasMore) ?? false
+    }
+}
+
 public struct SendMessageResponse: Codable, Equatable, Sendable {
     public let message: Message
     public let runID: UUID

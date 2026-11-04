@@ -190,6 +190,48 @@ func invalidServiceAddressesFail(_ value: String) {
     #expect(list.primaryConversationID == nil)
 }
 
+@Test func messageHistoryUsesBoundedBackwardCursorPages() async throws {
+    let older = message(role: .user, content: "older", id: UUID(), run: nil)
+    let page = MessagesPage(messages: [older], nextCursor: 42, hasMore: true)
+    let legacy = """
+    {"messages":[]}
+    """
+    let transport = RecordingTransport([
+        try encoded(page), HTTPResult(data: Data(legacy.utf8), status: 200),
+    ])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com/base"),
+                        token: "fixture-token", transport: transport)
+    #expect(try await api.messagePage(
+        conversationID: conversationID, before: 99, limit: 500
+    ) == page)
+    #expect(try await api.messagePage(conversationID: conversationID) ==
+            MessagesPage(messages: [], nextCursor: nil, hasMore: false))
+
+    let requests = await transport.requests
+    let first = try #require(URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false))
+    #expect(first.path == "/base/v1/conversations/\(conversationID.uuidString)/messages")
+    #expect(first.queryItems?.first(where: { $0.name == "before" })?.value == "99")
+    #expect(first.queryItems?.first(where: { $0.name == "limit" })?.value == "200")
+    #expect(requests[1].url?.query?.contains("limit=50") == true)
+}
+
+@Test func invalidMessageCursorPagesAreRejected() async throws {
+    let invalid = MessagesPage(messages: [], nextCursor: nil, hasMore: true)
+    let nonDecreasing = MessagesPage(messages: [], nextCursor: 100, hasMore: true)
+    let transport = RecordingTransport([try encoded(invalid), try encoded(nonDecreasing)])
+    let api = APIClient(endpoint: try ServiceEndpoint("https://example.com"),
+                        token: "fixture-token", transport: transport)
+    await #expect(throws: ClientError.invalidMessagePage) {
+        try await api.messagePage(conversationID: conversationID)
+    }
+    await #expect(throws: ClientError.invalidMessagePage) {
+        try await api.messagePage(conversationID: conversationID, before: 0)
+    }
+    await #expect(throws: ClientError.invalidMessagePage) {
+        try await api.messagePage(conversationID: conversationID, before: 100)
+    }
+}
+
 @Test func retryReusesTheSameMessageIDAndContent() async throws {
     let response = SendMessageResponse(message: message(role: .user, content: "你好", clientMessageID: clientID),
                                        runID: runID, status: "duplicate")

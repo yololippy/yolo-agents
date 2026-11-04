@@ -19,6 +19,11 @@ public enum ModelConnectionState: Equatable {
     case checking, available, recovering, unavailable, disabled
 }
 
+private struct MessagePaginationState: Equatable {
+    var nextCursor: Int64?
+    var hasMore: Bool
+}
+
 @MainActor
 public final class ChatModel: ObservableObject {
     @Published public private(set) var started = false
@@ -33,6 +38,8 @@ public final class ChatModel: ObservableObject {
     @Published public private(set) var busy = false
     @Published public var selectedID: UUID?
     @Published public var errorMessage: String?
+    @Published private var messagePagination: [UUID: MessagePaginationState] = [:]
+    @Published private var loadingEarlierConversationIDs: Set<UUID> = []
     private let repository: ClientRepository
     private let transport: any HTTPTransport
     private let streamTransport: any SSETransport
@@ -72,6 +79,16 @@ public final class ChatModel: ObservableObject {
         return modelCatalog?.models.first(where: { $0.id == id })?.name ?? id
     }
     public var messages: [Message] { selectedID.map { state.messages(in: $0) } ?? [] }
+    public var canLoadEarlierMessages: Bool {
+        guard let selectedID, isOnline else { return false }
+        return messagePagination[selectedID]?.hasMore == true
+    }
+    public var loadingEarlierMessages: Bool {
+        selectedID.map { loadingEarlierConversationIDs.contains($0) } ?? false
+    }
+    public var earlierMessagesCursor: Int64? {
+        selectedID.flatMap { messagePagination[$0]?.nextCursor }
+    }
     public var partialReplies: [PartialReply] {
         state.partialReplies.filter { $0.conversationID == selectedID }.sorted { $0.createdAt < $1.createdAt }
     }
@@ -134,6 +151,7 @@ public final class ChatModel: ObservableObject {
             self.connection = connection; apply(health)
             modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
             state = ClientState(); selectedID = nil
+            messagePagination = [:]; loadingEarlierConversationIDs = []
             connectionState = .disconnected
             errorMessage = nil
             startSynchronizing()
@@ -268,11 +286,9 @@ public final class ChatModel: ObservableObject {
                 selectPrimaryAfterSnapshot = false
             }
             if let selectedID {
-                let messages = try await api.messages(conversationID: selectedID)
+                let page = try await api.messagePage(conversationID: selectedID)
                 try check(attempt)
-                var next = state
-                try next.mergeMessages(messages, conversationID: selectedID)
-                try commit(next)
+                try mergeMessagePage(page, conversationID: selectedID)
             }
         }
         while true {
@@ -321,13 +337,45 @@ public final class ChatModel: ObservableObject {
         guard let id = selectedID, let connection, isOnline else { return }
         let attempt = generation
         do {
-            let messages = try await client(for: connection)
-                .messages(conversationID: id)
+            let page = try await client(for: connection)
+                .messagePage(conversationID: id)
             try check(attempt)
-            var next = state
-            try next.mergeMessages(messages, conversationID: id)
-            try commit(next)
+            guard selectedID == id else { return }
+            try mergeMessagePage(page, conversationID: id)
         } catch { handle(error, attempt: attempt) }
+    }
+    public func loadEarlierMessages() async {
+        guard let id = selectedID, let connection, isOnline,
+              messagePagination[id]?.hasMore == true,
+              !loadingEarlierConversationIDs.contains(id) else { return }
+        loadingEarlierConversationIDs.insert(id)
+        defer { loadingEarlierConversationIDs.remove(id) }
+        let attempt = generation
+        do {
+            var beforeCount = state.messages(in: id).count
+            while let cursor = messagePagination[id]?.nextCursor,
+                  messagePagination[id]?.hasMore == true {
+                let page = try await client(for: connection).messagePage(
+                    conversationID: id, before: cursor
+                )
+                try check(attempt)
+                guard selectedID == id else { return }
+                try mergeMessagePage(page, conversationID: id)
+                let count = state.messages(in: id).count
+                if count > beforeCount || !page.hasMore { return }
+                // A bounded offline cache can already contain this server page.
+                // Keep walking until loading reveals an older message or reaches the start.
+                beforeCount = count
+            }
+        } catch { handle(error, attempt: attempt) }
+    }
+    private func mergeMessagePage(_ page: MessagesPage, conversationID: UUID) throws {
+        var next = state
+        try next.mergeMessages(page.messages, conversationID: conversationID)
+        try commit(next)
+        messagePagination[conversationID] = MessagePaginationState(
+            nextCursor: page.nextCursor, hasMore: page.hasMore
+        )
     }
     public func createConversation() async {
         guard isOnline, !busy, let connection else { return }
@@ -341,6 +389,9 @@ public final class ChatModel: ObservableObject {
             var next = state; next.upsertConversation(conversation)
             try commit(next)
             selectedID = conversation.id
+            messagePagination[conversation.id] = MessagePaginationState(
+                nextCursor: nil, hasMore: false
+            )
         } catch { handle(error, attempt: attempt) }
     }
     public func refreshModels() async {
@@ -495,6 +546,7 @@ public final class ChatModel: ObservableObject {
             catch { errorMessage = error.localizedDescription }
         }
         connection = nil; state = ClientState(); selectedID = nil; health = nil
+        messagePagination = [:]; loadingEarlierConversationIDs = []
         modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = false
         modelConnectionState = .checking
         connectionState = .disconnected
