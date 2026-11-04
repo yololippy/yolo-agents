@@ -126,6 +126,37 @@ public struct ClientState: Codable, Equatable, Sendable {
             }
             .sorted { $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt }
     }
+    /// Runs known to have reached the Agent but not yet reached an authoritative
+    /// assistant terminal message. This works for local sends, other devices, and
+    /// cached state restored before an event catch-up.
+    public func activeRunIDs(in conversationID: UUID) -> Set<UUID> {
+        let messages = messages(in: conversationID)
+        let terminal = Set(messages.lazy.compactMap { message -> UUID? in
+            guard message.role == .assistant, message.status != .pending else { return nil }
+            return message.runID
+        })
+        let failedPartials = Set(partialReplies.lazy.compactMap { reply in
+            reply.conversationID == conversationID && reply.error != nil ? reply.id : nil
+        })
+        var active = Set(messages.lazy.compactMap { message -> UUID? in
+            guard message.role == .user else { return nil }
+            return message.runID
+        })
+        active.formUnion(outgoing.lazy.compactMap { outgoing -> UUID? in
+            guard outgoing.conversationID == conversationID else { return nil }
+            guard case .accepted = outgoing.status else { return nil }
+            return outgoing.runID
+        })
+        active.formUnion(partialReplies.lazy.compactMap { reply in
+            reply.conversationID == conversationID && reply.error == nil ? reply.id : nil
+        })
+        active.subtract(terminal)
+        active.subtract(failedPartials)
+        return active
+    }
+    public func isRunning(conversationID: UUID) -> Bool {
+        !activeRunIDs(in: conversationID).isEmpty
+    }
     public mutating func upsertConversation(_ conversation: Conversation) {
         if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
             // A REST snapshot can arrive after a newer event while requests overlap.

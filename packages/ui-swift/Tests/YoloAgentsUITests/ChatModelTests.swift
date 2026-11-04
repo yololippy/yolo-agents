@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import YoloAgentsSDK
+@testable import YoloAgentsSDK
 @testable import YoloAgentsUI
 
 private let testConversationID = UUID(uuidString: "10000000-0000-4000-8000-000000000001")!
@@ -163,10 +163,145 @@ private func delta(_ seq: Int64, _ content: String) -> ServerEvent {
     ServerEvent(seq: seq, type: "assistant.delta", conversationID: testConversationID,
         payload: EventPayload(runID: testRunID, delta: content), createdAt: Date())
 }
+private func activityMessage(
+    id: UUID = UUID(), conversationID: UUID = testConversationID,
+    role: MessageRole, status: MessageStatus = .completed,
+    clientMessageID: UUID? = nil, runID: UUID? = nil
+) -> Message {
+    Message(id: id, conversationID: conversationID, role: role,
+            content: role == .user ? "question" : "answer",
+            createdAt: Date(), status: status,
+            clientMessageID: clientMessageID, runID: runID)
+}
+private func activityEvent(
+    _ seq: Int64, _ type: String, conversationID: UUID = testConversationID,
+    payload: EventPayload
+) -> ServerEvent {
+    ServerEvent(seq: seq, type: type, conversationID: conversationID,
+                payload: payload, createdAt: Date())
+}
 private func bytes(_ event: ServerEvent) throws -> Data {
     let json = String(decoding: try WireJSON.encoder().encode(event), as: UTF8.self)
     return Data("id: \(event.seq)\nevent: \(event.type)\ndata: \(json)\n\n".utf8)
 }
+
+@Test func conversationScrollFollowsLatestUntilTheUserScrollsUp() {
+    let otherConversationID = UUID()
+    let olderMessageID = UUID()
+    var scroll = ConversationScrollState()
+
+    scroll.open(testConversationID)
+    #expect(scroll.target == .bottom(testConversationID))
+    #expect(scroll.followsLatest)
+
+    scroll.positionChanged(.message(olderMessageID), in: testConversationID)
+    scroll.contentChanged(in: testConversationID)
+    #expect(scroll.target == .message(olderMessageID))
+    #expect(!scroll.followsLatest)
+
+    scroll.positionChanged(.bottom(testConversationID), in: testConversationID)
+    scroll.contentChanged(in: testConversationID)
+    #expect(scroll.target == .bottom(testConversationID))
+    #expect(scroll.followsLatest)
+
+    scroll.open(otherConversationID)
+    scroll.positionChanged(.message(olderMessageID), in: testConversationID)
+    #expect(scroll.target == .bottom(otherConversationID))
+    #expect(scroll.conversationID == otherConversationID)
+}
+
+@Test func conversationProgressTracksRemoteRunsAndTerminalCatchUp() throws {
+    let secondRunID = UUID()
+    var state = ClientState()
+    state = try state.applying(activityEvent(
+        1, "message.created",
+        payload: EventPayload(message: activityMessage(role: .user, runID: testRunID))))
+    state = try state.applying(activityEvent(
+        2, "message.created",
+        payload: EventPayload(message: activityMessage(role: .user, runID: secondRunID))))
+
+    #expect(state.activeRunIDs(in: testConversationID) == [testRunID, secondRunID])
+    #expect(ConversationActivity(state: state, conversationID: testConversationID).showsProgress)
+
+    let completed = activityMessage(role: .assistant, runID: testRunID)
+    state = try state.applying(activityEvent(
+        3, "assistant.completed",
+        payload: EventPayload(message: completed, runID: testRunID)))
+    #expect(state.activeRunIDs(in: testConversationID) == [secondRunID])
+
+    let failed = activityMessage(role: .assistant, status: .failed, runID: secondRunID)
+    state = try state.applying(activityEvent(
+        4, "assistant.failed",
+        payload: EventPayload(message: failed, runID: secondRunID,
+                              error: ServiceError(code: "failed", message: "failed"))))
+    #expect(!ConversationActivity(state: state, conversationID: testConversationID).showsProgress)
+}
+
+@Test func conversationProgressHandlesAcceptedPartialAndFailedRuns() throws {
+    let clientMessageID = UUID()
+    var state = ClientState()
+    state.enqueue(content: "question", conversationID: testConversationID,
+                  id: clientMessageID, now: Date())
+    let canonical = activityMessage(role: .user, clientMessageID: clientMessageID)
+    try state.accept(
+        SendMessageResponse(message: canonical, runID: testRunID, status: "accepted"),
+        clientMessageID: clientMessageID)
+    #expect(state.isRunning(conversationID: testConversationID))
+
+    state = try state.applying(delta(1, "partial"))
+    #expect(state.isRunning(conversationID: testConversationID))
+    #expect(state.activeRunIDs(in: testConversationID) == [testRunID])
+
+    state = try state.applying(activityEvent(
+        2, "assistant.failed",
+        payload: EventPayload(runID: testRunID,
+                              error: ServiceError(code: "timeout", message: "timeout"))))
+    #expect(!state.isRunning(conversationID: testConversationID))
+}
+
+@Test func terminalBeforeAcceptanceAndCacheRestoreDoNotReviveFinishedRuns() throws {
+    let store = UIStore()
+    let repository = ClientRepository(store: store)
+    let connection = try fixtureConnection()
+    try repository.saveConnection(connection)
+
+    let finishedClientID = UUID()
+    var state = ClientState()
+    state.enqueue(content: "finished", conversationID: testConversationID,
+                  id: finishedClientID, now: Date())
+    let completed = activityMessage(role: .assistant, runID: testRunID)
+    state = try state.applying(activityEvent(
+        1, "assistant.completed",
+        payload: EventPayload(message: completed, runID: testRunID)))
+    try state.accept(
+        SendMessageResponse(
+            message: activityMessage(role: .user, clientMessageID: finishedClientID),
+            runID: testRunID, status: "duplicate"),
+        clientMessageID: finishedClientID)
+    #expect(!state.isRunning(conversationID: testConversationID))
+
+    let activeRunID = UUID()
+    let activeClientID = UUID()
+    state.enqueue(content: "active", conversationID: testConversationID,
+                  id: activeClientID, now: Date())
+    try state.accept(
+        SendMessageResponse(
+            message: activityMessage(role: .user, clientMessageID: activeClientID),
+            runID: activeRunID, status: "accepted"),
+        clientMessageID: activeClientID)
+    let retryOnlyConversationID = UUID()
+    state.enqueue(content: "unconfirmed", conversationID: retryOnlyConversationID,
+                  id: UUID(), now: Date())
+    try repository.saveState(state, for: connection)
+
+    let restored = try repository.state(for: connection)
+    #expect(restored.activeRunIDs(in: testConversationID) == [activeRunID])
+    #expect(restored.outgoing.contains { outgoing in
+        outgoing.conversationID == retryOnlyConversationID && outgoing.status == .needsRetry
+    })
+    #expect(!restored.isRunning(conversationID: retryOnlyConversationID))
+}
+
 @MainActor
 private func waitUntil(_ check: () async -> Bool) async throws {
     let deadline = ContinuousClock.now.advanced(by: .seconds(3))

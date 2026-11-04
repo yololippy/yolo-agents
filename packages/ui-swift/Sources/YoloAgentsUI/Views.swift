@@ -333,8 +333,15 @@ private struct ChatShell: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.bold()).foregroundStyle(.tertiary)
+                if ConversationActivity(state: model.state, conversationID: conversation.id).showsProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("正在等待助手回复")
+                        .accessibilityIdentifier("chat.conversation-progress.\(conversation.id.uuidString.lowercased())")
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold()).foregroundStyle(.tertiary)
+                }
             }
             .contentShape(Rectangle())
         }
@@ -402,17 +409,28 @@ private struct ChatShell: View {
                     }.disabled(!model.isOnline || model.busy)
                     ForEach(conversations) { conversation in
                         NavigationLink(value: conversation.id) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(conversation.title).lineLimit(1)
-                                HStack {
-                                    Text(conversation.updatedAt, style: .date)
-                                    if model.isPrimaryConversation(conversation) {
-                                        Label("主会话", systemImage: "pin.fill")
-                                            .labelStyle(.titleAndIcon)
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(conversation.title).lineLimit(1)
+                                    HStack {
+                                        Text(conversation.updatedAt, style: .date)
+                                        if model.isPrimaryConversation(conversation) {
+                                            Label("主会话", systemImage: "pin.fill")
+                                                .labelStyle(.titleAndIcon)
+                                        }
+                                        if conversation.archived { Image(systemName: "archivebox") }
                                     }
-                                    if conversation.archived { Image(systemName: "archivebox") }
-                                }.font(.caption).foregroundStyle(.secondary)
-                            }.padding(.vertical, 4)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                                Spacer()
+                                if ConversationActivity(state: model.state, conversationID: conversation.id).showsProgress {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .accessibilityLabel("正在等待助手回复")
+                                        .accessibilityIdentifier("chat.conversation-progress.\(conversation.id.uuidString.lowercased())")
+                                }
+                            }
                         }
                         .contextMenu {
                             Button { copyConversationID(conversation.id) } label: {
@@ -522,6 +540,7 @@ private struct ChatDetail: View {
     let renameConversation: (Conversation) -> Void
     let conversationArchived: () -> Void
     @ViewState private var composerDismissRequest = 0
+    @ViewState private var scrollState = ConversationScrollState()
     private var composerAvailability: ComposerAvailability {
         ComposerAvailability(hasConversation: model.selectedID != nil,
                              archived: model.selectedConversation?.archived == true,
@@ -554,6 +573,7 @@ private struct ChatDetail: View {
                         LazyVStack(alignment: .leading, spacing: 18) {
                             ForEach(model.messages) { message in
                                 MessageBubble(message: message, model: model, accessory: messageAccessory)
+                                    .id(ConversationScrollTarget.message(message.id))
                             }
                             ForEach(model.partialReplies) { reply in
                                 VStack(alignment: .leading, spacing: 6) {
@@ -573,20 +593,39 @@ private struct ChatDetail: View {
                                     }
                                 }
                                 .padding(14).background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+                                .id(ConversationScrollTarget.partialReply(reply.id))
                             }
                             ForEach(model.awaitingReplies) { reply in
                                 AwaitingReplyBubble(reply: reply, isOnline: model.isOnline)
+                                    .id(ConversationScrollTarget.awaitingReply(reply.id))
                             }
-                            Color.clear.frame(height: 1).id("bottom")
-                        }.padding().frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
+                            if let id = model.selectedID {
+                                Color.clear.frame(height: 1).id(ConversationScrollTarget.bottom(id))
+                            }
+                        }
+                        .scrollTargetLayout()
+                        .padding().frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
                     }
+                    .defaultScrollAnchor(.bottom)
+                    .scrollPosition(id: scrollPositionBinding, anchor: .bottom)
                     .scrollDismissesKeyboard(.interactively)
                     .simultaneousGesture(TapGesture().onEnded { composerDismissRequest += 1 })
-                    .onChange(of: model.messages) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                    .onChange(of: model.partialReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                    .onChange(of: model.awaitingReplies) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                    .onChange(of: model.messages) { _, _ in contentChanged() }
+                    .onChange(of: model.partialReplies) { _, _ in contentChanged() }
+                    .onChange(of: model.awaitingReplies) { _, _ in contentChanged() }
+                    .task(id: model.selectedID) {
+                        guard let id = model.selectedID else { return }
+                        scrollState.open(id)
+                        await Task.yield()
+                        guard model.selectedID == id else { return }
+                        proxy.scrollTo(ConversationScrollTarget.bottom(id), anchor: .bottom)
+                        await model.loadSelectedMessages()
+                        guard model.selectedID == id else { return }
+                        await Task.yield()
+                        scrollState.open(id)
+                        proxy.scrollTo(ConversationScrollTarget.bottom(id), anchor: .bottom)
+                    }
                 }
-                .task(id: model.selectedID) { await model.loadSelectedMessages() }
             }
         }
         .navigationTitle(model.selectedConversation?.title ?? model.appName)
@@ -626,6 +665,19 @@ private struct ChatDetail: View {
                 }
             }.background(.bar)
         }
+    }
+    private var scrollPositionBinding: Binding<ConversationScrollTarget?> {
+        Binding(
+            get: { scrollState.target },
+            set: { target in
+                guard let id = model.selectedID else { return }
+                scrollState.positionChanged(target, in: id)
+            }
+        )
+    }
+    private func contentChanged() {
+        guard let id = model.selectedID else { return }
+        scrollState.contentChanged(in: id)
     }
     private var newConversationButton: some View {
         Button { Task { await model.createConversation() } } label: {
