@@ -25,6 +25,17 @@ OPEN_ORDER_TOOL = "get_open_order"
 PAPER_ORDERS_TOOL = "list_paper_orders"
 PAPER_ORDER_TOOL = "get_paper_order"
 PAPER_DRAFT_TOOL_SCHEMA_VERSION = 5
+# Keep this policy in the shared trading instructions so every supported model
+# adapter (Pydantic/ChatGPT and Codex) receives the same product writing style.
+TRADING_RESPONSE_STYLE_INSTRUCTIONS = (
+    "Default to a concise answer in the user's language. Lead with the conclusion, then include "
+    "only the facts, risks, and next steps needed for the current request. Unless the user explicitly "
+    "asks for exhaustive detail, keep the answer under roughly 800 Chinese characters or the equivalent, "
+    "use at most one compact table and five bullets, and avoid repeated caveats, multi-level headings, or "
+    "restating the same risk. A request to extract a screenshot does not by itself request a tutorial: "
+    "use a compact extraction plus two or three decision-relevant observations, and offer deeper detail "
+    "instead of including it by default. Safety-critical warnings may exceed this guideline only when needed. "
+)
 PAPER_DRAFT_DESCRIPTION = (
     "Create a Paper stock limit-order draft and obtain an application-owned What-if review. "
     "Call this tool whenever the user asks to place a Paper order and explicitly supplied an "
@@ -85,6 +96,7 @@ READ_TOOL_SPECS = (
 READ_TOOL_NAMES = frozenset(spec["name"] for spec in READ_TOOL_SPECS)
 
 TRADING_TOOL_INSTRUCTIONS = (
+    TRADING_RESPONSE_STYLE_INSTRUCTIONS +
     "IBKR Paper read tools and create_paper_order_draft are available in this conversation. Use "
     "get_market_quote for current quote questions and always state its data_type; delayed data must never be "
     "described as live. Use list_positions for current holdings, list_open_orders for the current open-order "

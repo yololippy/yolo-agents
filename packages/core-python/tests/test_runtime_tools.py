@@ -18,6 +18,8 @@ from yolo_agents.runtime_tools import (
     PAPER_DRAFT_TOOL,
     POSITIONS_TOOL,
     RuntimeToolContext,
+    TRADING_RESPONSE_STYLE_INSTRUCTIONS,
+    TRADING_TOOL_INSTRUCTIONS,
     finalize_trading_reply,
     paper_draft_dynamic_tool,
     trading_dynamic_tools,
@@ -35,6 +37,13 @@ class RuntimeToolTests(unittest.TestCase):
             trusted_messages=({"role": "user", "content": "Buy two TSLA at limit 250.00"},),
             create_paper_draft=callback, reauthorize=lambda: {"platform": "macos"},
         )
+
+    def test_trading_prompt_defaults_to_compact_decision_focused_replies(self):
+        self.assertIn(TRADING_RESPONSE_STYLE_INSTRUCTIONS, TRADING_TOOL_INSTRUCTIONS)
+        self.assertIn("under roughly 800 Chinese characters", TRADING_RESPONSE_STYLE_INSTRUCTIONS)
+        self.assertIn("at most one compact table and five bullets", TRADING_RESPONSE_STYLE_INSTRUCTIONS)
+        self.assertIn("does not by itself request a tutorial", TRADING_RESPONSE_STYLE_INSTRUCTIONS)
+        self.assertIn("Safety-critical warnings", TRADING_RESPONSE_STYLE_INSTRUCTIONS)
 
     def test_schema_requires_explicit_limit_price_and_exposes_no_submit_actions(self):
         spec = paper_draft_dynamic_tool()
