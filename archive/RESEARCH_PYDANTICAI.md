@@ -1,7 +1,9 @@
-# PydanticAI Agent、长期记忆与历史对话检索方案
+# PydanticAI Agent、长期记忆与历史对话检索方案（历史归档）
+
+> 选型已经完成，本文不再维护。稳定设计见 [ARCHITECTURE](../docs/ARCHITECTURE.md)，当前任务见 [ROADMAP](../docs/ROADMAP.md)。
 
 调研日期：2026-10-24（Asia/Shanghai）  
-关联文档：[项目大纲](PROJECT_OUTLINE.md)、[开发任务](TODO.md)  
+关联文档：[架构](../docs/ARCHITECTURE.md)、[路线图](../docs/ROADMAP.md)
 决策状态：**主 Agent 使用 PydanticAI；长期记忆、历史召回、上下文压缩和运行快照使用 Pydantic 官方组件。**  
 验证范围：核对官方文档、PyPI 元数据、发布记录及固定版本源码；对历史检索的分词规则做了最小复现。未安装运行完整 PydanticAI，未调用云端模型，未连接 IBKR。本文中的架构、参数和实施顺序属于本项目设计，不能视为已实现能力。
 

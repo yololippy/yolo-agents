@@ -9,7 +9,7 @@
 组件属于共享 UI，不包含 YoloTrade/IBKR 逻辑；后续 Agent 复用相同渲染器，通过
 `AgentMarkdownTheme` 提供品牌颜色即可。远程图片默认关闭，链接只允许交给系统打开 `https` URL。
 
-2026-10-27：
+## 聊天与同步
 
 - `ChatModel` 先补齐全局游标，再持续接收 SSE；正常服务端流轮换直接续接，网络错误按退避重试，设备认证失效停止连接。iOS 在非活动阶段取消，恢复活动后补齐；macOS 不因窗口短暂失去焦点中断回复。
 - 模型选择按会话保存，只在 PATCH 成功后显示新模型。目录的服务错误和实际选择错误分别展示；认证或套餐能力仍由服务端判定。
@@ -27,11 +27,11 @@ Mac 编辑器保留原生 NSTextView、中文组字与 Enter / Shift+Enter 行�
 
 Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex 受管登录对其他使用者的影响说明。`expired` 显示“登录状态需要刷新”，`permission_required` 显示待授予套餐权限，两者仍能退出清理。远程撤销未确认会明确显示。iOS 和非管理设备只读健康身份与模型目录中的脱敏认证状态，邮箱和套餐不进入其状态或聊天缓存。
 
-2026-10-28：共享 UI 23 项测试通过，覆盖输入、聊天、浏览器登录轮询、实际取消/超时、退出、旧路由、状态清理与认证前阻断错误 Agent。测试使用内存 fixtures，不打开浏览器或访问生产 Keychain。
+测试覆盖输入、聊天、浏览器登录轮询、取消/超时、退出、状态清理与认证前阻断错误 Agent；使用内存 fixtures，不打开浏览器或访问生产 Keychain。当前验证基线见 [ROADMAP](../../docs/ROADMAP.md)。
 
 ## App 功能入口
 
-`YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，YoloBeni 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [YoloTrade 私有客户端](../../apps/yolo-trade/client-swift/README.md)。
+`YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，YoloBeni 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [YoloTrade 客户端](../../apps/yolo-trade/README.md)。
 
 iOS 26 会话首页使用公共 `AgentActionDock`：产品注入的 `ChatFeature` 与通用的“ChatGPT 账号”“连接设置”并列显示。YoloTrade 注入“Paper 订单”；未注入交易能力的 YoloBeni 只显示两个通用入口。功能坞使用系统 `GlassEffectContainer` 与交互式 Liquid Glass；同一个圆形玻璃选中节点在入口之间形变移动，并将图标和短标题收进圆内。`AgentActionDockItem`、可选选择状态和选择回调均为产品无关接口，其他 Agent 可以直接复用。功能坞不依据产品身份推断能力；Mac 继续使用原生侧边栏和工具栏入口。会话列表不提供本地标题搜索，归档筛选保留为独立按钮。
 

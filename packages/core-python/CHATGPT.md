@@ -22,4 +22,4 @@
 
 同一 Provider 会话选择新模型时，下一轮创建新的官方 Conversation，以最多 64000 字符的已完成产品文本作为引用上下文；不把旧模型的工具调用或内部状态交给新模型。原产品消息和旧快照保留。Codex/Pydantic/demo 的旧会话可读取产品历史，切换模式需新建会话，不能伪装恢复不同 Provider 的内部状态。
 
-账号接口、错误和字段见 [通信协议](../protocol/COMMUNICATION_V1.md)。离线测试使用模拟 OAuth 和 HTTP 传输。2026-10-28 已在独立配置中完成两实例真实授权、模型流式、模型切换、记忆/Skills 隔离与退出/重启验证；真实令牌到期刷新仍未实测。证据见 [项目验收记录](../../docs/TODO.md)。参考 [OpenAI SIWC](https://developers.openai.com/siwc/token-sharing-open-source)、[PydanticAI ChatGPT Provider](https://pydantic.dev/docs/ai/models/openai-chatgpt/)。
+账号接口、错误和字段见 [通信协议](../protocol/COMMUNICATION_V1.md)。离线测试使用模拟 OAuth 和 HTTP 传输。历史真实授权与隔离验收见 [Provider 归档](../../archive/CHATGPT_PROVIDER_PLAN.md)；当前未完成项见 [ROADMAP](../../docs/ROADMAP.md)。参考 [OpenAI SIWC](https://developers.openai.com/siwc/token-sharing-open-source)、[PydanticAI ChatGPT Provider](https://pydantic.dev/docs/ai/models/openai-chatgpt/)。

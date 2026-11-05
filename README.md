@@ -1,83 +1,98 @@
 # Yolo Agents
 
-运行在个人 Mac 上、可扩展为多个 Agent 的本地 Agent Host。YoloTrade 是第一个实例，YoloBeni 是日常生活助手；Mac 和 iOS App 分别连接各自的本机服务。
+运行在个人 Mac 上的多产品 Agent monorepo。当前包含：
+
+- **YoloTrade**：对话式 IBKR 助手，交易能力和账户数据保持产品私有。
+- **YoloBeni**：日常生活助手，个人数据和生活集成保持产品私有。
+
+## 目录
 
 ```text
-packages/                       跨 Agent/App 的可复用包
-  protocol/                     通信协议与数据模型
-  core-python/                  Host、认证、存储和通用运行时
-  sdk-swift/                    Swift 通信 SDK 与联调 probe
-  ui-swift/                     可复用 SwiftUI 聊天界面
-agents/                         各 Agent 的领域运行时
-  yolo-trade/runtime-python/ 第一个 Agent：IBKR Paper 交易集成
-  yolo-beni/runtime-python/  独立授权的生活助手
-apps/                           各 Agent 的用户客户端
-  yolo-trade/client-swift/    YoloTrade 私有的双端客户端模块
-  yolo-trade/{ios,macos,xcode}/
-  yolo-beni/client-swift/     YoloBeni 私有客户端入口
-  yolo-beni/{ios,macos,xcode}/
+packages/                       跨产品复用
+  protocol/                     通信协议与兼容规则
+  core-python/                  Host、认证、存储和通用 Runtime
+  sdk-swift/                    Swift 通信 SDK
+  ui-swift/                     通用 SwiftUI
+agents/
+  yolo-trade/runtime-python/    YoloTrade 私有运行时与 IBKR
+  yolo-beni/runtime-python/     YoloBeni 私有运行时
+apps/
+  yolo-trade/                   YoloTrade macOS/iOS 客户端
+  yolo-beni/                    YoloBeni macOS/iOS 客户端
 ```
 
-## 本轮可运行内容
+共享层不得根据产品 ID、名称、目录或端口推断能力。产品身份、凭据、数据、Skills、Keychain 和运行状态分别隔离；旧目录不会被自动接管。
 
-- Python 后端：持久会话、消息幂等、串行回复、设备配对/撤销、增量事件及 SSE；每个授权主体有一个不可归档的长期主会话，普通任务会话继续独立创建。
-- Agent：演示、PydanticAI、Codex 兼容及独立 ChatGPT Provider 四种明确模式。YoloTrade 与 YoloBeni 分别授权、保存记忆与 Skills；新 Provider 的官方 SDK、授权生命周期和流式适配已接入，真实浏览器授权、模型调用和独立记忆/Skills 已在隔离配置中验收。Codex 模式既有模型目录、流式生成、模型切换和重启续聊验收继续保留。
-- Guardrails：PydanticAI / ChatGPT 模式接入官方输入、工具和输出检查，阻断已知格式凭据，并补充流式发送前检查；适用范围与存储边界见 [运行时说明](packages/core-python/README.md#凭据防护)。
-- Apple：共享 Swift 通信 SDK、Keychain 与离线同步状态、SwiftUI macOS / iOS 客户端及 Xcode 工程。本机已用完整 Xcode 27.1 完成 iOS Simulator arm64 构建；Mac 客户端已实测新会话、模型选择、输入和真实 Codex 流式回复。
-- IBKR 已安装并登录 Paper Gateway；YoloTrade 已实现 Paper 专用的启动对账、What-if、Mac 明确确认后单次提交/单笔撤单、独立订单账本及 iOS 只读订单界面。Live 始终拒绝执行。本地模拟覆盖已完成；真实 Gateway 当前仍启用 Read-Only API，因此尚未进行真实 What-if 或模拟订单验收。
+## 启动 Host
 
-## 先运行后端演示
-
-现有 Python 3.11+ 即可，不需要安装第三方依赖：
+无真实模型的演示模式：
 
 ```sh
-PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python python3 -m yolo_trade --mode demo
+PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
+  python3 -m yolo_trade --mode demo
+
+PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python \
+  python3 -m yolo_beni --mode demo
 ```
 
-默认地址 `http://127.0.0.1:8765`。控制台提供两个十分钟有效的一次性配对码，分别给 Mac / iOS 使用；配对成功后客户端将设备 token 保存到 Keychain。演示回复会明确说明没有调用真实模型或 IBKR。
-
-新的独立授权路径（需在对应 Mac App 中完成该 Agent 的浏览器授权）：
+各产品独立的 ChatGPT Provider：
 
 ```sh
-PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/python -m yolo_trade --mode chatgpt
-PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python .venv/bin/python -m yolo_beni --mode chatgpt
+PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
+  .venv/bin/python -m yolo_trade --mode chatgpt
+
+PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python \
+  .venv/bin/python -m yolo_beni --mode chatgpt
 ```
 
-YoloTrade 默认端口 8765，YoloBeni 默认端口 8766；数据分别位于 `~/Library/Application Support/YoloAgents/<agent-id>/`。未标记的旧数据目录不会被任一产品直接接管；请先备份并按 [Provider 方案](docs/CHATGPT_PROVIDER_PLAN.md) 设计、验收对应产品的一次性迁移，不要删除旧数据或手工补归属标记。
+YoloTrade 默认端口为 8765，YoloBeni 为 8766。数据分别位于：
 
-保留 Codex 兼容模式；已在 Mac 的 Codex 中完成 ChatGPT 登录时，可显式启动：
-
-```sh
-PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/python -m yolo_trade --mode codex
+```text
+~/Library/Application Support/YoloAgents/yolo-trade/
+~/Library/Application Support/YoloAgents/yolo-beni/
 ```
 
-该模式由 Codex 管理登录和刷新，应用不读取或复制登录 token；详情见 [Codex 接入说明](packages/core-python/CODEX.md)。
-
-- [共享 Host、存储与真实模型适配边界](packages/core-python/HOST.md)
-- [共享 Agent 运行时说明](packages/core-python/README.md)
-- [YoloTrade 与 IBKR Paper 配置](agents/yolo-trade/README.md)
-- [YoloTrade Apple 客户端](apps/yolo-trade/README.md)
-- [通信协议 v1](packages/protocol/COMMUNICATION_V1.md)
-- [需求与架构](docs/PROJECT_OUTLINE.md)
-- [开发任务](docs/TODO.md)
-- [Agent 设计与验证边界](docs/RESEARCH_PYDANTICAI.md)
-- [各 Agent 独立的 ChatGPT Provider 方案](docs/CHATGPT_PROVIDER_PLAN.md)
-- [主会话与自动上下文压缩](docs/PRIMARY_CONVERSATION.md)
-
-## 验证
+YoloTrade 还保留显式 Codex 兼容模式：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/python -m unittest discover -s packages/core-python/tests -v
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/python -m unittest discover -s agents/yolo-trade/runtime-python/tests -v
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python .venv/bin/python -m unittest discover -s agents/yolo-beni/runtime-python/tests -v
+PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
+  .venv/bin/python -m yolo_trade --mode codex
+```
+
+该模式由 Codex 管理登录；产品不读取或复制 Codex token。独立 ChatGPT Provider 的设计与历史验收见 [归档方案](archive/CHATGPT_PROVIDER_PLAN.md)。
+
+## 测试
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python \
+  .venv/bin/python -m unittest discover -s packages/core-python/tests -v
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
+  .venv/bin/python -m unittest discover -s agents/yolo-trade/runtime-python/tests -v
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python \
+  .venv/bin/python -m unittest discover -s agents/yolo-beni/runtime-python/tests -v
+
 .venv/bin/python bin/test-agent-isolation.py
-python3 bin/test-chat-integration.py --probe
 swift test --package-path packages/sdk-swift
 swift test --package-path packages/ui-swift
 swift test --package-path apps/yolo-trade/client-swift
-swift build --package-path apps/yolo-beni/client-swift
+swift test --package-path apps/yolo-beni/client-swift
 ```
 
-当前 Python 测试共 323 项通过（共享 Core 154、YoloTrade 165、YoloBeni 4），双 Host 隔离联调 1 项通过。共享 Swift SDK 61 项、共享 SwiftUI 42 项、YoloTrade 客户端 27 项通过，YoloBeni 客户端构建通过；真实服务测试按条件跳过。YoloTrade/YoloBeni 的 macOS 与 iOS Simulator 四个构建目标均已在完整 Xcode 27.1 下通过。
+当前验证基线、真实验收边界和下一步只维护在 [ROADMAP](docs/ROADMAP.md)，不在各 README 重复记录测试数量。
 
-新 ChatGPT Provider 的真实浏览器授权、双实例隔离、流式回复、模型切换、重启后记忆召回和独立 Skills 已通过验收；YoloBeni Mac 账号页、连接及 Enter 发送通过。验收中修复了空记忆工具纠错、YoloBeni 健康响应解码与连接页标题问题，详情见 [验收记录](docs/TODO.md)。真实令牌刷新故障仍以离线测试为依据；运行中的旧生产服务未切换。既有 Mac App 的真实 Codex 模型目录、模型切换、新会话和 120 个增量事件验收仍有效。Paper 订单目前仅完成模拟与构建验证；Gateway 可写权限、真实 What-if、模拟成交/撤单、外网弱网及 iPhone 真机交互仍须分别验收。
+## 文档导航
+
+- [架构与安全边界](docs/ARCHITECTURE.md)
+- [当前状态与路线图](docs/ROADMAP.md)
+- [开发与多会话协作规则](AGENTS.md)
+- [通信协议 v1](packages/protocol/COMMUNICATION_V1.md)
+- [共享 Python Runtime](packages/core-python/README.md)
+- [YoloTrade Runtime 与 IBKR](agents/yolo-trade/README.md)
+- [YoloTrade Apple 客户端](apps/yolo-trade/README.md)
+- [YoloBeni Runtime](agents/yolo-beni/README.md)
+- [YoloBeni Apple 客户端](apps/yolo-beni/README.md)
+- [主会话与上下文压缩](docs/PRIMARY_CONVERSATION.md)
+
+历史调研、已完成方案和旧任务快照统一位于 [`archive/`](archive/)，不作为当前实现要求。

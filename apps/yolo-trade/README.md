@@ -1,223 +1,92 @@
-# Apple 客户端
+# YoloTrade Apple 客户端
 
-Swift 6、Foundation、Security 和 SwiftUI；没有外部 Swift 包依赖。最低目标为 iOS 26 / macOS 14。
+YoloTrade 的 SwiftUI macOS/iOS 客户端，最低 macOS 14、iOS 26。私有 `client-swift` 模块注入 YoloTrade 身份、Paper 订单模型和界面；通用聊天、账号、连接与同步来自共享 SDK/UI。
 
-## 已实现
+## 身份与结构
 
-- `YoloAgentsSDK`：协议 v1 的 snake_case / UUID / 带时区 ISO8601 模型，设备配对、健康、会话列表/搜索/创建/改名/归档、会话模型选择、模型目录、消息、SSE 与全局事件分页及自身设备令牌撤销。
-- `YoloAgentsUI`：iPhone / iPad / Mac 自适应聊天界面、连接设置、会话切换、归档、流式文本、失败状态与手动重试；iOS 会话首页提供可注入产品能力的共享玻璃功能坞。
-- 实时回复直接消费 SSE 字节流；启动或断线后从已保存的全局游标排空 REST `has_more`，再接回 SSE。处理并保存后推进游标，按 seq 和消息 ID 去重；错误退避最多 30 秒。iOS 非活动阶段取消连接、恢复后补齐，撤销/失效令牌停止同步并提示重新配对。
-- 发送前保存原始请求 UUID；网络结果不明时保留该 ID、原文和会话，手动重试取得原结果，不自动重放。202 只显示已送达，最终完成/失败由服务端消息和事件决定。
-- 设备 token、服务地址、配对信息和离线工作集均保存在设备专属 Keychain，不使用 UserDefaults 保存聊天或凭据，不写日志。缓存最多 50 个最近会话、每会话 300 条消息，并有约 1.5 MB 的消息文本预算；未确认发送请求额外保留。完整历史仍以 Mac 服务数据库为准。
-- Agent 的 REST 与 SSE 请求使用直连网络会话，不继承系统 HTTP/HTTPS 代理；这避免代理软件截获设备 bearer token，也保证 Tailscale 地址通过 VPN 路由而不是被普通代理错误转发。
-- iPhone 和 Mac 客户端当前均只有聊天与查看入口。没有订单确认、提交或可执行计划授权 UI；协议不包含模型框架内部对象。
+| 配置 | 值 |
+|---|---|
+| Agent ID / 名称 | `yolo-trade` / `YoloTrade` |
+| 默认 Host | `http://127.0.0.1:8765` |
+| Keychain service | `com.yoloagents.yolo-trade.apple.v1` |
+| Bundle ID | `com.yoloagents.yolotrade` |
+| Xcode schemes | `YoloTradeMac` / `YoloTradeIOS` |
+
+```text
+client-swift/                  私有根视图、Paper 客户端和测试
+macos/Sources/YoloTradeMac/   macOS App 入口
+ios/Sources/YoloTradeIOS/     iOS App 入口
+xcode/YoloTrade.xcodeproj     两端工程
+xcode/Configuration/          品牌、Bundle ID、版本与 entitlement
+```
+
+产品显示名、Bundle ID 和版本统一定义在 `xcode/Configuration/Brand.xcconfig`。共享层不包含 IBKR、Paper 模型或产品判断。
+
+## 连接与同步
+
+先启动 [YoloTrade Runtime](../../agents/yolo-trade/README.md)，再使用对应平台的一次性配对码。
+
+- Mac 本地开发可以显式允许 `http://127.0.0.1:8765`。
+- iPhone 必须使用可访问的 Mac 地址；127.0.0.1 指向手机自身。
+- 正式远程连接必须使用系统信任的 HTTPS，客户端不绕过 TLS。
+- REST/SSE 使用设备 Bearer 凭据，禁用重定向、cookies、持久 HTTP 缓存和系统代理继承。
+- 客户端先持久化状态再推进事件游标；断线后用 REST 补齐，再恢复 SSE。
+- 网络结果不确定的写请求不会自动重放。
+
+设备 token、服务地址、配对和离线工作集保存在产品专属 Keychain。断开本机记录不等于撤销服务端设备；撤销必须调用认证接口。
+
+## Paper 订单
+
+YoloTrade 私有根视图通过通用 `ChatFeature` 注入“Paper 订单”：
+
+- iOS 在底部玻璃功能坞进入，只读查看订单、详情和事件。
+- macOS 可以创建草稿、执行 What-if、确认、提交和单笔撤单。
+- iOS 编译不包含 Writer 和写请求类型。
+- 账户只使用服务端健康响应中的不透明 `config_id`，不提供账户号输入。
+
+`PaperOrdersModel` 将创建、预览、确认、提交和撤单拆成独立动作。每次写操作使用独立 UUID，并绑定最新订单版本、content hash、预览或确认 ID。执行前重新读取健康和订单；超时或无效响应显示待核对，不自动重试。
+
+聊天订单卡只接受明确标记的 `paper-order`/`json` 代码块和严格类型。服务端已创建的 `paper_order_draft` 必须携带真实 `order_id`；普通文字或未标记 JSON 不会被推断为订单。模型不能执行 What-if、确认或提交。
+
+完整订单契约见 [Paper 订单 v1](../../agents/yolo-trade/PAPER_ORDERS.md)。
 
 ## 构建与测试
 
-在仓库的 `apps/yolo-trade/xcode/` 目录中执行：
+从仓库根目录运行：
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build --package-path ../../../packages/sdk-swift
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path ../../../packages/sdk-swift
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build --package-path ../../../packages/ui-swift
-```
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --package-path packages/sdk-swift
 
-2026-10-25 已用完整 **Xcode 27.1（27A9275）** 正常执行 `swift test`：25 项单元测试通过，1 项真实服务测试按默认条件跳过；同时构建了 macOS SwiftUI、SDK 和 probe，不需要指定 Testing 插件。
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --package-path packages/ui-swift
 
-iOS 模拟器 SDK 的 Debug 通用目标已构建成功，使用 iPhoneSimulator 27.1 SDK，同时包含 arm64 / x86_64，最低目标为 iOS 26：
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --package-path apps/yolo-trade/client-swift
 
-```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeIOS \
-  -configuration Debug -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath /tmp/yolo-agents-ios-derived-data \
-  build
-```
-
-产物为 `/tmp/yolo-agents-ios-derived-data/Build/Products/Debug-iphonesimulator/YoloTradeIOS.app`；生成的 Info.plist 经 `plutil -lint` 检查通过。最初关闭签名的版本仅验证了编译，main 实际启动后遇到 Keychain -34018。工程现已对 Simulator 的 App / SDK 测试 target 配置本地 ad-hoc 签名和专用模拟器 entitlement；不要再传 `CODE_SIGNING_ALLOWED=NO` 运行该 App。`LOCALDEV00` 是仅用于 Simulator 的本地身份前缀，不是开发者账号；真机仍需用户自己的签名配置。Xcode 将模拟器权限嵌入 Mach-O 的 `__TEXT/__entitlements`，因此 `codesign -d --entitlements` 显示空字典不代表模拟器权限缺失。最新 `build-for-testing` 已成功，并检查嵌入的 application-identifier / keychain-access-groups 和完整签名。
-
-早期只有 CLT 时，SwiftPM 的 TestingMacros 插件发现不稳定，曾通过显式加载其自带官方插件完成相同单元测试；该环境的旧构建系统还缺少 Testing framework 搜索路径。此记录保留为历史，当前使用上面的完整 Xcode 正常命令。代码中的 `ViewState` 是经典 SwiftUI `State` 属性包装器的类型别名，用于避开早期 CLT 未附带的同名宏插件；没有修改系统 SDK 或使用私有 API。
-
-正式 App 工程为 `YoloTrade.xcodeproj`，共享 `YoloTradeIOS` / `YoloTradeMac` schemes，通过本地 Swift Package 引用通信和界面库。iOS 与 macOS 使用统一的产品身份 `com.yoloagents.yolotrade`，并由 `Configuration/Brand.xcconfig` 集中配置；真机运行前选择自己的签名 Team 和已信任的设备。main 已统一准备 Simulator runtime 并完成下述 SDK / Keychain / 网络测试；Mac 正常启动后的真实 UI 交互也已记录。
-
-`YoloTradeMac` scheme 可用以下本地 ad-hoc 命令做纯编译检查；正式 UI 验收使用稳定的 Apple Development 签名，避免每次改变签名哈希都重新申请钥匙串访问：
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeMac -configuration Debug \
-  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-ios-derived-data \
+  -project apps/yolo-trade/xcode/YoloTrade.xcodeproj \
+  -scheme YoloTradeMac -configuration Debug \
+  -destination 'generic/platform=macOS' \
+  -derivedDataPath /tmp/yolo-trade-derived-data \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
-```
 
-macOS 命令行原型与签名 App 的 Keychain 身份可能不同；调试重签名可能需要系统重新授权访问。纯 SDK 单元测试使用内存 SecureStore；iOS 专用测试仅操作唯一临时 service/account 并通过 defer 清理，不读取或删除应用已有 Keychain 条目。
-
-稳定签名的本地构建可在 Xcode 已登录开发账号后使用：
-
-```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeMac -configuration Debug \
-  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-macos-devsigned \
-  DEVELOPMENT_TEAM='<你的 Team ID>' CODE_SIGN_STYLE=Automatic build
-```
-
-## 连接服务
-
-1. 按根目录 `packages/protocol/COMMUNICATION_V1.md` 启动服务，取得与当前设备平台对应的一次性配对码。
-2. Mac 本机演示使用 `http://127.0.0.1:8765`，需要手动开启“允许本地开发连接（未加密）”。这不是默认授权。
-3. iPhone 使用可达的 Mac **HTTPS** 服务地址；127.0.0.1 指向 iPhone 自身。服务证书必须受系统信任，客户端不绕过 TLS 验证。
-4. 填写设备名称、配对码，配对后新建会话。`agent_mode=demo` 会明确显示“演示模式”，不表示已接真实模型或 IBKR。
-
-非 HTTPS 地址只允许显式选择后的 localhost、规范十进制 RFC1918/回环 IPv4、IPv6 回环/ULA；公网 IP、其他 HTTP 主机名、URL 中的凭据/查询/片段均拒绝。URLSession 禁用 HTTP 持久缓存、cookies、凭据存储和全部重定向，防止凭据跟随到其他地址。连接配置从 Keychain 恢复时重新验证地址。
-
-App Info.plist 只有本地网络声明和指定私有 IP/CIDR 的 ATS 例外，没有 `NSAllowsArbitraryLoads`。SDK 的显式选择和地址检查仍必须通过。当前最低系统为 iOS 26 / macOS 14；IP 的 ATS 例外依据 [Apple NSAllowsLocalNetworking](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking) 和 [NSExceptionDomains](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsexceptiondomains) 配置，真机 HTTPS、权限弹窗及 ATS 行为还需实测。
-
-“断开并清除本机记录”只移除本机 Keychain 条目；服务端撤销按协议的设备 DELETE 接口办理。缓存移除失败会显示错误，不宣称已经安全清空。
-
-## 可选真实服务联调
-
-`liveServiceRoundTrip` 默认跳过。仅在环境中同时提供 `YOLO_AGENTS_TEST_URL` 和 `YOLO_AGENTS_PAIRING_CODE` 时启用：
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path ../../../packages/sdk-swift --filter liveServiceRoundTrip
-```
-
-必须使用临时数据库和临时端口的 **demo** 服务。`YOLO_AGENTS_TEST_PLATFORM` 默认 `macos`，可显式设置为 `ios`；请求平台与配对响应都按传入值核对，配对码必须与该平台对应。测试通过 SDK 配对、创建中文会话、发送中文消息、同 ID 重发验证去重、以两条一页拉取事件直到最终回复、读取消息，并撤销它新建的设备后验证旧 token 收到 401/403。地址只允许客户端正常安全策略，最长等待回复 40 秒。测试不打印配对码或 token，不保存真实 Keychain；若测试中途异常，直接销毁临时服务数据即可清理测试设备。
-
-CLT 测试插件缺失时，使用同一组环境变量执行无测试框架的联调程序：
-
-```sh
-swift run --build-system native --package-path ../../../packages/sdk-swift YoloAgentsProbe
-```
-
-入口是 `../../packages/sdk-swift/Sources/YoloAgentsProbe/Probe.swift`，仅依赖 Foundation、Darwin 和 `YoloAgentsSDK`，无需 Testing / XCTest 或 SwiftUI。main 的临时包 runner 可以只复制 SDK 和此入口，创建 library target `YoloAgentsSDK` 与 executable target `YoloAgentsProbe` 后运行。该程序还验证会话改名、搜索和归档，任何检查失败退出 1，成功输出不含凭据的 PASS；未提供两个环境变量时明确输出 SKIP。
-
-2026-10-25，main 已使用临时 demo 服务执行以下真实 SDK 联调，`liveServiceRoundTrip` 1 项通过：
-
-```sh
-python3 bin/test-chat-integration.py --sdk-only --testing-plugin /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
-```
-
-该命令在仓库根目录执行。已验证配对、中文消息、相同 client_message_id 重发去重、分页事件直到最终回复、历史读取及自身设备撤销后旧 token 收到 401。此结果来自真实本地 HTTP 服务与 Swift SDK 通信，不代表远程 HTTPS 或 iOS 真机验收；独立 probe 的额外检查不计入本次已通过范围。
-
-## iOS SDK、Keychain 与网络测试 target
-
-`YoloTradeIOS` scheme 已包含 `YoloTradeIOSSDKTests`，复用 `SDKTests.swift` / `LiveServiceTests.swift`，并加入 `KeychainTests.swift`。真实 Keychain 测试仅在 iOS 编译，唯一 service/account 都由 UUID 创建，验证不存在、写入、读取、更新、删除和重复删除；defer 只清理该临时条目。托管 App 在测试专用环境 `YOLO_AGENTS_RUNNING_SDK_TESTS=1` 下显示空视图，不恢复真实配对或聊天缓存。
-
-已成功完成以下构建（不下载 runtime、不创建或启动 simulator）：
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeIOS -configuration Debug \
+  -project apps/yolo-trade/xcode/YoloTrade.xcodeproj \
+  -scheme YoloTradeIOS -configuration Debug \
   -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath /tmp/yolo-agents-ios-derived-data build-for-testing
+  -derivedDataPath /tmp/yolo-trade-derived-data build
 ```
 
-输出为 `TEST BUILD SUCCEEDED`。当前测试运行描述文件为：
+Simulator App 和 SDK 测试 target 使用本地 ad-hoc 签名与专属 entitlement，以便访问测试 Keychain；不要通过 `CODE_SIGNING_ALLOWED=NO` 启动需要 Keychain 的 App。真机和分发构建必须使用用户自己的签名 Team。
 
-`/tmp/yolo-agents-ios-derived-data/Build/Products/YoloTradeIOS_iphonesimulator27.1-arm64-x86_64.xctestrun`
-
-这是 format 1 的标准 xctestrun，顶层 target 名称 `YoloTradeIOSSDKTests`；App、测试 bundle 都已本地签名。main 使用 iPhone 17 Pro / iOS 27.0 完成了实际运行；当前最低部署版本为 iOS 26。
-
-main 的统一 runner 可在仓库根目录运行，设备 ID 从外部提供：
+可选真实服务联调只允许临时 demo 服务和一次性配对码：
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer python3 bin/test-chat-integration.py \
-  --ios-simulator "$YOLO_AGENTS_SIMULATOR_ID" \
-  --xctestrun /tmp/yolo-agents-ios-derived-data/Build/Products/YoloTradeIOS_iphonesimulator27.1-arm64-x86_64.xctestrun
+YOLO_AGENTS_TEST_URL='<临时服务地址>' \
+YOLO_AGENTS_PAIRING_CODE='<一次性配对码>' \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+swift test --package-path packages/sdk-swift --filter liveServiceRoundTrip
 ```
 
-使用已有的外部临时服务时，将 `YOLO_AGENTS_TEST_URL`、`YOLO_AGENTS_PAIRING_CODE`、`YOLO_AGENTS_TEST_PLATFORM=ios` 注入**临时副本** xctestrun 的 `YoloTradeIOSSDKTests.EnvironmentVariables`，保留 `YOLO_AGENTS_RUNNING_SDK_TESTS=1`；不要把配对码写入共享 scheme 或仓库。单纯设置 xcodebuild 自身进程的环境不保证传入 iOS 测试进程。副本保存在权限为 0600 的临时文件，移动副本前应将原始 `__TESTROOT__` 替换为原始 xctestrun 所在目录的绝对路径，保留 XCTest 自己解析的 `__TESTHOST__` 等占位符，再执行：
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test-without-building \
-  -xctestrun "$YOLO_AGENTS_CONFIGURED_XCTESTRUN" \
-  -destination "platform=iOS Simulator,id=$YOLO_AGENTS_SIMULATOR_ID" \
-  -parallel-testing-enabled NO
-```
-
-统一 runner 会管理临时服务、一次性 ios 配对码及该配置副本。URL / 配对码未同时注入时，网络测试仍明确跳过；Keychain 和纯 SDK 测试独立运行。
-
-**2026-10-25 实际验收：main 使用 Xcode 27.1（27A9275）构建的测试包，在 iPhone 17 Pro / iOS 27.0 Simulator 上执行统一 runner，27 项全部通过，无跳过。** 其中包含 25 项纯 SDK 测试、`isolatedKeychainWriteReadUpdateDelete` 和 `liveServiceRoundTrip`：
-
-- 真实模拟器 Keychain：唯一临时 service/account 的写入、读取、更新、删除和重复删除成功，defer 清理完成；没有操作应用已有条目。
-- 临时 demo 服务：ios 设备配对、中文消息发送、相同 client_message_id 重试去重、分页事件补齐至最终回复和历史读取成功。runner 另外检查了后端真实存在 completed 回复，排除了测试跳过导致的误报。
-- 自身设备撤销后旧 token 被拒绝；本轮临时设备已撤销，临时服务和数据库均已清理。
-- main 随后正常启动更新后的 App 并检查首屏截图，确认此前的 Keychain -34018 弹窗消失；聊天等完整 UI 操作仍需独立验收。
-
-本轮验证使用本地网络回环与 demo 模式，没有调用云端模型，也不代表真机或外网连接验收。首屏缓存说明现采用普通用户文案，不展示会话/消息上限或 Keychain 实现细节；默认连接安全策略、开发连接选择和缓存逻辑保持原有实现。此次证据与文案更新仅做必要编译检查，没有重复运行已通过的 27 项测试。
-
-## 验收边界
-
-2026-10-25，Apple Silicon 上的完整 Xcode 27.1（27A9275）已验证共享 SDK 的正常单元测试、macOS SwiftUI / probe 编译、iOS Simulator SDK 的通用 Debug 构建，以及 iPhone 17 Pro / iOS 27.0 Simulator 上 27 项全部通过的 SDK / 真实 Keychain / 临时 demo 网络测试。工程和产物配置经 plist/XML 语法检查。
-
-后续仍需单独验收：正常 Simulator/iPhone 的真实键盘 UI 交互、iPhone 真机开发签名、外网与远程 HTTPS / ATS / 本地网络权限、应用缓存的完整保存/恢复/清理、推送以及弱网长时运行。模拟器和 Mac 的本地签名构建不代表真机或分发归档通过；Mac UI、真实 Keychain 和真实 Codex 调用已完成本机验收。
-
-通知推送、结构化交易结果卡片、完整聊天正文搜索和生产分发不在当前协议/交付中；消息里的结果文本按服务端内容展示。实时回复使用 SSE，iOS 后台不持续维持该连接。
-
-## 2026-10-27：流式回复、模型选择与输入区
-
-聊天页左上角的新会话按钮使用 `square.and.pencil`，Mac 支持 ⌘N；会话模型菜单位于聊天页上方，可选目录模型或恢复服务默认模型。目录只用于选择，服务端返回的认证、模型不可用及实际生成失败会展示给用户，不会静默当作成功。
-
-原多行 TextField 同时受连接状态禁用、并与消息滚动和外层安全区共同布局；这使输入焦点依赖连接与布局刷新。iOS 改为独立原生 TextEditor，Mac 改为 NSTextView，使用单一底部安全区和按会话稳定的控件身份。重连或发送期间保留编辑能力；发送按钮按连接/发送状态控制，发送后保持焦点。各会话草稿独立，发送期间继续修改的内容不会被迟到响应清空。此改动尚不能代替 main 的 iPhone 真机键盘验证。
-
-SSE 通过认证的 `URLSession.bytes(for:)` 消费，而不是两秒轮询。截断尾帧不交付，重连后补齐；错误 MIME、非法 UTF-8、id/seq 不一致和缓冲区积压会明确报错并从已保存游标恢复。服务端失败消息保持失败状态。客户端不接收 Codex 登录 token，也不提供交易执行入口。
-
-本批验证在包目录执行（临时 scratch path 用于隔离仓库迁移前的旧构建缓存）：
-
-```sh
-# packages/sdk-swift/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-sdk-streaming-build
-# packages/ui-swift/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-ui-streaming-build
-# apps/yolo-trade/xcode/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeMac -configuration Debug \
-  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-apple-streaming \
-  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
-```
-
-结果：SDK 37 项通过、1 项真实服务测试未配置环境而跳过；UI 状态 7 项通过；macOS App 本地签名和稳定 Apple Development 签名构建均通过。新测试覆盖 SSE 首事件在连接关闭前交付、UTF-8/CRLF 分片、取消、鉴权失败、坏帧、游标恢复去重、模型可空兼容/显式重置、目录错误、模型变更拒绝、非活动启动和草稿保护。
-
-main 进一步启动真实 `--mode codex` 服务和稳定签名 Mac App，验证 Keychain 恢复连接、左上角新会话、8 个模型的选择菜单、切换到 `gpt-6-luna`、原生多行输入和发送后清空。一次五点中文回复产生 120 个 `assistant.delta`，最终 completed 文本在 UI 正常显示。后端还独立验证了真实受管登录、模型切换后的新 thread 及服务重启 resume。iPhone 真机键盘仍需最终实测。
-
-## 2026-10-27：Mac 输入排版与 Codex 账号
-
-Mac 输入区改用原生 NSTextView，统一正文、placeholder 和插入点的排版参数。Enter 发送，Shift+Enter 换行；中文组字期间 Enter 先交给输入法确认。旧 Cmd+Return 快捷键已移除，避免与编辑器重复处理。iOS 保持 TextEditor，不改变屏幕键盘的换行行为。
-
-“Codex 账号”入口位于侧边栏和聊天工具栏。Mac 管理设备通过 `/v1/codex/account` 查看状态、邮箱和套餐，通过 `/v1/codex/account/login` 发起浏览器登录后轮询。客户端只打开通过 `chatgpt.com` / `auth.openai.com` 官方 host 检查的 HTTPS 授权地址。停止等待或关闭页面仅取消客户端轮询；退出需先确认会影响本机 Codex 受管登录，再调用 `/v1/codex/account/logout`。服务端拒绝退出时，保留先前状态并显示错误。
-
-iOS 和无管理权限设备仅从模型目录读取脱敏登录状态，并引导在 Mac 操作，不调用私有账号接口。邮箱和套餐只在内存展示，不复制 Codex token。
-
-本批验证（在对应目录执行）：
-
-```sh
-# packages/sdk-swift/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-sdk-account-build
-# packages/ui-swift/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --scratch-path /tmp/yolo-ui-account-build
-# apps/yolo-trade/xcode/
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project YoloTrade.xcodeproj -scheme YoloTradeMac -configuration Debug \
-  -destination 'generic/platform=macOS' -derivedDataPath /tmp/yolo-agents-apple-account \
-  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build
-```
-
-SDK 42 项通过、1 项真实服务测试默认跳过；UI 17 项通过；Mac 构建成功。账号测试使用 HTTP fixtures，不打开浏览器、不执行真实 Codex 登录或退出；原生按键测试验证 Enter 单次提交及 Shift+Enter 换行。main 已实测浏览器账号状态界面、Mac 排版、Enter 单次发送及 Shift+Enter 换行；iPhone 真机键盘仍需验收。
-
-## Paper 订单客户端（2026-10-28）
-
-领域专用 Swift 代码及测试位于 [client-swift](client-swift/README.md)，由 `YoloTradeRootView` 注入共享聊天入口；Xcode 的两端 targets 均依赖该本地 Package。
-
-iOS 会话首页底部共享玻璃功能坞新增“Paper 订单”，Mac 继续从侧边栏和工具栏进入。Mac 管理设备通过独立步骤创建美股限价草稿、获取 What-if 预览、核对合约/保证金/佣金、明确确认预览，再单独确认提交；支持核对后撤销单笔活动订单。目标账户仅取服务端已认证健康响应的 `broker.configuration.config_id`，不提供账户号输入。预览、确认、提交和撤单前均重新校验 Paper 执行门槛及最新订单版本。
-
-iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Writer、写请求类型或 UI 写方法。打开页面、恢复和刷新都只读取数据。超时或无效写响应显示待核对状态，无自动重试；提交/撤单在途及 unknown 不显示为成功，完整成交不会被迟到撤单覆盖。状态通过“刷新订单”更新。
-
-本轮验证：共享 SDK 共 43 项（42 项通过、1 项真实服务测试按默认条件跳过），共享 UI 17 项通过，YoloTrade 客户端 21 项通过；`YoloTradeMac` arm64 与 `YoloTradeIOS` Simulator 通用 Debug 目标构建成功。订单测试使用纯内存假服务，没有发出真实 Paper 订单；真实 Paper What-if/提交、签名真机与界面点击验收仍需单独执行。
-
-## 独立 App 身份与 ChatGPT 账号（2026-10-28）
-
-`YoloTradeRootView` 注入 yolo-trade 身份、`YoloTrade` 名称、默认端口 8765 和 `com.yoloagents.yolo-trade.apple.v1` Keychain service。名称由 YoloTrade 私有产品常量和 Xcode `Brand.xcconfig` 集中管理；YoloBeni 使用完全独立的名称、service、键空间和端口 8766。服务必须明确返回匹配的 Agent ID；账号和 Paper 页面都会在发送设备凭据前阻断身份缺失或属于其他 Agent 的健康响应。
-
-“ChatGPT 账号”只使用 `/v1/account`、`/login`、`/login/cancel`、`/logout`。取消或超时会调用后端取消接口，失败保持未确认提示；Provider 退出只针对当前 Agent。访问令牌需刷新及未授予套餐权限两种状态仍可明确退出，远程撤销未确认不会显示成已撤销。iOS 仅查看模型目录中的脱敏状态，所有 OAuth 凭据留在后端。
-
-最终验证：SDK 47 项通过、1 项真实服务测试默认跳过；共享 UI 23 项通过；YoloTrade 私有客户端 22 项通过；两 Agent 的 Mac / iOS Simulator 四个通用目标构建成功。Mac 产物为 `/tmp/yolo-provider-yolo-trade/Build/Products/Debug/YoloTradeMac.app`，scheme 仍为 `YoloTradeMac`；iOS 为同一根目录的 `Debug-iphonesimulator/YoloTradeIOS.app`，scheme 为 `YoloTradeIOS`。后续已在独立 YoloTrade 验收后端完成真实 OAuth、流式、模型切换及记忆/Skills 验证，并在 YoloBeni Mac 验证共享账号和聊天界面。未替换生产 YoloTrade App、访问其 Keychain 或执行真实 IBKR 联调；边界与证据见 [TODO](../../docs/TODO.md)。
+当前验证基线、真实 Paper、远程网络和真机待办见 [ROADMAP](../../docs/ROADMAP.md)。

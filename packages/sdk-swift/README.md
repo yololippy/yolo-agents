@@ -6,7 +6,7 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 ## Agent 私有接口扩展
 
-`APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。YoloTrade 的 Paper 客户端位于 [client-swift](../../apps/yolo-trade/client-swift/README.md)。
+`APIClient.request` 提供单次 v1 JSON 请求，复用设备认证、传输、解码与错误处理；不会自动重试。具体领域模型与接口封装由对应 App 的模块持有。YoloTrade 的 Paper 客户端见 [产品说明](../../apps/yolo-trade/README.md)。
 
 ## ChatGPT 账号与 App 身份
 
@@ -16,7 +16,7 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service 和默认地址。配对前和恢复同步前都要求服务明确返回匹配的 `agent_id`。`ClientRepository(identity:)` 使用 `agent.<agent-id>.` 键前缀独立保存配对和缓存；YoloTrade 与 YoloBeni 使用各自 Keychain service，既不回读无前缀旧键，也不读取另一产品的数据。
 
-2026-10-28：SDK 47 项通过，1 项真实服务测试默认跳过。身份与存储测试使用内存 fixtures，不访问生产 Keychain。
+身份与存储测试使用内存 fixtures，不访问生产 Keychain。当前验证基线见 [ROADMAP](../../docs/ROADMAP.md)。
 
 ## 模型与流式事件
 

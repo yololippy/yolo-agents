@@ -10,9 +10,7 @@
 - `CodexRuntime`：通过本机 Codex app-server 复用受管 ChatGPT 登录，不需要 API key。仅聊天，关闭工具入口；即时映射 agentMessage 增量，并持久保存会话模型和 Codex thread 映射。使用与验收边界见 [Codex 接入说明](CODEX.md)。
 - `ChatGPTRuntime`：PydanticAI 官方 ChatGPT Provider 与 Harness，使用本 Agent 独立的 SIWC 登录、凭据、记忆和 Skills。登录、隔离、模型切换和验收状态见 [ChatGPT 接入说明](CHATGPT.md)。
 
-**验证状态（2026-10-27）：** main 已将固定版本代码依赖安装到根 `.venv`。已在 Python 3.14.9 上执行标准库存储、演示和适配边界测试，并用真实官方 SDK 的 TestModel／FunctionModel 验证同步流、Conversation 序列化与重建 Runtime 后续聊、官方 SQLite Memory 写读、StepStore 快照、跨会话历史搜索及摘要压缩后原文召回；这部分测试将 `ALLOW_MODEL_REQUESTS=False`，不使用真实 API key。Codex 路径另已使用受管 ChatGPT 登录实测模型目录、流式推理、模型切换和服务重启续聊，全程不读取 token。contract double 测试仍用于故障注入；PydanticAI 供应商行为和中文语义召回质量尚未验证。
-
-**2026-10-28 补充：** 独立 ChatGPT Provider 已完成真实双实例授权、模型流式、模型切换、记忆写入/跨会话与重启召回、Skills 隔离及退出隔离验收；不代表中文检索质量或真实令牌到期刷新已全面验证。具体配置和证据见 [TODO](../../docs/TODO.md)。
+离线测试使用官方 TestModel／FunctionModel、模拟传输和 contract double 覆盖存储、同步流、Conversation 恢复、Memory、StepStore、历史搜索、压缩与故障注入；这些测试不使用真实 API key。历史真实 Provider 验收见 [归档方案](../../archive/CHATGPT_PROVIDER_PLAN.md)，当前验证基线与未完成项见 [ROADMAP](../../docs/ROADMAP.md)。
 
 ## 存储接口与自动事件
 
@@ -130,4 +128,4 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python .venv/bin/python -W er
 
 官方参考：[Guardrails 和凭据检测器](https://pydantic.dev/docs/ai/harness/guardrails/)。
 
-参考：[官方同步流源码（v2.61.0）](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/result.py)、[完整 Conversation](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/conversation.py)、[官方 Harness](https://pydantic.dev/docs/ai/harness/)、[项目调研](../../docs/RESEARCH_PYDANTICAI.md)。
+参考：[官方同步流源码（v2.61.0）](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/result.py)、[完整 Conversation](https://github.com/pydantic/pydantic-ai/blob/v2.61.0/pydantic_ai_slim/pydantic_ai/conversation.py)、[官方 Harness](https://pydantic.dev/docs/ai/harness/)、[历史调研](../../archive/RESEARCH_PYDANTICAI.md)。

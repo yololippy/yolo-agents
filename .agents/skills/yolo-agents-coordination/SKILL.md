@@ -5,7 +5,7 @@ description: "在 yolo-agents 仓库中，让 main、main-trade、main-beni 以�
 
 # Yolo Agents 开发协作
 
-开始协调前读取根目录 [AGENTS.md](../../../AGENTS.md) 和 [TODO.md](../../../docs/TODO.md)；涉及总体架构时再读取 [项目大纲](../../../docs/PROJECT_OUTLINE.md)。用户最新指令和根目录范围规则优先。
+开始协调前读取根目录 [AGENTS.md](../../../AGENTS.md) 和 [ROADMAP.md](../../../docs/ROADMAP.md)；涉及总体架构时再读取 [架构](../../../docs/ARCHITECTURE.md)。用户最新指令和根目录范围规则优先。
 
 ## 会话层级
 
