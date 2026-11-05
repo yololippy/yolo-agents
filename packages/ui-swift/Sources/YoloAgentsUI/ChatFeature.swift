@@ -6,12 +6,17 @@ import YoloAgentsSDK
 public struct ChatFeature: Identifiable {
     public let id: String
     public let title: String
+    public let compactTitle: String
     public let systemImage: String
     let content: @MainActor (PairedConnection) -> AnyView
 
-    public init<Content: View>(id: String, title: String, systemImage: String,
+    public init<Content: View>(id: String, title: String, compactTitle: String? = nil,
+                              systemImage: String,
                               @ViewBuilder content: @escaping @MainActor (PairedConnection) -> Content) {
-        self.id = id; self.title = title; self.systemImage = systemImage
+        self.id = id
+        self.title = title
+        self.compactTitle = compactTitle ?? title
+        self.systemImage = systemImage
         self.content = { AnyView(content($0)) }
     }
 }

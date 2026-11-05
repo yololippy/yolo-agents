@@ -1,6 +1,6 @@
 # YoloBeni apps
 
-独立的 SwiftUI macOS / iOS 客户端，最低 macOS 14 / iOS 17。私有 `client-swift/` 根视图注入身份并复用共享 SDK/UI，功能列表为空，不依赖 YoloTrade 或提供订单入口。
+独立的 SwiftUI macOS / iOS 客户端，最低 macOS 14 / iOS 26。私有 `client-swift/` 根视图注入身份并复用共享 SDK/UI，功能列表为空，不依赖 YoloTrade 或提供订单入口。
 
 | 配置 | 值 |
 |---|---|

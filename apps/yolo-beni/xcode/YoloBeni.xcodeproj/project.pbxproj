@@ -114,7 +114,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"SDKROOT" = "iphoneos";
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = "Manual";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "17.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "26.0";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
 				"CODE_SIGN_IDENTITY" = "-";
 			};
@@ -136,7 +136,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"SDKROOT" = "iphoneos";
 				"CODE_SIGN_STYLE[sdk=iphonesimulator*]" = "Manual";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "17.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "26.0";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
 				"CODE_SIGN_IDENTITY" = "-";
 			};

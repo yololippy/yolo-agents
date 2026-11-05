@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "YoloBeniClient",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS("26.0")],
     products: [.library(name: "YoloBeniClient", targets: ["YoloBeniClient"])],
     dependencies: [
         .package(path: "../../../packages/sdk-swift"),

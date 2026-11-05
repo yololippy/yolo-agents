@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "YoloAgentsSDK",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS("26.0")],
     products: [
         .library(name: "YoloAgentsSDK", targets: ["YoloAgentsSDK"]),
         .executable(name: "YoloAgentsProbe", targets: ["YoloAgentsProbe"]),

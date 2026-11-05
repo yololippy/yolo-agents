@@ -75,6 +75,18 @@
 
 边界：分月目录用于定位、备份和后续清理策略，不代表可以直接删除某个月份；已被消息引用的文件仍由数据库引用关系保护。当前总配额仍为每 Agent 512 MiB，后续若需扩大或改为可配置，应单独调整容量策略。
 
+## 本轮补充：UI-01 会话首页功能坞（2026-11-05）
+
+- [x] iOS 与 macOS 会话列表移除本地标题搜索；归档显示仍是独立显式控制，不影响服务端会话接口。
+- [x] iOS 会话首页新增共享底部玻璃功能坞，统一承载产品注入能力、ChatGPT 账号和连接设置；顶部更多菜单移除，仅保留新会话与归档控制。
+- [x] 功能坞消费通用 `ChatFeature`，不判断产品身份。YoloTrade 私有根视图注入 Paper 订单，YoloBeni 无需复制布局即可复用通用账号与连接入口。
+- [x] 功能坞增加圆形玻璃选中气泡、强调色高亮与轻微浮起阴影，并在目标关闭后保留最后一次选择。
+- [x] iOS 最低版本统一提升为 26；功能坞封装为公共 `AgentActionDock`，直接使用系统 `GlassEffectContainer`、交互式 Liquid Glass、形变选中节点和原生触感反馈，不再维护旧系统材质回退。
+
+验证：共享 SDK 61 项、共享 UI 45 项、YoloTrade 客户端 27 项、YoloBeni 客户端 1 项测试通过；YoloTrade/YoloBeni 的 macOS arm64 与 iOS 26 Simulator 四目标构建成功。
+
+边界：iOS 客户端、共享 SDK/UI 和产品客户端 Package 的最低版本均为 iOS 26；只使用公开 SwiftUI Liquid Glass API，不依赖第三方库或私有视觉 API。Mac 仍支持 macOS 14 并保留原生侧边栏和工具栏布局。本轮未执行真机触控与动态字体视觉验收。
+
 ## 本轮补充：ID-01 产品身份统一（2026-11-04）
 
 - [x] 仓库协调 Skill 统一为 `yolo-agents-coordination`；`main`、`main-trade`、`main-beni` 具备相同的开发、验收、Git 和汇报能力，`main` 可调配全部会话，两个产品主会话不得调用 `main` 或彼此调用。

@@ -33,4 +33,6 @@ Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex �
 
 `YoloAgentsRootView(identity:features:)` 接收私有根视图注入的 `AgentAppIdentity` 与可选 `ChatFeature`。身份决定品牌、默认地址和存储；功能入口默认空，YoloBeni 不链接或展示订单。共享 UI 不持有 Paper 模型或交易动作，见 [YoloTrade 私有客户端](../../apps/yolo-trade/client-swift/README.md)。
 
+iOS 26 会话首页使用公共 `AgentActionDock`：产品注入的 `ChatFeature` 与通用的“ChatGPT 账号”“连接设置”并列显示。YoloTrade 注入“Paper 订单”；未注入交易能力的 YoloBeni 只显示两个通用入口。功能坞使用系统 `GlassEffectContainer` 与交互式 Liquid Glass；同一个圆形玻璃选中节点在入口之间形变移动，并将图标和短标题收进圆内。`AgentActionDockItem`、可选选择状态和选择回调均为产品无关接口，其他 Agent 可以直接复用。功能坞不依据产品身份推断能力；Mac 继续使用原生侧边栏和工具栏入口。会话列表不提供本地标题搜索，归档筛选保留为独立按钮。
+
 首次连接页的标题取当前 App 身份，YoloBeni 显示 YoloBeni。配对回归测试使用不含交易能力字段的 YoloBeni 健康响应，验证完成配对并保存正确 Agent ID。

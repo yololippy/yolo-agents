@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import YoloAgentsSDK
 @testable import YoloAgentsUI
@@ -16,6 +17,37 @@ private let conversationJSON = """
 {"id":"\(testConversationID)","title":"Fixture","model":"model-a","archived":false,
 "created_at":"2026-10-27T00:00:00Z","updated_at":"2026-10-27T00:00:00Z"}
 """
+
+@Test func agentActionDockItemUsesAnExplicitOrFullCompactTitle() {
+    let explicit = AgentActionDockItem(
+        id: "orders",
+        title: "Paper 订单",
+        compactTitle: "订单",
+        systemImage: "list.bullet.rectangle"
+    )
+    let fallback = AgentActionDockItem(
+        id: "settings",
+        title: "连接设置",
+        systemImage: "gearshape"
+    )
+
+    #expect(explicit.compactTitle == "订单")
+    #expect(fallback.compactTitle == "连接设置")
+    #expect(explicit.accessibilityIdentifier == "orders")
+}
+
+@Test @MainActor func chatFeatureCarriesProductOwnedCompactCopy() {
+    let feature = ChatFeature(
+        id: "fixture.feature",
+        title: "完整功能名称",
+        compactTitle: "功能",
+        systemImage: "star"
+    ) { _ in
+        EmptyView()
+    }
+
+    #expect(feature.compactTitle == "功能")
+}
 
 @Test @MainActor func chatModelUsesTheRequiredProductIdentity() throws {
     let model = try ChatModel(identity: chatTestIdentity,
@@ -79,13 +111,13 @@ private let conversationJSON = """
                                           updatedAt: now.addingTimeInterval(100), archived: true))
     state.setPrimaryConversation(primaryID)
 
-    let visible = ConversationHomeSections(state: state, query: "", includeArchived: false)
+    let visible = ConversationHomeSections(state: state, includeArchived: false)
     #expect(visible.primary.map(\.id) == [primaryID])
     #expect(visible.recent.map(\.id) == [recentID])
     #expect(visible.archived.isEmpty)
 
-    let withArchive = ConversationHomeSections(state: state, query: "任务", includeArchived: true)
-    #expect(withArchive.primary.isEmpty)
+    let withArchive = ConversationHomeSections(state: state, includeArchived: true)
+    #expect(withArchive.primary.map(\.id) == [primaryID])
     #expect(withArchive.recent.map(\.id) == [recentID])
     #expect(withArchive.archived.map(\.id) == [archivedID])
 }

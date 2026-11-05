@@ -1,11 +1,11 @@
 # Apple 客户端
 
-Swift 6、Foundation、Security 和 SwiftUI；没有外部 Swift 包依赖。最低目标为 iOS 17 / macOS 14。
+Swift 6、Foundation、Security 和 SwiftUI；没有外部 Swift 包依赖。最低目标为 iOS 26 / macOS 14。
 
 ## 已实现
 
 - `YoloAgentsSDK`：协议 v1 的 snake_case / UUID / 带时区 ISO8601 模型，设备配对、健康、会话列表/搜索/创建/改名/归档、会话模型选择、模型目录、消息、SSE 与全局事件分页及自身设备令牌撤销。
-- `YoloAgentsUI`：iPhone / iPad / Mac 自适应聊天界面、连接设置、会话切换、标题搜索、归档、流式文本、失败状态与手动重试。
+- `YoloAgentsUI`：iPhone / iPad / Mac 自适应聊天界面、连接设置、会话切换、归档、流式文本、失败状态与手动重试；iOS 会话首页提供可注入产品能力的共享玻璃功能坞。
 - 实时回复直接消费 SSE 字节流；启动或断线后从已保存的全局游标排空 REST `has_more`，再接回 SSE。处理并保存后推进游标，按 seq 和消息 ID 去重；错误退避最多 30 秒。iOS 非活动阶段取消连接、恢复后补齐，撤销/失效令牌停止同步并提示重新配对。
 - 发送前保存原始请求 UUID；网络结果不明时保留该 ID、原文和会话，手动重试取得原结果，不自动重放。202 只显示已送达，最终完成/失败由服务端消息和事件决定。
 - 设备 token、服务地址、配对信息和离线工作集均保存在设备专属 Keychain，不使用 UserDefaults 保存聊天或凭据，不写日志。缓存最多 50 个最近会话、每会话 300 条消息，并有约 1.5 MB 的消息文本预算；未确认发送请求额外保留。完整历史仍以 Mac 服务数据库为准。
@@ -24,7 +24,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build --package-p
 
 2026-10-25 已用完整 **Xcode 27.1（27A9275）** 正常执行 `swift test`：25 项单元测试通过，1 项真实服务测试按默认条件跳过；同时构建了 macOS SwiftUI、SDK 和 probe，不需要指定 Testing 插件。
 
-iOS 模拟器 SDK 的 Debug 通用目标已构建成功，使用 iPhoneSimulator 27.1 SDK，同时包含 arm64 / x86_64，最低目标仍是 iOS 17：
+iOS 模拟器 SDK 的 Debug 通用目标已构建成功，使用 iPhoneSimulator 27.1 SDK，同时包含 arm64 / x86_64，最低目标为 iOS 26：
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
@@ -69,7 +69,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 非 HTTPS 地址只允许显式选择后的 localhost、规范十进制 RFC1918/回环 IPv4、IPv6 回环/ULA；公网 IP、其他 HTTP 主机名、URL 中的凭据/查询/片段均拒绝。URLSession 禁用 HTTP 持久缓存、cookies、凭据存储和全部重定向，防止凭据跟随到其他地址。连接配置从 Keychain 恢复时重新验证地址。
 
-App Info.plist 只有本地网络声明和指定私有 IP/CIDR 的 ATS 例外，没有 `NSAllowsArbitraryLoads`。SDK 的显式选择和地址检查仍必须通过。iOS 17 / macOS 14 起，IP 的 ATS 例外与旧系统有差别，依据 [Apple NSAllowsLocalNetworking](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking) 和 [NSExceptionDomains](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsexceptiondomains) 配置；真机 HTTPS、权限弹窗及 ATS 行为还需实测。
+App Info.plist 只有本地网络声明和指定私有 IP/CIDR 的 ATS 例外，没有 `NSAllowsArbitraryLoads`。SDK 的显式选择和地址检查仍必须通过。当前最低系统为 iOS 26 / macOS 14；IP 的 ATS 例外依据 [Apple NSAllowsLocalNetworking](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking) 和 [NSExceptionDomains](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsexceptiondomains) 配置，真机 HTTPS、权限弹窗及 ATS 行为还需实测。
 
 “断开并清除本机记录”只移除本机 Keychain 条目；服务端撤销按协议的设备 DELETE 接口办理。缓存移除失败会显示错误，不宣称已经安全清空。
 
@@ -116,7 +116,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 `/tmp/yolo-agents-ios-derived-data/Build/Products/YoloTradeIOS_iphonesimulator27.1-arm64-x86_64.xctestrun`
 
-这是 format 1 的标准 xctestrun，顶层 target 名称 `YoloTradeIOSSDKTests`；App、测试 bundle 都已本地签名。main 使用 iPhone 17 Pro / iOS 27.0 完成了实际运行，最低部署版本仍为 iOS 17。
+这是 format 1 的标准 xctestrun，顶层 target 名称 `YoloTradeIOSSDKTests`；App、测试 bundle 都已本地签名。main 使用 iPhone 17 Pro / iOS 27.0 完成了实际运行；当前最低部署版本为 iOS 26。
 
 main 的统一 runner 可在仓库根目录运行，设备 ID 从外部提供：
 
@@ -208,7 +208,7 @@ SDK 42 项通过、1 项真实服务测试默认跳过；UI 17 项通过；Mac �
 
 领域专用 Swift 代码及测试位于 [client-swift](client-swift/README.md)，由 `YoloTradeRootView` 注入共享聊天入口；Xcode 的两端 targets 均依赖该本地 Package。
 
-聊天侧边栏和工具栏新增“Paper 订单”。Mac 管理设备通过独立步骤创建美股限价草稿、获取 What-if 预览、核对合约/保证金/佣金、明确确认预览，再单独确认提交；支持核对后撤销单笔活动订单。目标账户仅取服务端已认证健康响应的 `broker.configuration.config_id`，不提供账户号输入。预览、确认、提交和撤单前均重新校验 Paper 执行门槛及最新订单版本。
+iOS 会话首页底部共享玻璃功能坞新增“Paper 订单”，Mac 继续从侧边栏和工具栏进入。Mac 管理设备通过独立步骤创建美股限价草稿、获取 What-if 预览、核对合约/保证金/佣金、明确确认预览，再单独确认提交；支持核对后撤销单笔活动订单。目标账户仅取服务端已认证健康响应的 `broker.configuration.config_id`，不提供账户号输入。预览、确认、提交和撤单前均重新校验 Paper 执行门槛及最新订单版本。
 
 iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Writer、写请求类型或 UI 写方法。打开页面、恢复和刷新都只读取数据。超时或无效写响应显示待核对状态，无自动重试；提交/撤单在途及 unknown 不显示为成功，完整成交不会被迟到撤单覆盖。状态通过“刷新订单”更新。
 

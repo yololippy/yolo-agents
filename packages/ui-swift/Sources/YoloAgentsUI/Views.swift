@@ -31,6 +31,11 @@ private func copyConversationID(_ id: UUID) {
     #endif
 }
 
+private enum HomeDockActionID {
+    static let account = "chat.account"
+    static let settings = "chat.settings"
+}
+
 public struct YoloAgentsRootView: View {
     @StateObject private var model: ChatModel
     @Environment(\.scenePhase) private var scenePhase
@@ -203,21 +208,45 @@ private struct ChatShell: View {
     let messageAccessory: ChatMessageAccessory?
     let composerConfiguration: AgentComposerConfiguration
     let configuration: AgentShellConfiguration
-    @ViewState private var query = ""
     @ViewState private var includeArchived = false
     @ViewState private var showSettings = false
     @ViewState private var showAccount = false
     @ViewState private var selectedFeature: ChatFeature?
+    @ViewState private var selectedHomeActionID: String?
     @ViewState private var renameRequest: ConversationRenameRequest? = nil
     @ViewState private var drafts = ComposerDrafts()
     @ViewState private var compactPath: [UUID] = []
 
     private var sections: ConversationHomeSections {
-        ConversationHomeSections(state: model.state, query: query, includeArchived: includeArchived)
+        ConversationHomeSections(state: model.state, includeArchived: includeArchived)
     }
 
     private var conversations: [Conversation] {
         sections.primary + sections.recent + sections.archived
+    }
+
+    private var homeDockItems: [AgentActionDockItem<String>] {
+        features.map {
+            AgentActionDockItem(
+                id: $0.id,
+                title: $0.title,
+                compactTitle: $0.compactTitle,
+                systemImage: $0.systemImage
+            )
+        } + [
+            AgentActionDockItem(
+                id: HomeDockActionID.account,
+                title: "ChatGPT 账号",
+                compactTitle: "账号",
+                systemImage: "person.crop.circle"
+            ),
+            AgentActionDockItem(
+                id: HomeDockActionID.settings,
+                title: "连接设置",
+                compactTitle: "设置",
+                systemImage: "gearshape"
+            ),
+        ]
     }
 
     var body: some View {
@@ -285,22 +314,23 @@ private struct ChatShell: View {
                 }
             }
             if conversations.isEmpty {
-                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ContentUnavailableView {
-                        Label("还没有会话", systemImage: "bubble.left.and.bubble.right")
-                    } description: {
-                        Text(model.isOnline ? "创建一个新会话开始聊天。" : "连接恢复后即可创建会话。")
-                    }
-                    .listRowBackground(Color.clear)
-                } else {
-                    ContentUnavailableView.search(text: query)
-                        .listRowBackground(Color.clear)
+                ContentUnavailableView {
+                    Label("还没有会话", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text(model.isOnline ? "创建一个新会话开始聊天。" : "连接恢复后即可创建会话。")
                 }
+                .listRowBackground(Color.clear)
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle(configuration.conversationsTitle)
-        .searchable(text: $query, prompt: configuration.searchPrompt)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            AgentActionDock(
+                selection: $selectedHomeActionID,
+                items: homeDockItems,
+                onSelect: openHomeDockAction
+            )
+        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { createAndOpenConversation() } label: {
@@ -308,7 +338,7 @@ private struct ChatShell: View {
                 }
                 .disabled(!model.isOnline || model.busy)
                 .accessibilityIdentifier("chat.new-conversation")
-                homeMenu
+                archiveToggle
             }
         }
     }
@@ -348,29 +378,12 @@ private struct ChatShell: View {
         .contextMenu { conversationActions(conversation) }
     }
 
-    private var homeMenu: some View {
-        Menu {
-            ForEach(features) { feature in
-                Button { selectedFeature = feature } label: {
-                    Label(feature.title, systemImage: feature.systemImage)
-                }
-            }
-            if !features.isEmpty { Divider() }
-            Button { showAccount = true } label: {
-                Label("ChatGPT 账号", systemImage: "person.crop.circle")
-            }
-            Button { showSettings = true } label: {
-                Label("连接设置", systemImage: "gearshape")
-            }
-            Divider()
-            Button { includeArchived.toggle() } label: {
-                Label(includeArchived ? "隐藏已归档会话" : "显示已归档会话",
-                      systemImage: includeArchived ? "archivebox.fill" : "archivebox")
-            }
-        } label: {
-            Label("更多", systemImage: "ellipsis")
+    private var archiveToggle: some View {
+        Button { includeArchived.toggle() } label: {
+            Label(includeArchived ? "隐藏已归档会话" : "显示已归档会话",
+                  systemImage: includeArchived ? "archivebox.fill" : "archivebox")
         }
-        .accessibilityIdentifier("chat.home-menu")
+        .accessibilityIdentifier("chat.archived-toggle")
     }
 
     @ViewBuilder
@@ -461,7 +474,6 @@ private struct ChatShell: View {
                 }.buttonStyle(.plain).padding()
             }
             .navigationTitle("会话")
-            .searchable(text: $query, prompt: "搜索已同步的会话标题")
         } detail: {
             ChatDetail(model: model, drafts: $drafts, openSettings: { showSettings = true },
                        openAccount: { showAccount = true }, features: features,
@@ -474,6 +486,17 @@ private struct ChatShell: View {
 
     private func beginRename(_ conversation: Conversation) {
         renameRequest = ConversationRenameRequest(conversation)
+    }
+
+    private func openHomeDockAction(_ id: String) {
+        switch id {
+        case HomeDockActionID.account:
+            showAccount = true
+        case HomeDockActionID.settings:
+            showSettings = true
+        default:
+            selectedFeature = features.first { $0.id == id }
+        }
     }
 }
 
