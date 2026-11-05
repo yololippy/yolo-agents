@@ -59,8 +59,7 @@ def run_trading_host(args, broker) -> int:
     """Keep the broker private to this Agent and close it on every Host exit."""
     data_dir = getattr(args, "data_dir", None)
     if data_dir is not None:
-        data_dir = prepare_agent_directory(data_dir, AGENT_ID, DISPLAY_NAME,
-            adopt_existing=getattr(args, "adopt_existing_data", False))
+        data_dir = prepare_agent_directory(data_dir, AGENT_ID, DISPLAY_NAME)
         args.data_dir = data_dir
     lifecycle = IBKRBrokerLifecycle(broker) if broker is not None else None
     try:

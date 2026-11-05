@@ -2,6 +2,8 @@ import contextlib
 import io
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -38,6 +40,21 @@ class YoloBeniEntryTests(unittest.TestCase):
     def test_trading_arguments_are_not_accepted(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["--ibkr-environment", "paper"])
+
+    def test_unmarked_trade_database_cannot_be_adopted_by_cli_or_host_args(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["--adopt-existing-data"])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            legacy = root / "app.sqlite3"
+            legacy.write_bytes(b"legacy-trade-database")
+            args = SimpleNamespace(data_dir=root, adopt_existing_data=True)
+            from yolo_agents.host import run_host
+            with self.assertRaises(RuntimeError):
+                run_host(args, agent_name=AGENT_ID, app_name=DISPLAY_NAME,
+                         runtime_capabilities=RUNTIME_CAPABILITIES)
+            self.assertEqual(legacy.read_bytes(), b"legacy-trade-database")
+            self.assertFalse((root / ".agent-owner.json").exists())
 
     def test_explicit_isolated_directory_and_port_are_preserved(self):
         args = build_parser().parse_args(["--mode", "demo", "--data-dir", "/tmp/b-fixture", "--port", "0"])

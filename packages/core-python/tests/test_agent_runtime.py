@@ -23,17 +23,33 @@ PNG_1X1 = base64.b64decode(
 )
 
 
-def trading_runtime_capabilities():
-    from yolo_agents.runtime_tools import (
-        TRADING_TOOL_INSTRUCTIONS, PaperOrderStreamFilter, finish_trading_reply,
-        pydantic_trading_tools,
-    )
+def fake_runtime_capabilities():
+    from pydantic_ai import Tool
+
+    def fixture_action(ctx, value: str) -> dict[str, str]:
+        """Pass one fixture value to explicitly injected per-turn tools."""
+        return ctx.deps.runtime_tools.invoke("fixture_action", {"value": value})
+
     return RuntimeCapabilities(
-        instructions=TRADING_TOOL_INSTRUCTIONS,
-        pydantic_tools_factory=pydantic_trading_tools,
-        text_filter_factory=PaperOrderStreamFilter,
-        finish_reply=finish_trading_reply,
+        instructions="A fixture_action tool is available only through this explicit profile.",
+        pydantic_tools_factory=lambda: [Tool(
+            fixture_action, takes_ctx=True, name="fixture_action",
+            require_parameter_descriptions=False, sequential=True,
+        )],
+        finish_reply=lambda cleaned, tools: tools.finish(cleaned),
     )
+
+
+class FakeRuntimeTools:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, tool, arguments):
+        self.calls.append((tool, arguments))
+        return {"status": "recorded", "value": arguments["value"]}
+
+    def finish(self, cleaned):
+        return "\n\n[fixture complete]" if self.calls else ""
 
 
 def official_sdk_available():
@@ -236,16 +252,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual("".join(runtime.stream_reply(self.user("hello"), self.cid)), "真实适配测试回复")
         options = backend.agents[0].options
         self.assertNotIn("tools", options)
-        self.assertNotIn("IBKR Paper", options["instructions"])
+        self.assertNotIn("fixture_action", options["instructions"])
 
-    def test_shared_runtime_sources_do_not_reference_product_identities(self):
+    def test_shared_production_sources_do_not_reference_private_product_rules(self):
         source_root = Path(__file__).parents[1] / "yolo_agents"
-        shared_runtime = "\n".join(
-            (source_root / filename).read_text()
-            for filename in ("agent_runtime.py", "chatgpt_runtime.py", "codex_runtime.py")
-        )
-        for product_id in ("yolo-trade", "yolo-beni"):
-            self.assertNotIn(product_id, shared_runtime)
+        shared_source = "\n".join(path.read_text() for path in source_root.rglob("*.py"))
+        for private_rule in (
+            "yolo-trade", "yolo-beni", "IBKR", "Paper", "create_paper_order_draft", "trading",
+        ):
+            self.assertNotIn(private_rule.casefold(), shared_source.casefold())
 
     def test_real_continuation_round_trips_usage_and_does_not_resend_ui_history(self):
         backend = fake_backend()
@@ -639,16 +654,13 @@ class OfficialSDKTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM memory_files').fetchone()[0], 0)
 
-    def test_trading_pydantic_tool_creates_only_a_draft(self):
+    def test_explicit_profile_injects_a_generic_pydantic_tool_and_turn_context(self):
         from collections import deque
         from pydantic_ai.models.function import DeltaToolCall, FunctionModel
-        from uuid import uuid4
-        from yolo_agents.runtime_tools import RuntimeToolContext
 
         actions = deque([
-            ("create_paper_order_draft", {"symbol": "TSLA", "side": "BUY", "quantity": 2,
-                                           "limit_price": "250"}),
-            "Paper draft created for Mac review.",
+            ("fixture_action", {"value": "sample"}),
+            "Fixture result accepted.",
         ])
         async def stream(messages, _info):
             action = actions.popleft()
@@ -657,32 +669,16 @@ class OfficialSDKTests(unittest.TestCase):
             else:
                 yield action
 
-        calls, order_id = [], str(uuid4())
         runtime = self.runtime(
             FunctionModel(stream_function=stream), agent_name="arbitrary-product",
-            runtime_capabilities=trading_runtime_capabilities(),
+            runtime_capabilities=fake_runtime_capabilities(),
         )
-        context = RuntimeToolContext(
-            conversation_id=self.cid, user_message_id=str(uuid4()), run_id=str(uuid4()),
-            caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},
-            trusted_messages=({"role": "user", "content": "Buy two TSLA at limit 250"},),
-            create_paper_draft=lambda **kwargs: calls.append(kwargs) or {
-                "status": "draft_created", "order_id": order_id, "state": "draft"},
-            reauthorize=lambda: {"platform": "macos"},
-        )
-        self.store.append_message(self.cid, "user", "Buy two TSLA at limit 250", run_id=context.run_id)
+        context = FakeRuntimeTools()
+        self.store.append_message(self.cid, "user", "record sample")
         reply = "".join(runtime.stream_reply(self.store.list_messages(self.cid), self.cid,
                                                runtime_tools=context))
-        self.assertTrue(reply.startswith("Paper draft created for Mac review.\n\n```paper-order\n"))
-        self.assertEqual(reply.count("```paper-order"), 1)
-        artifact = json.loads(reply.split("```paper-order\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(artifact, {
-            "type": "paper_order_draft", "order_id": order_id, "symbol": "TSLA",
-            "side": "BUY", "quantity": 2, "limit_price": "250", "environment": "paper",
-            "order_type": "LMT", "tif": "DAY",
-        })
-        self.assertEqual(calls[0]["proposal"], {
-            "symbol": "TSLA", "side": "BUY", "quantity": 2, "limit_price": "250"})
+        self.assertEqual(reply, "Fixture result accepted.\n\n[fixture complete]")
+        self.assertEqual(context.calls, [("fixture_action", {"value": "sample"})])
         self.assertFalse(actions)
 
     def test_guardrail_blocks_injected_existing_memory_before_model(self):

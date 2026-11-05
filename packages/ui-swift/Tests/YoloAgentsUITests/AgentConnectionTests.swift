@@ -47,7 +47,7 @@ private actor YoloBeniPairHTTP: HTTPTransport {
 @Test @MainActor func yoloBeniHealthAllowsPairingAndPersistsCorrectAppIdentity() async throws {
     let http = YoloBeniPairHTTP()
     let repository = ClientRepository(identity: connectionIdentity, store: ConnectionMemory())
-    let model = ChatModel(identity: connectionIdentity, repository: repository, transport: http)
+    let model = try ChatModel(identity: connectionIdentity, repository: repository, transport: http)
     model.setActive(false)
     let paired = await model.pair(address: "https://example.test", code: "fixture-pairing", deviceName: "Fixture", allowHTTP: false)
     #expect(paired && model.errorMessage == nil && model.appName == "YoloBeni")
@@ -59,7 +59,7 @@ private actor YoloBeniPairHTTP: HTTPTransport {
 @Test @MainActor func pairingChecksAgentBeforeSendingPairingCodeOrToken() async throws {
     for healthAgent in ["yolo-trade", nil] {
         let http = PairingIdentityHTTP(healthAgent)
-        let model = ChatModel(identity: connectionIdentity,
+        let model = try ChatModel(identity: connectionIdentity,
             repository: ClientRepository(identity: connectionIdentity, store: ConnectionMemory()), transport: http)
         model.setActive(false)
         let paired = await model.pair(address: "https://example.test", code: "fixture-pairing", deviceName: "Fixture", allowHTTP: false)
@@ -79,7 +79,7 @@ private actor YoloBeniPairHTTP: HTTPTransport {
     """.utf8))
     let repository = ClientRepository(identity: connectionIdentity, store: ConnectionMemory())
     try repository.saveConnection(PairedConnection(endpoint: ServiceEndpoint("https://example.test"), pairing: pairing, agentID: "yolo-beni"))
-    let model = ChatModel(identity: connectionIdentity, repository: repository, transport: http)
+    let model = try ChatModel(identity: connectionIdentity, repository: repository, transport: http)
     await model.start()
     defer { model.setActive(false) }
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))

@@ -7,7 +7,7 @@ import tempfile
 import time
 from uuid import uuid4
 
-from yolo_agents.runtime_tools import (
+from yolo_trade.runtime_tools import (
     MARKET_QUOTE_TOOL,
     OPEN_ORDER_TOOL,
     OPEN_ORDERS_TOOL,
@@ -246,9 +246,15 @@ class RuntimeToolTests(unittest.TestCase):
             store = Store(Path(directory) / "app.sqlite3")
             service = ChatService(store, Runtime(), workers=1)
             calls = []
-            service.bind_paper_draft_tool(lambda **kwargs: calls.append(kwargs) or {
-                "status": "draft_created", "order_id": str(uuid4()), "state": "draft"},
-                lambda caller: caller)
+            def tools_factory(**kwargs):
+                return RuntimeToolContext(
+                    **kwargs,
+                    create_paper_draft=lambda **call: calls.append(call) or {
+                        "status": "draft_created", "order_id": str(uuid4()), "state": "draft"},
+                    reauthorize=lambda: kwargs["caller"],
+                )
+
+            service.bind_turn_hooks(runtime_tools_factory=tools_factory)
             conversation = store.create_conversation("tool")
             caller = {"id": str(uuid4()), "platform": "macos", "permissions": ["chat:write", "devices:manage"],
                       "name": "must-not-reach-model", "revoked_at": None}

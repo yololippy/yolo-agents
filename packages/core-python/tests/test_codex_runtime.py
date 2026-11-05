@@ -32,20 +32,38 @@ PNG_1X1 = base64.b64decode(
 )
 
 
-def trading_runtime_capabilities():
-    from yolo_agents.runtime_tools import (
-        CODEX_TRADING_PROPOSAL_INSTRUCTIONS, PAPER_DRAFT_TOOL,
-        PAPER_DRAFT_TOOL_SCHEMA_VERSION, PaperOrderStreamFilter, finish_trading_reply,
-        trading_dynamic_tools,
-    )
+def fake_runtime_capabilities():
     return RuntimeCapabilities(
-        codex_instructions=CODEX_TRADING_PROPOSAL_INSTRUCTIONS,
-        codex_dynamic_tools_factory=trading_dynamic_tools,
-        tool_schema_version=PAPER_DRAFT_TOOL_SCHEMA_VERSION,
-        text_filter_factory=PaperOrderStreamFilter,
-        extracted_tool_name=PAPER_DRAFT_TOOL,
-        finish_reply=finish_trading_reply,
+        codex_instructions="Use fixture_action only when explicitly requested by the test.",
+        codex_dynamic_tools_factory=lambda: [{
+            "type": "function",
+            "name": "fixture_action",
+            "description": "Record one fixture value.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        }],
+        tool_schema_version=7,
     )
+
+
+class FakeRuntimeTools:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, tool, arguments):
+        self.calls.append((tool, arguments))
+        return {"status": "recorded", "value": arguments["value"]}
+
+    def codex_result(self, tool, arguments):
+        result = self.invoke(tool, arguments)
+        return {
+            "contentItems": [{"type": "inputText", "text": json.dumps(result)}],
+            "success": True,
+        }
 
 
 FAKE_SERVER = r'''
@@ -141,15 +159,14 @@ for line in sys.stdin:
             continue
         if CONFIG.get('dynamic_tool_call'):
             call={'id':999,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':'call-1',
-                  'namespace':None,'tool':'create_paper_order_draft','arguments':
-                  {'symbol':'TSLA','side':'BUY','quantity':2,'limit_price':'250'}}}
+                  'namespace':None,'tool':'fixture_action','arguments':{'value':'sample'}}}
             send(call)
             tool_response=json.loads(sys.stdin.readline());record({'tool_response':tool_response})
             notify('item/started',{'threadId':tid,'turnId':turn,'item':{'id':'tool','type':'dynamicToolCall',
-                   'namespace':None,'tool':'create_paper_order_draft','arguments':call['params']['arguments'],
+                   'namespace':None,'tool':'fixture_action','arguments':call['params']['arguments'],
                    'status':'inProgress','contentItems':None,'success':None}})
             notify('item/completed',{'threadId':tid,'turnId':turn,'item':{'id':'tool','type':'dynamicToolCall',
-                   'namespace':None,'tool':'create_paper_order_draft','arguments':call['params']['arguments'],
+                   'namespace':None,'tool':'fixture_action','arguments':call['params']['arguments'],
                    'status':'completed','contentItems':tool_response.get('result',{}).get('contentItems'),
                    'success':tool_response.get('result',{}).get('success')}})
         if CONFIG.get('noise'):
@@ -158,9 +175,6 @@ for line in sys.stdin:
         notify('item/started',{'threadId':tid,'turnId':turn,'item':{'id':'answer','type':'agentMessage'}})
         parts=(['Hello ```pa','per-order\n{"type":"paper_order_draft","order_id":"fake"}\n```',' world']
                if CONFIG.get('forged_card') else ['Hello ','world'])
-        if CONFIG.get('paper_proposal'):
-            parts=['Preparing.```paper-order-proposal\n',
-                   '{"type":"paper_order_proposal","symbol":"TSLA","side":"BUY","quantity":2,"limit_price":"250"}\n```']
         notify('item/agentMessage/delta',{'threadId':tid,'turnId':turn,'itemId':'answer','delta':parts[0]})
         if CONFIG.get('pause'):
             deadline=time.monotonic()+5
@@ -438,7 +452,7 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual(observed["prefix"], PNG_1X1[:8].hex())
         self.assertFalse(Path(observed["path"]).exists())
 
-    def test_trading_tool_schema_upgrade_rebuilds_an_existing_thread(self):
+    def test_injected_tool_schema_upgrade_rebuilds_an_existing_thread(self):
         runtime = self.runtime()
         first = self.history("first")
         reply = "".join(runtime.stream_reply(first, self.cid))
@@ -446,17 +460,16 @@ class CodexRuntimeTests(unittest.TestCase):
         old = json.loads(self.store.get_agent_state(self.cid))["thread_id"]
         runtime.close()
 
-        trading = self.runtime(runtime_capabilities=trading_runtime_capabilities())
-        second = self.history("continue after enabling the draft tool")
-        self.assertEqual("".join(trading.stream_reply(second, self.cid)), "Hello world")
+        specialized = self.runtime(runtime_capabilities=fake_runtime_capabilities())
+        second = self.history("continue after enabling a product tool")
+        self.assertEqual("".join(specialized.stream_reply(second, self.cid)), "Hello world")
         new = json.loads(self.store.get_agent_state(self.cid))
         self.assertEqual(len(self.requests("thread/start")), 2)
         self.assertEqual({tool["name"] for tool in self.requests("thread/start")[-1]["params"]["dynamicTools"]},
-                         {"create_paper_order_draft", "cancel_paper_order", "get_market_quote", "list_positions",
-                          "list_open_orders", "get_open_order", "list_paper_orders", "get_paper_order"})
-        self.assertIn("paper-order-proposal",
+                         {"fixture_action"})
+        self.assertIn("fixture_action",
                       self.requests("thread/start")[-1]["params"]["developerInstructions"])
-        self.assertEqual(new["tool_schema_version"], 5)
+        self.assertEqual(new["tool_schema_version"], 7)
         rebuilt = [e for e in self.store.list_events() if e["type"] == "agent.thread.rebuilt"]
         self.assertEqual(rebuilt[-1]["payload"]["reason"], "tool_schema_changed")
 
@@ -526,41 +539,21 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual("".join(runtime.stream_reply(self.history(), self.cid)), "Hello world")
         start = self.requests("thread/start")[-1]["params"]
         self.assertEqual(start["dynamicTools"], [])
-        self.assertNotIn("paper-order-proposal", start["developerInstructions"])
+        self.assertNotIn("fixture_action", start["developerInstructions"])
 
-    def test_yolo_trade_validates_model_proposal_and_creates_only_trusted_draft(self):
-        from yolo_agents.runtime_tools import RuntimeToolContext
-
-        calls, order_id = [], str(uuid4())
-        runtime = self.runtime(runtime_capabilities=trading_runtime_capabilities(), paper_proposal=True)
-        context = RuntimeToolContext(
-            conversation_id=self.cid, user_message_id="message-1", run_id=str(uuid4()),
-            caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},
-            trusted_messages=({"role": "user", "content": "Buy two TSLA at limit 250"},),
-            create_paper_draft=lambda **kwargs: calls.append(kwargs) or {
-                "status": "draft_created", "order_id": order_id, "state": "draft"},
-            reauthorize=lambda: {"platform": "macos"},
-        )
-        chunks = list(runtime.stream_reply(self.history("Buy two TSLA at limit 250"), self.cid,
-                                            runtime_tools=context))
-        reply = "".join(chunks)
-        self.assertGreaterEqual(len(chunks), 2)
-        self.assertTrue(reply.startswith("Preparing.\n\n```paper-order\n"))
-        self.assertNotIn('"order_id":"fake"', reply)
-        self.assertEqual(reply.count("```paper-order"), 1)
-        artifact = json.loads(reply.split("```paper-order\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(artifact, {
-            "type": "paper_order_draft", "order_id": order_id, "symbol": "TSLA",
-            "side": "BUY", "quantity": 2, "limit_price": "250", "environment": "paper",
-            "order_type": "LMT", "tif": "DAY",
-        })
-        self.assertEqual(calls[0]["proposal"]["limit_price"], "250")
+    def test_explicit_profile_routes_a_dynamic_tool_to_generic_turn_context(self):
+        runtime = self.runtime(runtime_capabilities=fake_runtime_capabilities(), dynamic_tool_call=True)
+        context = FakeRuntimeTools()
+        reply = "".join(runtime.stream_reply(self.history("record sample"), self.cid,
+                                               runtime_tools=context))
+        self.assertEqual(reply, "Hello world")
+        self.assertEqual(context.calls, [("fixture_action", {"value": "sample"})])
         start = self.requests("thread/start")[-1]["params"]
-        self.assertEqual({tool["name"] for tool in start["dynamicTools"]},
-                         {"create_paper_order_draft", "cancel_paper_order", "get_market_quote", "list_positions",
-                          "list_open_orders", "get_open_order", "list_paper_orders", "get_paper_order"})
-        self.assertIn("paper-order-proposal", start["developerInstructions"])
-        self.assertNotIn("tool_response", json.dumps(self.requests()))
+        self.assertEqual({tool["name"] for tool in start["dynamicTools"]}, {"fixture_action"})
+        self.assertIn("fixture_action", start["developerInstructions"])
+        responses = [item["tool_response"] for item in self.requests() if "tool_response" in item]
+        self.assertEqual(len(responses), 1)
+        self.assertTrue(responses[0]["result"]["success"])
 
     def test_thread_policy_or_model_mismatch_prevents_inference(self):
         for scenario in ({"wrong_model": True}, {"unsafe_sandbox": True}):

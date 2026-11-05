@@ -23,7 +23,6 @@ def create_parser(description: str | None = None, *, default_port: int | None,
     parser.add_argument("--port", type=int, default=default_port, required=default_port is None)
     parser.add_argument("--data-dir", type=Path,
                         default=Path.home() / "Library/Application Support/YoloAgents" / agent_name)
-    parser.add_argument("--adopt-existing-data", action="store_true", help="明确接管未标记的旧数据目录")
     parser.add_argument("--mode", choices=["demo", "pydantic", "codex", "chatgpt"], default="demo")
     parser.add_argument("--model", default=os.environ.get("YOLO_AGENTS_MODEL"))
     parser.add_argument("--tls-cert", type=Path)
@@ -46,21 +45,21 @@ def validate_host_arguments(args, parser) -> None:
         parser.error("--model or YOLO_AGENTS_MODEL is required for pydantic mode")
 
 
-def prepare_agent_directory(data_dir, agent_name="base", app_name=None, *, adopt_existing=False):
+def prepare_agent_directory(data_dir, agent_name="base", app_name=None):
     """Check/claim identity before an Agent creates private side-effecting services.
 
     run_host repeats this check while holding the single-instance lock. The
     caller must not start a broker before this function succeeds.
     """
     directory = Path(data_dir).expanduser().resolve()
-    return ensure_agent_identity(directory, agent_name, adopt_existing=adopt_existing)
+    return ensure_agent_identity(directory, agent_name)
 
 
 def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | None = None,
              runtime_capabilities=None) -> int:
     """Run one configured agent host with an optional agent-owned API extension."""
     args.data_dir = args.data_dir.expanduser().resolve()
-    args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prepare_agent_directory(args.data_dir, agent_name, app_name)
     lock = (args.data_dir / "server.lock").open("a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -68,7 +67,9 @@ def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | 
         lock.close()
         raise RuntimeError("another server is using this data directory") from None
     try:
-        prepare_agent_directory(args.data_dir, agent_name, app_name, adopt_existing=getattr(args, "adopt_existing_data", False))
+        # Recheck while holding the process lock in case ownership changed
+        # between the initial atomic marker creation/read and lock acquisition.
+        prepare_agent_directory(args.data_dir, agent_name, app_name)
     except BaseException:
         lock.close()
         raise

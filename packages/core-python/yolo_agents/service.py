@@ -11,7 +11,6 @@ from .agent_runtime import (
 )
 from .codex_runtime import CodexBusyError
 from .media import MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, RuntimeMedia
-from .runtime_tools import RuntimeToolContext
 
 
 class ContextResetError(Exception):
@@ -29,29 +28,18 @@ class ChatService:
         self.queues, self.active = {}, set()
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat")
         self.closing = threading.Event()
-        self._paper_draft_tool = None
-        self._paper_cancel_tool = None
-        self._trading_read_tool = None
-        self._trading_confirmation = None
-        self._paper_draft_reauthorize = None
+        self._turn_interceptor = None
+        self._runtime_tools_factory = None
 
-    def bind_paper_draft_tool(self, handler, reauthorize):
-        """Bind an application-supplied draft callback; never an execution API."""
-        if not callable(handler) or not callable(reauthorize) or self._paper_draft_tool is not None:
-            raise RuntimeError("Paper draft tool binding is invalid")
-        self._paper_draft_tool = handler
-        self._paper_draft_reauthorize = reauthorize
-
-    def bind_trading_tools(self, draft_handler, read_handler, cancel_handler,
-                           confirmation_handler, reauthorize):
-        """Bind application-owned trading callbacks without exposing broker access."""
-        if (not callable(read_handler) or not callable(cancel_handler)
-                or not callable(confirmation_handler)):
-            raise RuntimeError("Trading read tool binding is invalid")
-        self.bind_paper_draft_tool(draft_handler, reauthorize)
-        self._trading_read_tool = read_handler
-        self._paper_cancel_tool = cancel_handler
-        self._trading_confirmation = confirmation_handler
+    def bind_turn_hooks(self, *, interceptor=None, runtime_tools_factory=None):
+        """Bind one product-owned turn interceptor and/or runtime-tools factory."""
+        if ((interceptor is not None and not callable(interceptor))
+                or (runtime_tools_factory is not None and not callable(runtime_tools_factory))
+                or (interceptor is None and runtime_tools_factory is None)
+                or self._turn_interceptor is not None or self._runtime_tools_factory is not None):
+            raise RuntimeError("Product turn hook binding is invalid")
+        self._turn_interceptor = interceptor
+        self._runtime_tools_factory = runtime_tools_factory
 
     def conversation_lock(self, collection, conversation_id):
         with self.lock:
@@ -168,32 +156,25 @@ class ChatService:
         try:
             history = self.history(conversation_id, run_id)
             latest = history[-1]
-            if self._trading_confirmation is not None and caller is not None:
-                handled = self._trading_confirmation(
-                    history=tuple(history), caller=dict(caller),
-                    reauthorize=lambda: self._paper_draft_reauthorize(caller),
-                )
+            if self._turn_interceptor is not None and caller is not None:
+                handled = self._turn_interceptor(history=tuple(history), caller=dict(caller))
                 if handled is not None:
                     if not isinstance(handled, str) or not handled.strip():
-                        raise ValueError("invalid trading confirmation response")
+                        raise ValueError("invalid product turn response")
                     self.store.append_event("assistant.delta", conversation_id,
                                             {"run_id": run_id, "delta": handled})
                     self.store.finish_run(conversation_id, run_id, handled)
                     return
             runtime_tools = None
-            if self._paper_draft_tool is not None and caller is not None:
-                runtime_tools = RuntimeToolContext(
+            if self._runtime_tools_factory is not None and caller is not None:
+                runtime_tools = self._runtime_tools_factory(
                     conversation_id=conversation_id,
                     user_message_id=latest["id"],
                     run_id=run_id,
-                    caller=caller,
+                    caller=dict(caller),
                     trusted_messages=tuple({
                         "role": message.get("role"), "content": message.get("content", ""),
                     } for message in history),
-                    create_paper_draft=self._paper_draft_tool,
-                    reauthorize=lambda: self._paper_draft_reauthorize(caller),
-                    read_trading_data=self._trading_read_tool,
-                    cancel_paper_order=self._paper_cancel_tool,
                 )
             chunks, size = [], 0
             media_ids, media_size = [], 0

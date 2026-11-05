@@ -86,6 +86,16 @@
 
 边界：本轮不迁移仓库外旧数据、Keychain 或已安装 App，不执行真实签名、安装或真机验收。旧身份数据如需迁移，必须由对应产品另行提供显式迁移方案，共享 Host 不自动猜测或接管。
 
+## 本轮补充：ID-03 产品边界复审（2026-11-05）
+
+- [x] 共享 Host 与产品入口移除未标记目录接管开关；任何非空未标记目录都拒绝归属，首次检查发生在创建进程锁之前，持锁后再次核验。旧数据只能由对应产品另行提供限定来源、备份、校验和回滚的一次性迁移方案。
+- [x] IBKR/Paper 运行时工具、上下文和测试全部归回 `agents/yolo-trade/`；共享 `ChatService` 只保留通用 turn interceptor 与 runtime-tools factory，不包含交易字段、回调或产品类型。
+- [x] Swift `ClientRepository` 身份改为必填且公开只读，删除无身份初始化入口；显式注入 `ChatModel` 的 Repository 必须与完整产品身份一致，YoloBeni 不能读取 YoloTrade 的旧 Keychain/缓存命名空间。
+- [x] 共享生产 Python 全目录结构测试禁止重新出现产品 ID、IBKR、Paper 或 trading 私有规则；YoloTrade 私有测试继续覆盖工具参数、权限再校验、可信订单卡和确认边界。
+- [x] 回归通过：Core 145、YoloTrade 178、YoloBeni 5、双 Agent 隔离 1 项；Swift SDK 61（另 1 项真实服务测试跳过）、Swift UI 44、YoloTrade Client 27、YoloBeni Client 1 项。两个产品 macOS arm64 与 iOS Simulator arm64 四目标构建成功。
+
+边界：本轮没有迁移生产目录、Keychain 或已安装 App，没有执行真实签名、安装、真机、OAuth、IBKR 连接或订单操作。安全复审另发现的未认证健康信息、媒体配额回收、本地文件权限、请求解析和配对码展示问题尚未修改，需按优先级单独处理。
+
 ## 2. M0：环境与 IBKR 接入准备
 
 - [x] **M0-01 首版范围**：首批固定为 Paper、美股 `STK/SMART/USD`、普通 BUY/SELL、正整数数量、`LMT/DAY`、不含盘前盘后；Live、卖空标记、零股、其他类型均拒绝。

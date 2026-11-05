@@ -12,7 +12,7 @@ def validate_agent_id(agent_id):
     return agent_id
 
 
-def ensure_agent_identity(data_dir, agent_id, *, adopt_existing=False):
+def ensure_agent_identity(data_dir, agent_id):
     agent_id = validate_agent_id(agent_id)
     directory = Path(data_dir).expanduser().resolve()
     # A nested host can otherwise read another agent's memory/credentials even
@@ -35,12 +35,12 @@ def ensure_agent_identity(data_dir, agent_id, *, adopt_existing=False):
     try:
         fd = os.open(marker, flags)
     except FileNotFoundError:
-        if not adopt_existing and any(p.name != "server.lock" for p in directory.iterdir()):
-            raise RuntimeError("Unowned data directory is not empty; use --adopt-existing-data explicitly to preserve and adopt it.")
+        if any(directory.iterdir()):
+            raise RuntimeError("Unowned data directory is not empty and cannot be claimed by an Agent.")
         try:
             fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError:
-            return ensure_agent_identity(directory, agent_id, adopt_existing=adopt_existing)
+            return ensure_agent_identity(directory, agent_id)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump({"schema_version": 1, "agent_id": agent_id}, file)
             file.flush()

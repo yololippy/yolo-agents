@@ -8,6 +8,13 @@ private let runID = UUID(uuidString: "20000000-0000-4000-8000-000000000002")!
 private let clientID = UUID(uuidString: "30000000-0000-4000-8000-000000000003")!
 private let now = Date(timeIntervalSince1970: 1_700_000_000)
 private let conversation = Conversation(id: conversationID, title: "测试会话", createdAt: now, updatedAt: now)
+private let repositoryIdentity = AgentAppIdentity(
+    agentID: "fixture-agent",
+    appName: "Fixture Agent",
+    keychainService: "fixture.sdk-tests",
+    defaultServiceAddress: "https://fixture.invalid",
+    allowsLegacyServer: true
+)
 
 private func media(id: UUID = UUID(), filename: String = "chart.png") -> MessageMedia {
     MessageMedia(id: id, mediaType: "image/png", byteCount: 3, sha256: "fixture",
@@ -549,7 +556,7 @@ func invalidServiceAddressesFail(_ value: String) {
 }
 
 @Test func cacheSurvivesRestartWithoutAutomaticallyResending() throws {
-    let repository = ClientRepository(store: MemoryStore())
+    let repository = ClientRepository(identity: repositoryIdentity, store: MemoryStore())
     let connection = PairedConnection(endpoint: try ServiceEndpoint("https://example.com"), pairing: try pairing())
     try repository.saveConnection(connection)
     var state = ClientState()

@@ -18,12 +18,27 @@ private let conversationJSON = """
 "created_at":"2026-10-27T00:00:00Z","updated_at":"2026-10-27T00:00:00Z"}
 """
 
-@Test @MainActor func chatModelUsesTheRequiredProductIdentity() {
-    let model = ChatModel(identity: chatTestIdentity, repository: ClientRepository(store: UIStore()))
+@Test @MainActor func chatModelUsesTheRequiredProductIdentity() throws {
+    let model = try ChatModel(identity: chatTestIdentity,
+                              repository: ClientRepository(identity: chatTestIdentity, store: UIStore()))
 
     #expect(model.identity == chatTestIdentity)
     #expect(model.appName == "Fixture Agent")
     #expect(model.defaultServiceAddress == "https://fixture.invalid")
+}
+
+@Test @MainActor func chatModelRejectsARepositoryOwnedByAnotherProduct() {
+    let otherIdentity = AgentAppIdentity(
+        agentID: "other-agent",
+        appName: "Other Agent",
+        keychainService: "fixture.other-agent",
+        defaultServiceAddress: "https://other.invalid"
+    )
+    let repository = ClientRepository(identity: otherIdentity, store: UIStore())
+
+    #expect(throws: ChatModelConfigurationError.repositoryIdentityMismatch) {
+        _ = try ChatModel(identity: chatTestIdentity, repository: repository)
+    }
 }
 
 @Test func everyRenameRequestStartsWithTheLatestConversationTitle() {
@@ -326,7 +341,7 @@ private func bytes(_ event: ServerEvent) throws -> Data {
 
 @Test func terminalBeforeAcceptanceAndCacheRestoreDoNotReviveFinishedRuns() throws {
     let store = UIStore()
-    let repository = ClientRepository(store: store)
+    let repository = ClientRepository(identity: chatTestIdentity, store: store)
     let connection = try fixtureConnection()
     try repository.saveConnection(connection)
 
@@ -387,9 +402,9 @@ private func waitUntil(_ check: () async -> Bool) async throws {
         SSEConnection(status: 200, contentType: "text/event-stream", chunks: resumedChunks, cancel: { resumed.finish() }),
     ])
     let http = UIHTTP()
-    let repository = ClientRepository(store: UIStore())
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore())
     let connection = try fixtureConnection(); try repository.saveConnection(connection)
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: http, streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -423,8 +438,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     let streams = UIStreams([
         SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() }),
     ])
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: UIHTTP(), streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -452,8 +467,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
                       cancel: { continuation.finish() }),
     ])
     let http = UIHTTP()
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: http, streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -472,8 +487,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
 @Test @MainActor func catalogServiceErrorIsVisibleWithoutDisablingChat() async throws {
     let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
     let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: UIHTTP(catalogError: true), streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -484,8 +499,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
 @Test @MainActor func rejectedModelSelectionKeepsServerModelAndShowsError() async throws {
     let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
     let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: UIHTTP(rejectModel: true), streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -501,8 +516,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
     let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
     let http = UIHTTP()
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: http, streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -517,8 +532,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
     let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
     let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
     let http = UIHTTP()
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: http, streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -544,8 +559,8 @@ private func waitUntil(_ check: () async -> Bool) async throws {
                       cancel: { continuation.finish() }),
     ])
     let http = PagingUIHTTP(latest: latest, older: older)
-    let repository = ClientRepository(store: UIStore()); try repository.saveConnection(fixtureConnection())
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore()); try repository.saveConnection(fixtureConnection())
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: http, streamTransport: streams)
     defer { model.setActive(false) }
     await model.start()
@@ -562,12 +577,12 @@ private func waitUntil(_ check: () async -> Bool) async throws {
 @Test @MainActor func inactiveStartupRestoresHistoryWithoutOpeningAStream() async throws {
     let (chunks, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
     let streams = UIStreams([SSEConnection(status: 200, contentType: "text/event-stream", chunks: chunks, cancel: { continuation.finish() })])
-    let repository = ClientRepository(store: UIStore())
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore())
     let connection = try fixtureConnection(); try repository.saveConnection(connection)
     var state = ClientState()
     state.upsertConversation(Conversation(id: testConversationID, title: "Cached", createdAt: Date(), updatedAt: Date(), model: "model-a"))
     try repository.saveState(state, for: connection)
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: UIHTTP(), streamTransport: streams)
     defer { model.setActive(false) }
     model.setActive(false)
@@ -582,7 +597,7 @@ private func waitUntil(_ check: () async -> Bool) async throws {
 @Test @MainActor func coldStartSelectsCachedPrimaryInsteadOfNewerTaskConversation() async throws {
     let taskID = UUID(uuidString: "10000000-0000-4000-8000-000000000099")!
     let streams = UIStreams([])
-    let repository = ClientRepository(store: UIStore())
+    let repository = ClientRepository(identity: chatTestIdentity, store: UIStore())
     let connection = try fixtureConnection(); try repository.saveConnection(connection)
     var state = ClientState()
     state.upsertConversation(Conversation(
@@ -593,7 +608,7 @@ private func waitUntil(_ check: () async -> Bool) async throws {
         updatedAt: Date(timeIntervalSince1970: 2), model: "model-a"))
     state.setPrimaryConversation(testConversationID)
     try repository.saveState(state, for: connection)
-    let model = ChatModel(identity: chatTestIdentity, repository: repository,
+    let model = try ChatModel(identity: chatTestIdentity, repository: repository,
                           transport: UIHTTP(), streamTransport: streams)
     model.setActive(false)
     await model.start()

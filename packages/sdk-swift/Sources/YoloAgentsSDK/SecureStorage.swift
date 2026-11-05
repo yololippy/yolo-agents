@@ -58,9 +58,8 @@ public struct PairedConnection: Codable, Equatable, Sendable {
 
 public struct ClientRepository: Sendable {
     private let store: any SecureStore
-    private let identity: AgentAppIdentity?
+    public let identity: AgentAppIdentity
     private let prefix: String
-    public init(store: any SecureStore) { self.store = store; identity = nil; prefix = "" }
     public init(identity: AgentAppIdentity, store: (any SecureStore)? = nil) {
         self.identity = identity
         self.store = store ?? KeychainStore(service: identity.keychainService)
@@ -69,26 +68,26 @@ public struct ClientRepository: Sendable {
     }
     public func connection() throws -> PairedConnection? {
         let connection = try store.read(prefix + "connection").map { try WireJSON.decoder().decode(PairedConnection.self, from: $0) }
-        if let connection { try identity?.validate(connection) }
+        if let connection { try identity.validate(connection) }
         return connection
     }
     public func saveConnection(_ connection: PairedConnection) throws {
-        try identity?.validate(connection)
+        try identity.validate(connection)
         try store.write(WireJSON.encoder().encode(connection), for: prefix + "connection")
     }
     public func state(for connection: PairedConnection) throws -> ClientState {
-        try identity?.validate(connection)
+        try identity.validate(connection)
         guard let data = try store.read(prefix + connection.cacheKey) else { return ClientState() }
         var state = try WireJSON.decoder().decode(ClientState.self, from: data)
         state.prepareForLaunch()
         return state
     }
     public func saveState(_ state: ClientState, for connection: PairedConnection) throws {
-        try identity?.validate(connection)
+        try identity.validate(connection)
         try store.write(WireJSON.encoder().encode(state.cacheSnapshot()), for: prefix + connection.cacheKey)
     }
     public func forget(_ connection: PairedConnection) throws {
-        try identity?.validate(connection)
+        try identity.validate(connection)
         try store.remove(prefix + "connection")
         try store.remove(prefix + connection.cacheKey)
     }

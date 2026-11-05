@@ -19,6 +19,17 @@ public enum ModelConnectionState: Equatable {
     case checking, available, recovering, unavailable, disabled
 }
 
+public enum ChatModelConfigurationError: Error, Equatable, LocalizedError, Sendable {
+    case repositoryIdentityMismatch
+
+    public var errorDescription: String? {
+        switch self {
+        case .repositoryIdentityMismatch:
+            "客户端存储身份与当前产品身份不一致。"
+        }
+    }
+}
+
 private struct MessagePaginationState: Equatable {
     var nextCursor: Int64?
     var hasMore: Bool
@@ -56,11 +67,21 @@ public final class ChatModel: ObservableObject {
         return "当前为旧服务兼容连接，服务未提供 Agent 身份。请更新服务端以启用完整身份校验。"
     }
 
-    public init(identity: AgentAppIdentity, repository: ClientRepository? = nil,
+    public init(identity: AgentAppIdentity,
                 transport: any HTTPTransport = URLSessionTransport(),
                 streamTransport: any SSETransport = URLSessionSSETransport()) {
         self.identity = identity
-        self.repository = repository ?? ClientRepository(identity: identity)
+        self.repository = ClientRepository(identity: identity)
+        self.transport = transport; self.streamTransport = streamTransport
+    }
+    public init(identity: AgentAppIdentity, repository: ClientRepository,
+                transport: any HTTPTransport = URLSessionTransport(),
+                streamTransport: any SSETransport = URLSessionSSETransport()) throws {
+        guard repository.identity == identity else {
+            throw ChatModelConfigurationError.repositoryIdentityMismatch
+        }
+        self.identity = identity
+        self.repository = repository
         self.transport = transport; self.streamTransport = streamTransport
     }
     private func client(for connection: PairedConnection) -> APIClient {

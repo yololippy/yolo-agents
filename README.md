@@ -43,7 +43,7 @@ PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python .venv/bin/pytho
 PYTHONPATH=packages/core-python:agents/yolo-beni/runtime-python .venv/bin/python -m yolo_beni --mode chatgpt
 ```
 
-YoloTrade 默认端口 8765，YoloBeni 默认端口 8766；数据分别位于 `~/Library/Application Support/YoloAgents/<agent-id>/`。发现旧 YoloTrade 根目录聊天时会提示显式接管/迁移，步骤见 [Provider 方案](docs/CHATGPT_PROVIDER_PLAN.md)，不要删除旧数据。
+YoloTrade 默认端口 8765，YoloBeni 默认端口 8766；数据分别位于 `~/Library/Application Support/YoloAgents/<agent-id>/`。未标记的旧数据目录不会被任一产品直接接管；请先备份并按 [Provider 方案](docs/CHATGPT_PROVIDER_PLAN.md) 设计、验收对应产品的一次性迁移，不要删除旧数据或手工补归属标记。
 
 保留 Codex 兼容模式；已在 Mac 的 Codex 中完成 ChatGPT 登录时，可显式启动：
 

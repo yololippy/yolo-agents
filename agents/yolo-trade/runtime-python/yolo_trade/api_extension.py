@@ -1,4 +1,4 @@
-"""Trading-Agent-only additions to the shared Yolo Agents chat API."""
+"""YoloTrade-only additions to the shared Yolo Agents chat API."""
 
 import json
 from pathlib import Path
@@ -7,9 +7,9 @@ import threading
 from uuid import UUID, uuid5
 
 from yolo_agents.api import APIError, identifier
-from yolo_agents.runtime_tools import (
+from .runtime_tools import (
     MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, PAPER_ORDER_TOOL,
-    PAPER_ORDERS_TOOL, POSITIONS_TOOL,
+    PAPER_ORDERS_TOOL, POSITIONS_TOOL, RuntimeToolContext,
 )
 
 from .paper_order_store import PaperOrderStore
@@ -80,13 +80,14 @@ class TradingAPIExtension:
                     or (self._auth is not None and self._auth is not auth)):
                 raise RuntimeError("Trading extension is already bound to another Host")
             if bind_runtime_tool and not self._tool_bound:
-                bind_tool = getattr(service, "bind_trading_tools", None)
+                bind_tool = getattr(service, "bind_turn_hooks", None)
                 reauthorize = getattr(auth, "reauthorize", None)
                 if not callable(bind_tool) or not callable(reauthorize):
                     raise RuntimeError("Trading Host does not support the model tool boundary")
-                bind_tool(self.create_model_paper_draft, self.read_model_trading_data,
-                          self.cancel_model_paper_order,
-                          self.confirm_chat_paper_order, reauthorize)
+                bind_tool(
+                    interceptor=self._intercept_chat_turn,
+                    runtime_tools_factory=self._runtime_tools_for_turn,
+                )
                 self._tool_bound = True
             self._chat_service, self._auth = service, auth
             if self._orders is None:
@@ -94,6 +95,26 @@ class TradingAPIExtension:
                     Path(service.store.path).parent / "paper-orders.sqlite3")
                 self._initialize_orders(order_store)
         return self.create_model_paper_draft
+
+    def _intercept_chat_turn(self, *, history, caller):
+        return self.confirm_chat_paper_order(
+            history=history, caller=caller,
+            reauthorize=lambda: self._auth.reauthorize(caller),
+        )
+
+    def _runtime_tools_for_turn(self, *, conversation_id, user_message_id, run_id,
+                                caller, trusted_messages):
+        return RuntimeToolContext(
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            run_id=run_id,
+            caller=caller,
+            trusted_messages=trusted_messages,
+            create_paper_draft=self.create_model_paper_draft,
+            reauthorize=lambda: self._auth.reauthorize(caller),
+            read_trading_data=self.read_model_trading_data,
+            cancel_paper_order=self.cancel_model_paper_order,
+        )
 
     def orders(self, handler):
         # Direct test/embedded servers may replace an extension on one service;

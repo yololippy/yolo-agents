@@ -164,7 +164,7 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             ensure_agent_identity(root, "yolo-beni")
-            args = SimpleNamespace(data_dir=root, adopt_existing_data=False)
+            args = SimpleNamespace(data_dir=root)
             before = sorted(path.name for path in root.iterdir())
             with patch("yolo_trade.__main__.IBKRBrokerLifecycle") as lifecycle:
                 with self.assertRaises(RuntimeError):

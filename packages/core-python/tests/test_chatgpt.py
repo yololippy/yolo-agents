@@ -60,20 +60,21 @@ class IdentityTests(unittest.TestCase):
             alias.symlink_to(a, target_is_directory=True)
             for path in (a, alias, a / 'nested'):
                 with self.subTest(path=path), self.assertRaises(RuntimeError):
-                    prepare_agent_directory(path, 'beta', 'Beta', adopt_existing=True)
-            with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'alpha', adopt_existing=True)
-
-    def test_unmarked_legacy_requires_explicit_adoption_and_preserves_data(self):
-        with tempfile.TemporaryDirectory() as temp:
-            data = Path(temp) / 'app.sqlite3'
-            data.write_bytes(b'legacy')
+                    prepare_agent_directory(path, 'beta', 'Beta')
             with self.assertRaises(RuntimeError):
                 prepare_agent_directory(temp, 'alpha')
-            prepare_agent_directory(temp, 'alpha', adopt_existing=True)
-            self.assertEqual(data.read_bytes(), b'legacy')
-            with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'beta', adopt_existing=True)
+
+    def test_unmarked_legacy_data_cannot_be_claimed_by_a_product(self):
+        for filename in ('app.sqlite3', 'server.lock'):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp:
+                data = Path(temp) / filename
+                data.write_bytes(b'legacy')
+                with self.assertRaises(RuntimeError):
+                    prepare_agent_directory(temp, 'alpha')
+                self.assertEqual(data.read_bytes(), b'legacy')
+                with self.assertRaises(RuntimeError):
+                    prepare_agent_directory(temp, 'beta')
+                self.assertFalse((Path(temp) / '.agent-owner.json').exists())
 
 
 class AuthTests(unittest.TestCase):

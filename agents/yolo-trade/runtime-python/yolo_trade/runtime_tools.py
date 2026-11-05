@@ -25,8 +25,8 @@ OPEN_ORDER_TOOL = "get_open_order"
 PAPER_ORDERS_TOOL = "list_paper_orders"
 PAPER_ORDER_TOOL = "get_paper_order"
 PAPER_DRAFT_TOOL_SCHEMA_VERSION = 5
-# Keep this policy in the shared trading instructions so every supported model
-# adapter (Pydantic/ChatGPT and Codex) receives the same product writing style.
+# Keep this policy in the product-wide trading instructions so every supported
+# model adapter (Pydantic/ChatGPT and Codex) receives the same writing style.
 TRADING_RESPONSE_STYLE_INSTRUCTIONS = (
     "Default to a concise answer in the user's language. Lead with the conclusion, then include "
     "only the facts, risks, and next steps needed for the current request. Unless the user explicitly "

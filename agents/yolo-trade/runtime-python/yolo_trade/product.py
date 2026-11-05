@@ -1,7 +1,7 @@
 """YoloTrade product identity owned by this specialization."""
 
 from yolo_agents.agent_runtime import RuntimeCapabilities
-from yolo_agents.runtime_tools import (
+from .runtime_tools import (
     CODEX_TRADING_PROPOSAL_INSTRUCTIONS, PAPER_DRAFT_TOOL, PAPER_DRAFT_TOOL_SCHEMA_VERSION,
     TRADING_TOOL_INSTRUCTIONS, PaperOrderStreamFilter, finish_trading_reply,
     pydantic_trading_tools, trading_dynamic_tools,
