@@ -706,6 +706,62 @@ class IBKRAdapter:
                 return {"order": order, "as_of": now}
             return {"orders": normalized, "count": len(normalized), "as_of": now}
 
+    async def account_risk_detail(self, *, timeout=5.0):
+        """Return only account-level values needed by the private risk policy."""
+        self._assert_owner()
+        timeout = _timeout(timeout)
+        async with self._lock:
+            self._read_guard()
+            try:
+                rows = await asyncio.wait_for(
+                    self._client.accountSummaryAsync(self.config.account), timeout)
+            except Exception:
+                raise IBKROperationError("risk_data_unavailable", "账户风控数据读取失败或超时。") from None
+            if not isinstance(rows, (list, tuple)):
+                raise IBKROperationError("risk_data_unavailable", "账户风控数据格式无效。")
+            values = {}
+            for row in rows:
+                if getattr(row, "account", None) != self.config.account:
+                    continue
+                tag = getattr(row, "tag", None)
+                if tag not in ("NetLiquidation", "GrossPositionValue"):
+                    continue
+                currency = getattr(row, "currency", None)
+                value = _decimal_text(getattr(row, "value", None), positive=tag == "NetLiquidation",
+                                      nonnegative=tag == "GrossPositionValue")
+                if currency == "USD" and value is not None and tag not in values:
+                    values[tag] = value
+            if set(values) != {"NetLiquidation", "GrossPositionValue"}:
+                raise IBKROperationError("risk_data_unavailable", "账户净值或总持仓市值不可用。")
+            return {"net_liquidation": values["NetLiquidation"],
+                    "gross_position_value": values["GrossPositionValue"],
+                    "as_of": datetime.now(timezone.utc).isoformat()}
+
+    async def risk_snapshot(self, intent, *, timeout=15.0):
+        """Refresh the account-redacted facts consumed by the risk policy.
+
+        Each read is guarded by the same connection/session checks.  A session
+        change anywhere in the sequence invalidates the entire snapshot.
+        """
+        self._assert_owner()
+        timeout = _timeout(timeout)
+        try:
+            symbol = intent["contract"]["symbol"]
+        except (KeyError, TypeError):
+            raise IBKROperationError("risk_data_unavailable", "订单缺少风控所需的股票标识。") from None
+        before = self.paper_order_snapshot()
+        context = {key: before.get(key) for key in ("config_id", "session_id")}
+        per_read = max(1.0, min(5.0, timeout / 4))
+        quote = await self.market_quote(symbol, timeout=per_read)
+        positions = await self.positions_detail(timeout=per_read)
+        open_orders = await self.open_orders_detail(timeout=per_read)
+        account = await self.account_risk_detail(timeout=per_read)
+        after = self.paper_order_snapshot()
+        if context != {key: after.get(key) for key in ("config_id", "session_id")}:
+            raise IBKROperationError("stale_broker_context", "风控读取期间券商会话已变化。")
+        return {"context": context, "quote": quote, "positions": positions,
+                "open_orders": open_orders, "account": account}
+
     async def disconnect(self):
         self._assert_owner()
         async with self._lock:

@@ -12,10 +12,12 @@ from .ibkr import IBKRAdapter
 from .ibkr_config import ENV_PREFIX, IBKRConfigurationError, load_ibkr_config
 from .ibkr_lifecycle import IBKRBrokerLifecycle
 from .product import AGENT_ID, DEFAULT_PORT, DISPLAY_NAME, RUNTIME_CAPABILITIES
+from .risk_policy import DEFAULT_RISK_POLICY, RiskPolicyConfigurationError, load_risk_policy
 
 
 def add_trading_arguments(parser) -> None:
     parser.add_argument("--ibkr-config", help="IBKR JSON 配置；不接受登录凭据")
+    parser.add_argument("--risk-policy-config", help="YoloTrade 风控 JSON 配置；省略时使用产品内置配置")
     parser.add_argument("--ibkr-environment", choices=("paper", "live"))
     parser.add_argument("--ibkr-host")
     parser.add_argument("--ibkr-port", type=int)
@@ -55,7 +57,7 @@ def load_broker(args, parser):
         parser.error(f"IBKR 配置无效：{exc}")
 
 
-def run_trading_host(args, broker) -> int:
+def run_trading_host(args, broker, *, risk_policy=DEFAULT_RISK_POLICY) -> int:
     """Keep the broker private to this Agent and close it on every Host exit."""
     data_dir = getattr(args, "data_dir", None)
     if data_dir is not None:
@@ -64,7 +66,7 @@ def run_trading_host(args, broker) -> int:
     lifecycle = IBKRBrokerLifecycle(broker) if broker is not None else None
     try:
         orders_path = Path(data_dir).expanduser().resolve() / "paper-orders.sqlite3" if data_dir is not None else None
-        extension = TradingAPIExtension(lifecycle, orders_path=orders_path)
+        extension = TradingAPIExtension(lifecycle, orders_path=orders_path, risk_policy=risk_policy)
         if lifecycle is not None:
             extension.prepare_broker_recovery()
             lifecycle.start()
@@ -89,7 +91,11 @@ def main() -> int:
     validate_host_arguments(args, parser)
     broker = load_broker(args, parser)
     try:
-        return run_trading_host(args, broker)
+        risk_policy = load_risk_policy(args.risk_policy_config)
+    except RiskPolicyConfigurationError as exc:
+        parser.error(str(exc))
+    try:
+        return run_trading_host(args, broker, risk_policy=risk_policy)
     except RuntimeError as exc:
         parser.error(str(exc))
 

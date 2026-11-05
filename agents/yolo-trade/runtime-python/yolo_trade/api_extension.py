@@ -15,6 +15,7 @@ from .runtime_tools import (
 from .paper_order_store import PaperOrderStore
 from .paper_order_broker import BrokerBoundaryError, snapshot
 from .paper_orders import OrderError, PaperOrderService
+from .risk_policy import DEFAULT_RISK_POLICY, RiskPolicy
 
 
 def read_order_json(handler):
@@ -58,8 +59,10 @@ def read_order_json(handler):
 class TradingAPIExtension:
     """Keeps IBKR status and the execution boundary outside shared packages."""
 
-    def __init__(self, broker=None, *, orders_path=None):
+    def __init__(self, broker=None, *, orders_path=None,
+                 risk_policy: RiskPolicy | None = DEFAULT_RISK_POLICY):
         self.broker = broker
+        self.risk_policy = risk_policy
         # A migration failure propagates to Host startup; never enables a fallback.
         self._order_store = PaperOrderStore(orders_path) if orders_path is not None else None
         self._orders = None
@@ -124,7 +127,7 @@ class TradingAPIExtension:
             return self._orders
 
     def _initialize_orders(self, store):
-        service = PaperOrderService(store, self.broker)
+        service = PaperOrderService(store, self.broker, risk_policy=self.risk_policy)
         service.recover_interrupted()
         self._orders = service
 

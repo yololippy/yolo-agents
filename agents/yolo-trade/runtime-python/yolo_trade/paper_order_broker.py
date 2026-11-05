@@ -18,6 +18,12 @@ class PaperOrderBroker(Protocol):
     def open_orders_detail(self, *, broker_order_id: str | None = None) -> dict:
         """Return the configured account's open orders or one normalized detail."""
 
+    def risk_snapshot(self, intent: dict) -> dict:
+        """Return fresh quote, positions, open orders and account risk values.
+
+        The result is account-redacted and bound to config_id/session_id.
+        """
+
     def paper_order_snapshot(self) -> dict:
         """Return environment, config_id, session_id, account_verified,
         permissions_verified, environment_verified, execution_enabled,

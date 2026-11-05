@@ -9,17 +9,16 @@
 - YoloTrade 与 YoloBeni 已完成产品身份、数据目录、授权、Skills、Keychain 和客户端缓存隔离。
 - 共享 Host、聊天 API、主会话、上下文压缩、消息分页、图片消息与分月文件存储已实现。
 - 两个产品均有可构建的 macOS/iOS 客户端；iOS 最低版本为 26，共享玻璃功能坞已经接入。
-- YoloTrade 已实现 Paper 启动对账、行情/持仓/开放订单聊天查询、What-if、Mac 确认、单次提交、单笔撤单和独立订单账本；Live 执行关闭。
+- YoloTrade 已实现 Paper 启动对账、行情/持仓/开放订单聊天查询、单一配置入口的版本化硬风控、What-if、Mac 确认、单次提交、单笔撤单和独立订单账本；Live 执行关闭。AAPL 金额豁免、动态总敞口、行情偏离/有效期及未来卖 Put/Call 门禁已配置。
 - Gateway Supervisor、IBC 和 Paper Gateway 已安装。2026-11-05 检查时 Supervisor 为 `gateway_ready`、4002 已监听；YoloTrade 8765 常驻 Host 未运行。当前 Gateway 的 `Read-Only API` 设置仍需通过 Host 预检确认，不能只根据端口判断。
-- 最新验证基线：Core 156、YoloTrade 178、YoloBeni 5 项 Python 测试和双 Agent 隔离测试通过；Swift SDK 61、共享 UI 45、YoloTrade 客户端 27、YoloBeni 客户端 1 项通过；两个产品的 macOS arm64 与 iOS 26 Simulator 构建通过。
+- 最新验证基线：Core 156、YoloTrade 194、YoloBeni 5 项 Python 测试和双 Agent 隔离测试通过；Swift SDK 61、共享 UI 45、YoloTrade 客户端 27、YoloBeni 客户端 1 项通过；两个产品的 macOS arm64 与 iOS 26 Simulator 构建通过。
 
 ## 当前优先级
 
-1. **M0-02 / M3-02 风险参数与硬规则**：确定并实现单笔金额、总敞口/集中度、当日限额、报价偏离、数据有效期和失败原因；参数未定义时阻止提交。
-2. **M0-04 / M0-05 当前 Gateway 预检**：以显式 Paper 配置启动当前 YoloTrade Host，验证目标账户、权限和完整启动对账；先不提交订单。
-3. **M3-05 提交前复核**：提交前刷新账户、持仓、挂单、行情和授权，加入账户级串行或额度预留。
-4. **M3-08 / M3-09 恢复与审计**：主动查询并收敛 unknown，串联消息、订单版本、规则、确认、请求和券商事件。
-5. **M3-10 Paper 验收**：在上述门槛通过后，只使用用户明确指定并确认的小额订单完成 What-if、提交、成交/撤单和恢复验收。
+1. **M0-04 / M0-05 当前 Gateway 预检**：以显式 Paper 配置启动当前 YoloTrade Host，验证目标账户、权限和完整启动对账；先不提交订单。
+2. **M3-05 提交前复核**：提交前刷新账户、持仓、挂单、行情和授权，加入账户级串行或额度预留。
+3. **M3-08 / M3-09 恢复与审计**：主动查询并收敛 unknown，串联消息、订单版本、规则、确认、请求和券商事件。
+4. **M3-10 Paper 验收**：在上述门槛通过后，只使用用户明确指定并确认的小额订单完成 What-if、提交、成交/撤单和恢复验收。
 
 ## YoloTrade 待办
 

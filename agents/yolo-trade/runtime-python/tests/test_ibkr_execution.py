@@ -128,7 +128,11 @@ class ExecutionClient(Client):
         return await self.rows("executions", self.execution_rows)
 
     async def accountSummaryAsync(self, account):
-        return await self.rows("account_summary", [NS(account=account, tag="BuyingPower", value="100000", currency="USD")])
+        return await self.rows("account_summary", [
+            NS(account=account, tag="BuyingPower", value="100000", currency="USD"),
+            NS(account=account, tag="NetLiquidation", value="100000", currency="USD"),
+            NS(account=account, tag="GrossPositionValue", value="1000", currency="USD"),
+        ])
 
     async def reqContractDetailsAsync(self, query):
         self.touch()
@@ -239,6 +243,19 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.market_requests[0][1:], ("", False, False))
         self.assertEqual(len(self.client.market_cancellations), 1)
         self.assertNotIn("DU123456", json.dumps(quote))
+
+    async def test_risk_snapshot_refreshes_all_required_account_redacted_facts(self):
+        result = await self.broker.risk_snapshot(self.request)
+        self.assertEqual(result["context"], self.ctx)
+        self.assertEqual(result["quote"]["symbol"], "AAPL")
+        self.assertEqual(result["account"], {
+            "net_liquidation": "100000",
+            "gross_position_value": "1000",
+            "as_of": result["account"]["as_of"],
+        })
+        self.assertIn("positions", result["positions"])
+        self.assertIn("orders", result["open_orders"])
+        self.assertNotIn("DU123456", json.dumps(result))
 
     async def test_position_details_are_target_scoped_and_account_redacted(self):
         self.client.positions = [

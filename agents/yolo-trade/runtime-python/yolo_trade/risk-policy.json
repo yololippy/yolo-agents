@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "version": "paper-v1-2026-11-05",
+  "limits": {
+    "max_order_notional_usd": "5000",
+    "max_projected_gross_exposure_net_liquidation_multiple": "1.3",
+    "max_symbol_concentration_percent": "25",
+    "max_daily_submitted_notional_usd": "10000",
+    "max_quote_deviation_percent": "1",
+    "max_data_age_seconds": 30
+  },
+  "market_data": {
+    "allowed_types": ["live", "frozen", "delayed", "delayed_frozen"]
+  },
+  "symbol_overrides": {
+    "monetary_limit_exempt": ["AAPL"]
+  },
+  "option_sales": {
+    "short_put_allowed_underlyings": ["AAPL", "KO"],
+    "covered_call_shares_per_contract": 100
+  }
+}

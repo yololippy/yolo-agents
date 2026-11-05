@@ -556,6 +556,7 @@ class FakePaperLifecycle:
         self.snapshot_hook = self.submit_hook = self.cancel_hook = None
         self.store_path = None
         self.read_calls = []
+        self.risk_calls = 0
 
     def stage_order_recovery(self, plan):
         self.recovery_plans.append(deepcopy(plan))
@@ -586,6 +587,20 @@ class FakePaperLifecycle:
                "filled_quantity": "0", "limit_price": "90", "status": "Submitted"}
         return ({"order": row, "as_of": "2026-10-29T00:00:00+00:00"} if broker_order_id
                 else {"count": 1, "orders": [row], "as_of": "2026-10-29T00:00:00+00:00"})
+
+    def risk_snapshot(self, intent):
+        self.risk_calls += 1
+        now = datetime.now(timezone.utc).isoformat()
+        symbol, price = intent["contract"]["symbol"], intent["limit_price"]
+        return {
+            "context": {"config_id": self.config_id, "session_id": self.facts["session_id"]},
+            "quote": {"symbol": symbol, "data_type": "live", "bid": price,
+                      "ask": price, "last": price, "close": price, "as_of": now},
+            "positions": {"positions": [], "count": 0, "as_of": now},
+            "open_orders": {"orders": [], "count": 0, "as_of": now},
+            "account": {"net_liquidation": "100000", "gross_position_value": "0",
+                        "as_of": now},
+        }
 
     def orders_snapshot(self):
         return deepcopy(self.updates)
@@ -701,6 +716,69 @@ class PaperOrderAPITests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertNotIn("DU_SECRET_ACCOUNT", json.dumps(view))
             self.assertNotIn("broker_order_id", json.dumps(view))
+
+    def test_preview_persists_versioned_risk_decision(self):
+        order = self.previewed()
+        risk = order["preview"]["risk"]
+        self.assertEqual(risk["status"], "approved")
+        self.assertEqual(risk["policy"]["version"], "paper-v1-2026-11-05")
+        with closing(sqlite3.connect(self.path)) as db:
+            payload = db.execute(
+                "SELECT payload FROM paper_events WHERE order_id=? "
+                "AND type='order.risk_checked' ORDER BY seq DESC LIMIT 1", (order["id"],)
+            ).fetchone()[0]
+        self.assertEqual(json.loads(payload)["action"], "preview")
+
+    def test_stale_risk_snapshot_blocks_before_what_if(self):
+        order = self.create()
+        original = self.broker.risk_snapshot
+
+        def stale(intent):
+            value = original(intent)
+            value["quote"]["as_of"] = "2000-01-01T00:00:00+00:00"
+            return value
+
+        self.broker.risk_snapshot = stale
+        status, body = self.action(order, "preview")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"]["code"], "risk_data_stale")
+        self.assertEqual(self.broker.calls["preview"], 0)
+        self.assertEqual(self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]["order"]["state"], "draft")
+
+    def test_submit_refreshes_risk_and_stays_confirmed_when_it_fails(self):
+        order = self.confirmed()
+        original = self.broker.risk_snapshot
+
+        def stale(intent):
+            value = original(intent)
+            value["account"]["as_of"] = "2000-01-01T00:00:00+00:00"
+            return value
+
+        self.broker.risk_snapshot = stale
+        status, body = self.action(order, "submit")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"]["code"], "risk_data_stale")
+        self.assertEqual(self.broker.calls["submit"], 0)
+        saved = self.request("GET", "/v1/orders/" + order["id"], token=self.token)[1]["order"]
+        self.assertEqual(saved["state"], "confirmed")
+        self.assertEqual(self.broker.risk_calls, 2)
+
+    def test_aapl_submission_does_not_consume_other_symbols_daily_limit(self):
+        data = self.draft_data()
+        data.update(quantity=100, limit_price="100.00")
+        order = self.create(data)
+        for action in ("preview", "confirm", "submit"):
+            status, body = self.action(order, action)
+            self.assertEqual(status, 200, body)
+            order = body["order"]
+        self.assertEqual(order["state"], "working")
+
+        other = self.draft_data()
+        other["contract"]["symbol"] = "MSFT"
+        other.update(quantity=1, limit_price="100.00")
+        status, body = self.action(self.create(other), "preview")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["order"]["preview"]["risk"]["monetary_limits_applied"])
 
     def test_agent_cancel_requires_durable_chat_instruction_and_records_source(self):
         order = self.action(self.confirmed(), "submit")[1]["order"]
@@ -1168,6 +1246,7 @@ class PaperOrderAPITests(unittest.TestCase):
         self.server.extension = self.extension
         data = self.draft_data()
         data["account_selection"] = config.config_id
+        data["limit_price"] = "100.00"
         draft = self.create(data)
         status, body = self.action(draft, "preview")
         self.assertEqual(status, 200, body)

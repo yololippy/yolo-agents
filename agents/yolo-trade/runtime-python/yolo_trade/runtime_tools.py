@@ -279,7 +279,12 @@ class RuntimeToolContext:
                 safe_codes = {
                     "account_selection_mismatch", "broker_not_ready", "idempotency_conflict",
                     "invalid_order", "order_state_conflict", "paper_facade_unavailable",
-                    "paper_only", "permission_revoked",
+                    "paper_only", "permission_revoked", "risk_policy_unavailable",
+                    "risk_data_unavailable", "risk_data_invalid", "risk_data_stale",
+                    "risk_market_data_not_allowed", "risk_order_notional_limit",
+                    "risk_total_exposure_limit", "risk_concentration_limit",
+                    "risk_daily_limit", "risk_quote_deviation_limit",
+                    "risk_put_sale_not_allowed", "risk_uncovered_call_not_allowed",
                 }
                 result = {
                     "status": "draft_unavailable",

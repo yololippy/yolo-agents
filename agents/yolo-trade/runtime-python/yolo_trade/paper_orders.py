@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from .paper_order_broker import BrokerBoundaryError, snapshot
 from .paper_order_store import PaperOrderStore, encoded
+from .risk_policy import DEFAULT_RISK_POLICY, RiskPolicy, RiskPolicyError
 
 
 ACTIVE = ("submitting", "unknown", "accepted", "working", "partial", "cancel_pending")
@@ -37,6 +38,18 @@ class OrderError(Exception):
             "broker_outcome_unknown": "券商操作结果不明；禁止自动重发，请先对账。",
             "permission_revoked": "设备权限已失效，未发起本次券商操作。",
             "order_not_found": "订单不存在。",
+            "risk_policy_unavailable": "风控策略未配置，禁止预览或提交订单。",
+            "risk_data_unavailable": "账户、持仓、挂单或行情风控数据不可用。",
+            "risk_data_invalid": "风控数据不完整或格式无效，禁止提交订单。",
+            "risk_data_stale": "风控数据已过期，禁止提交订单。",
+            "risk_market_data_not_allowed": "当前行情类型不在风控允许范围内。",
+            "risk_order_notional_limit": "订单金额超过当前单笔限额。",
+            "risk_total_exposure_limit": "订单会使总敞口超过当前限额。",
+            "risk_concentration_limit": "订单会使单一标的集中度超过当前限额。",
+            "risk_daily_limit": "订单会使当日累计提交金额超过当前限额。",
+            "risk_quote_deviation_limit": "订单限价相对当前报价偏离过大。",
+            "risk_put_sale_not_allowed": "当前标的不允许卖出 Put。",
+            "risk_uncovered_call_not_allowed": "卖出 Call 前必须持有足额正股。",
         }.get(code, "订单操作未完成，请检查订单状态。")
         super().__init__(self.message)
 
@@ -112,18 +125,21 @@ def public_order(row):
     intent = json.loads(row["intent"])
     preview = json.loads(row["preview"]) if row["preview"] else None
     confirmation = json.loads(row["confirmation"]) if row["confirmation"] else None
+    preview_fields = ("id", "qualified_contract", "what_if", "risk", "expires_at")
     return {"id": row["id"], "client_request_id": row["client_request_id"], "environment": "paper",
             **intent, "version": row["version"], "content_hash": row["content_hash"], "state": row["state"],
-            "preview": ({key: preview[key] for key in ("id", "qualified_contract", "what_if", "expires_at")} if preview else None),
+            "preview": ({key: preview[key] for key in preview_fields if key in preview} if preview else None),
             "confirmation": ({key: confirmation[key] for key in ("id", "version", "content_hash", "expires_at")} if confirmation else None),
             "filled_quantity": row["filled_quantity"], "average_fill_price": row["average_fill_price"],
             "error_code": row["error_code"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
 
 class PaperOrderService:
-    def __init__(self, store: PaperOrderStore, broker, *, clock=None):
+    def __init__(self, store: PaperOrderStore, broker, *, clock=None,
+                 risk_policy: RiskPolicy | None = DEFAULT_RISK_POLICY):
         self.store, self.broker = store, broker
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.risk_policy = risk_policy
 
     def now(self):
         return self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -223,8 +239,9 @@ class PaperOrderService:
                     if intent_from({"client_request_id": row["client_request_id"], **intent}) != intent:
                         raise ValueError()
                     preview = json.loads(row["preview"])
-                    if not isinstance(preview, dict) or set(preview) != {
-                            "id", "qualified_contract", "what_if", "context", "expires_at"}:
+                    allowed_preview_keys = {"id", "qualified_contract", "what_if", "context", "expires_at"}
+                    if (not isinstance(preview, dict)
+                            or set(preview) not in (allowed_preview_keys, allowed_preview_keys | {"risk"})):
                         raise ValueError()
                     contract, context = preview["qualified_contract"], preview["context"]
                     if (not isinstance(contract, dict) or set(contract) != {
@@ -277,6 +294,55 @@ class PaperOrderService:
                            (row["user_id"], row["intent_key"], row["id"])).fetchone()
         if other:
             raise OrderError("intent_in_flight")
+
+    def _daily_submitted_notional(self, order_id):
+        """Count each order once on the UTC day it first reached submitting."""
+        day = self.clock().astimezone(timezone.utc).date().isoformat()
+        total = Decimal("0")
+        with self.store.transaction() as db:
+            rows = db.execute(
+                "SELECT DISTINCT o.id,o.intent FROM paper_orders o "
+                "JOIN paper_events e ON e.order_id=o.id "
+                "WHERE e.type='order.submitting' AND substr(e.created_at,1,10)=? AND o.id<>?",
+                (day, order_id),
+            ).fetchall()
+        try:
+            for row in rows:
+                intent = json.loads(row["intent"])
+                if intent["contract"]["symbol"] in self.risk_policy.monetary_limit_exempt_symbols:
+                    continue
+                total += Decimal(intent["limit_price"]) * intent["quantity"]
+        except (InvalidOperation, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise OrderError("risk_data_invalid") from None
+        return format(total.normalize(), "f")
+
+    def _assess_risk(self, intent, order_id, context):
+        if not isinstance(self.risk_policy, RiskPolicy):
+            raise OrderError("risk_policy_unavailable")
+        read = getattr(self.broker, "risk_snapshot", None)
+        if not callable(read):
+            raise OrderError("risk_data_unavailable")
+        try:
+            facts = read(intent)
+            return self.risk_policy.assess(
+                intent,
+                facts,
+                daily_submitted_notional=self._daily_submitted_notional(order_id),
+                expected_context=context,
+                now=self.clock().astimezone(timezone.utc),
+            )
+        except RiskPolicyError as exc:
+            raise OrderError(exc.code) from None
+        except OrderError:
+            raise
+        except Exception:
+            raise OrderError("risk_data_unavailable") from None
+
+    def _record_risk_check(self, order_id, user_id, request_id, action, assessment):
+        with self.store.transaction() as db:
+            row = self._get(db, order_id, user_id)
+            self.store.event(db, row, "order.risk_checked", self.now(), request_id,
+                             {"action": action, **assessment})
 
     def operate(self, action, data, caller, user_id, *, order_id=None, authorize=None):
         self.require_mac(caller)
@@ -393,6 +459,7 @@ class PaperOrderService:
             except OrderError as error:
                 return self._failure(db, request_id, row if row and self.store.order(db, row["id"], user_id) else None, error)
         # The request and transition are durable BEFORE any lifecycle operation.
+        risk = None
         try:
             if self._context(intent["account_selection"]) != context:
                 raise OrderError("version_conflict")
@@ -400,6 +467,9 @@ class PaperOrderService:
                 self._reauthorize(authorize, caller)
             if action == "submit" and self._expired(confirmation["expires_at"]):
                 raise OrderError("confirmation_expired")
+            if action in ("preview", "submit"):
+                risk = self._assess_risk(intent, row["id"], context)
+                self._record_risk_check(row["id"], user_id, request_id, action, risk)
         except OrderError as error:
             with self.store.transaction() as db:
                 row = self._get(db, row["id"], user_id)
@@ -410,7 +480,7 @@ class PaperOrderService:
         try:
             if action == "preview":
                 result = self.broker.preview_paper_order(intent, order_ref=row["id"], context=context)
-                preview = self._preview_result(result, intent, context)
+                preview = self._preview_result(result, intent, context, risk)
             elif action == "submit":
                 result = self.broker.submit_paper_order(intent, order_ref=row["id"], preview=preview, context=context)
             else:
@@ -474,7 +544,7 @@ class PaperOrderService:
             self.store.save(db, row)
             return self._failure(db, request_id, row, OrderError("preview_failed", 409))
 
-    def _preview_result(self, result, intent, context):
+    def _preview_result(self, result, intent, context, risk):
         if not isinstance(result, dict):
             raise OrderError("preview_failed")
         contract, what_if = result.get("qualified_contract"), result.get("what_if")
@@ -490,8 +560,11 @@ class PaperOrderService:
         amounts = {key: what_if[key] for key in amount_keys}
         if numbers["commission"] < 0:
             raise OrderError("preview_failed")
+        if not isinstance(risk, dict) or risk.get("status") != "approved":
+            raise OrderError("risk_data_invalid")
         return {"id": str(uuid4()), "qualified_contract": {**intent["contract"], "con_id": contract["con_id"]},
-                "what_if": {"complete": True, "accepted": True, "currency": "USD", **amounts}, "context": context,
+                "what_if": {"complete": True, "accepted": True, "currency": "USD", **amounts},
+                "risk": risk, "context": context,
                 "expires_at": (self.clock().astimezone(timezone.utc) + timedelta(seconds=120)).isoformat().replace("+00:00", "Z")}
 
     def _merge_result(self, row, result):

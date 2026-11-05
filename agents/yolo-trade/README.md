@@ -10,6 +10,8 @@ YoloTrade 私有的 Python Runtime，负责产品身份、聊天能力、IBKR Pa
 - `ibkr_lifecycle.py`：单一 owner loop、自动重连和完整重新对账。
 - `paper_order_store.py`：独立 `paper-orders.sqlite3` 账本。
 - `paper_orders.py`：草稿、预览、确认、提交、撤单、幂等和恢复状态机。
+- `risk-policy.json`：唯一的产品风控配置入口。
+- `risk_policy.py`：严格加载、版本化审计、硬风控和失败关闭决策。
 - `paper_order_broker.py`：订单服务与券商 lifecycle 的严格门面。
 - `runtime_tools.py`：模型可用的只读查询、Paper 草稿和单笔撤单工具。
 - `api_extension.py`：券商健康和订单 API；写操作只接受有效 Mac 管理设备。
@@ -70,6 +72,8 @@ PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
 
 需要真实 Paper 预检时，必须确认 Gateway 登录的是 Paper、目标账户正确，并由用户决定是否关闭 Gateway 的 `Read-Only API`。Supervisor 不修改该设置。
 
+风控默认读取 `runtime-python/yolo_trade/risk-policy.json`。如需试验另一份完整配置，可在启动时传入 `--risk-policy-config <path>`；配置缺字段、重复字段、类型错误或文件不可读都会直接拒绝启动，不会回退到旧参数。
+
 ## 对账与执行门槛
 
 连接后必须核对：
@@ -93,6 +97,10 @@ PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
 - `outsideRth=false`。
 
 模型可以读取行情、持仓、开放订单和应用账本，也可以创建不可执行的 Paper 草稿；不能自行确认或提交。提交必须经过 Mac 管理设备的预览、确认和再次明确提交。超时或断开产生 unknown 时绝不自动重发。
+
+预览和最终提交前都会重新读取行情、持仓、开放订单、账户净值和总持仓市值，并执行 YoloTrade 私有硬风控。当前配置为：单笔 5,000 USD、总敞口不超过 NetLiquidation 的 1.3 倍、单标的集中度 25%、UTC 当日累计提交 10,000 USD、报价偏离 1%、数据最长 30 秒；实时、延迟和冻结行情均允许，但仍必须有有效 bid/ask。AAPL 不受四项金额/敞口限制，也不消耗其他股票的当日额度，但仍受报价偏离和数据有效期约束。
+
+单腿期权执行目前仍未开放；同一配置已预置未来门禁：只有 AAPL/KO 可以卖 Put，卖 Call 每张必须有 100 股未被其他卖 Call 占用的正股。配置存在不等于期权执行已启用。
 
 完整 HTTP、状态机与幂等规则见 [Paper 订单协议](PAPER_ORDERS.md)。Gateway 登录和恢复见 [运维手册](IBKR_GATEWAY_AUTOMATION.md)。Apple 界面见 [YoloTrade App](../../apps/yolo-trade/README.md)。
 
