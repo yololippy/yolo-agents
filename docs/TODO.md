@@ -77,7 +77,7 @@
 
 ## 本轮补充：ID-01 产品身份统一（2026-11-04）
 
-- [x] 仓库协调 Skill 统一为 `yolo-agents-coordination`，建立 `main → main-trade/main-beni → 专项开发会话` 层级；跨产品共享层、Git 和最终汇报仍由顶层 `main` 统一负责。
+- [x] 仓库协调 Skill 统一为 `yolo-agents-coordination`；`main`、`main-trade`、`main-beni` 具备相同的开发、验收、Git 和汇报能力，`main` 可调配全部会话，两个产品主会话不得调用 `main` 或彼此调用。
 - [x] 交易产品的目录、运行时、模块、Swift Target、Xcode Project/Scheme、Bundle ID、Keychain 命名空间和文档统一为 `yolo-trade` / `YoloTrade`。
 - [x] 生活助手的目录、运行时、模块、Swift Target、Xcode Project/Scheme、Bundle ID、Keychain 命名空间和文档统一为 `yolo-beni` / `YoloBeni`。
 - [x] 旧产品身份在源码、活动文档、脚本与文件路径中已清除；第三方项目 `TradingAgents` 的正式名称不属于产品身份，保持不变。

@@ -67,8 +67,10 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 
 ## 多会话协作
 
-- 标题精确为 `main` 且工作目录为本仓库的会话是总协调者，可以调配 `main-trade`、`main-beni`、共享层及全部产品开发会话；只有 `main` 负责跨产品冲突、最终集成、Git 操作和用户总汇报。
-- `main-trade` 负责 YoloTrade 产品内的拆分、派发、审阅和验证；`main-beni` 负责 YoloBeni。产品主会话不得执行 Git 操作，也不得管理另一产品的会话或私有文件。
+- `main`、`main-trade`、`main-beni` 是三个具备同等执行能力的主会话，都可以规划任务、管理直属开发会话、修改当前任务需要的仓库文件、验收、执行 Git 操作并直接向用户汇报。用户可以分别与三个主会话沟通，不需要把 commit 或集成转交给另一个主会话。
+- 标题精确为 `main` 且工作目录为本仓库的会话负责全仓视角，可以调用 `main-trade`、`main-beni` 及全部开发会话。
+- `main-trade` 以 YoloTrade 为主要产品上下文，`main-beni` 以 YoloBeni 为主要产品上下文；这是默认工作重点，不是文件或 Git 权限限制。两者只能调用各自直属的普通开发会话，不得通过跨会话工具调用、发消息、派发、等待、读取或移交给 `main` 或另一个 `main-xxx`。
+- 三个主会话都可以按当前用户授权执行暂存、commit、分支和其他 Git 工作；push、历史重写及其他外部或破坏性操作仍需用户明确授权。提交时必须按精确范围保留其他会话的改动。
 - 其他开发会话只执行直接派发的任务，不继续派发、不联系其他会话、不执行 Git 操作。
 - `agents/`、`apps/`、`packages/` 的产品代码默认由协调者派发给职责匹配的开发会话实施；用户明确要求某个协调会话直接修改时，以该次指令为准。
 - 跨会话分工必须读取 [yolo-agents-coordination](.agents/skills/yolo-agents-coordination/SKILL.md)，按其中的产品路由、共享层单一所有权和文件归属规则执行。

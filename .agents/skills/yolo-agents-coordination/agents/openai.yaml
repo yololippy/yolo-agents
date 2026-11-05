@@ -1,3 +1,3 @@
 interface:
   display_name: "Yolo Agents 开发协作"
-  short_description: "由 main 统筹共享层和两个产品线的开发、审阅与集成验收"
+  short_description: "三个主会话能力相同；main 可调配全部，产品主会话禁止互调"
