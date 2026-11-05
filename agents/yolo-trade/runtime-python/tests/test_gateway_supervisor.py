@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import stat
@@ -12,10 +13,16 @@ from yolo_trade.gateway_supervisor import (
     GatewaySupervisorError,
     KeychainCredentials,
     SupervisorPaths,
+    _read_recovery_marker,
     _redact_ibc_output,
+    _write_recovery_marker,
     classify_status,
+    gateway_process_ids,
     ibc_command,
+    in_ibkr_maintenance_recovery_window,
+    port_is_open,
     render_ibc_config,
+    terminate_single_gateway,
 )
 
 
@@ -39,8 +46,31 @@ class GatewaySupervisorTests(unittest.TestCase):
             ibc_installed=False,
             is_launch_agent_loaded=False,
         )
-        self.assertEqual(status.state, "gateway_ready")
+        self.assertEqual(status.state, "local_api_ready")
+        self.assertTrue(status.port_open)
+        self.assertFalse(status.broker_connected)
+        self.assertFalse(status.data_ready)
         self.assertNotIn("password", json.dumps(status.__dict__))
+
+    def test_local_upstream_and_data_health_are_distinct(self):
+        status = classify_status(
+            is_port_open=True, is_gateway_running=True, credentials_ready=True,
+            ibc_installed=True, is_launch_agent_loaded=True, gateway_process_count=1,
+            host_health={"broker_connected": False, "data_ready": False},
+        )
+        self.assertEqual(status.state, "local_api_ready")
+        self.assertTrue(status.port_open)
+        self.assertTrue(status.host_reachable)
+        self.assertFalse(status.broker_connected)
+        self.assertFalse(status.data_ready)
+
+    def test_multiple_gateway_processes_fail_closed(self):
+        status = classify_status(
+            is_port_open=True, is_gateway_running=True, credentials_ready=True,
+            ibc_installed=True, is_launch_agent_loaded=True, gateway_process_count=2,
+        )
+        self.assertEqual(status.state, "gateway_conflict")
+        self.assertFalse(status.single_instance)
 
     def test_missing_credentials_and_install_have_distinct_states(self):
         missing = classify_status(
@@ -96,7 +126,7 @@ AcceptIncomingConnectionAction=accept
             self.assertIn("TradingMode=paper", output)
             self.assertIn("ReadOnlyLogin=no", output)
             self.assertIn("ReadOnlyApi=\n", output)
-            self.assertIn("AutoRestartTime=06:15 AM", output)
+            self.assertIn("AutoRestartTime=07:30 AM", output)
             self.assertIn("ColdRestartTime=14:15", output)
             self.assertIn("AcceptIncomingConnectionAction=reject", output)
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
@@ -117,6 +147,7 @@ AcceptIncomingConnectionAction=accept
             b"startup user paper-user\n"
             b"    IbLoginId=paper-user\n"
             b"    IbPassword=paper-password\n"
+            b"detected dialog entitled: DUR123456 Trader Workstation Configuration\n"
             b"normal diagnostic\n"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -125,6 +156,8 @@ AcceptIncomingConnectionAction=accept
             output = destination.read_text(encoding="utf-8")
             self.assertNotIn("paper-user", output)
             self.assertNotIn("paper-password", output)
+            self.assertNotIn("DUR123456", output)
+            self.assertIn("<redacted-account>", output)
             self.assertIn("startup user <redacted>", output)
             self.assertIn("IbLoginId=<redacted>", output)
             self.assertIn("IbPassword=<redacted>", output)
@@ -191,6 +224,39 @@ AcceptIncomingConnectionAction=accept
                 call(KEYCHAIN_PASSWORD_SERVICE, "paper"),
             ],
         )
+
+    def test_listener_check_is_passive_and_process_ids_are_counted(self):
+        listener = Mock(return_value=Mock(returncode=0))
+        self.assertTrue(port_is_open(runner=listener))
+        self.assertEqual(listener.call_args.args[0][:2], ["/usr/sbin/lsof", "-nP"])
+        process = Mock(return_value=Mock(returncode=0, stdout="123\n456\n123\ninvalid\n"))
+        self.assertEqual(gateway_process_ids(process), (123, 456))
+
+    def test_maintenance_windows_include_recovery_grace(self):
+        self.assertTrue(in_ibkr_maintenance_recovery_window(datetime(2026, 11, 5, 6, 30)))
+        self.assertTrue(in_ibkr_maintenance_recovery_window(datetime(2026, 11, 5, 21, 29)))
+        self.assertFalse(in_ibkr_maintenance_recovery_window(datetime(2026, 11, 5, 7, 30)))
+        self.assertFalse(in_ibkr_maintenance_recovery_window(datetime(2026, 11, 5, 21, 30)))
+
+    def test_gateway_restart_requires_exactly_one_instance(self):
+        single = Mock(return_value=Mock(returncode=0, stdout="123\n"))
+        with patch("yolo_trade.gateway_supervisor.os.kill") as stop:
+            self.assertTrue(terminate_single_gateway(single))
+            stop.assert_called_once_with(123, 15)
+        multiple = Mock(return_value=Mock(returncode=0, stdout="123\n456\n"))
+        with patch("yolo_trade.gateway_supervisor.os.kill") as stop:
+            self.assertFalse(terminate_single_gateway(multiple))
+            stop.assert_not_called()
+
+    def test_recovery_marker_persists_the_single_restart_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SupervisorPaths.defaults(Path(directory))
+            _write_recovery_marker(paths, "2110:2026-11-05T21:15:00+00:00", launch_used=False)
+            marker = _read_recovery_marker(paths)
+            self.assertTrue(marker["restart_requested"])
+            self.assertFalse(marker["launch_used"])
+            _write_recovery_marker(paths, marker["event_key"], launch_used=True)
+            self.assertTrue(_read_recovery_marker(paths)["launch_used"])
 
 
 if __name__ == "__main__":

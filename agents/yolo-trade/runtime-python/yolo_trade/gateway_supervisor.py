@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 import getpass
+import http.client
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -233,6 +235,12 @@ class GatewayStatus:
     paper_only: bool = True
     host: str = "127.0.0.1"
     port: int = 4002
+    gateway_process_count: int = 0
+    single_instance: bool = True
+    host_reachable: bool = False
+    broker_connected: bool = False
+    data_ready: bool = False
+    recovery_action: str = "none"
 
 
 class KeychainCredentials:
@@ -308,7 +316,7 @@ def render_ibc_config(template: Path, destination: Path, username: str, password
         "ReadOnlyLogin": "no",
         "ReadOnlyApi": "",
         "AutoLogoffTime": "",
-        "AutoRestartTime": "06:15 AM",
+        "AutoRestartTime": "07:30 AM",
         "ColdRestartTime": "14:15",
         "ClosedownAt": "",
         "AcceptIncomingConnectionAction": "reject",
@@ -345,22 +353,65 @@ def render_ibc_config(template: Path, destination: Path, username: str, password
         raise
 
 
-def port_is_open(host: str = "127.0.0.1", port: int = 4002, timeout: float = 0.25) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+def port_is_open(host: str = "127.0.0.1", port: int = 4002,
+                 runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> bool:
+    """Check the listening table without opening an API client connection."""
+    del host  # Gateway is intentionally loopback-only; lsof checks the bound port.
+    result = runner(
+        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+    return result.returncode == 0
+
+
+def gateway_process_ids(runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> tuple[int, ...]:
+    result = runner(
+        ["/usr/bin/pgrep", "-f", GATEWAY_PROCESS_PATTERN],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, text=True,
+    )
+    if result.returncode != 0:
+        return ()
+    values = []
+    for line in result.stdout.splitlines():
+        try:
+            value = int(line.strip())
+        except ValueError:
+            continue
+        if value > 0:
+            values.append(value)
+    return tuple(sorted(set(values)))
 
 
 def gateway_process_running(runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> bool:
-    result = runner(
-        ["/usr/bin/pgrep", "-f", GATEWAY_PROCESS_PATTERN],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
+    return bool(gateway_process_ids(runner))
+
+
+def trading_host_health(host: str = "127.0.0.1", port: int = 8765,
+                        timeout: float = 0.5) -> dict | None:
+    """Read the public Host health; return only fields needed for supervision."""
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", "/v1/health")
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = json.loads(response.read(1024 * 1024).decode("utf-8"))
+        broker = payload.get("broker") if isinstance(payload, dict) else None
+        if not isinstance(broker, dict):
+            return None
+        event = broker.get("last_connection_event")
+        event_code = event.get("code") if isinstance(event, dict) else None
+        observed_at = event.get("observed_at") if isinstance(event, dict) else None
+        return {
+            "broker_connected": broker.get("broker_connected", broker.get("connected")) is True,
+            "data_ready": broker.get("data_complete") is True and broker.get("health_stale") is not True,
+            "event_code": event_code if type(event_code) is int else None,
+            "event_observed_at": observed_at if isinstance(observed_at, str) else None,
+        }
+    except (OSError, UnicodeError, json.JSONDecodeError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
 
 
 def launch_agent_loaded(runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> bool:
@@ -375,10 +426,14 @@ def launch_agent_loaded(runner: Callable[..., subprocess.CompletedProcess] = sub
 
 def classify_status(
     *, is_port_open: bool, is_gateway_running: bool, credentials_ready: bool,
-    ibc_installed: bool, is_launch_agent_loaded: bool,
+    ibc_installed: bool, is_launch_agent_loaded: bool, gateway_process_count: int | None = None,
+    host_health: dict | None = None, recovery_action: str = "none",
 ) -> GatewayStatus:
-    if is_port_open:
-        state = "gateway_ready"
+    count = int(is_gateway_running) if gateway_process_count is None else gateway_process_count
+    if count > 1:
+        state = "gateway_conflict"
+    elif is_port_open:
+        state = "local_api_ready"
     elif is_gateway_running:
         state = "authentication_required"
     elif not credentials_ready:
@@ -394,18 +449,28 @@ def classify_status(
         credentials_ready=credentials_ready,
         ibc_installed=ibc_installed,
         launch_agent_loaded=is_launch_agent_loaded,
+        gateway_process_count=count,
+        single_instance=count <= 1,
+        host_reachable=host_health is not None,
+        broker_connected=bool(host_health and host_health.get("broker_connected") is True),
+        data_ready=bool(host_health and host_health.get("data_ready") is True),
+        recovery_action=recovery_action,
     )
 
 
 def current_status(paths: SupervisorPaths, credentials: KeychainCredentials | None = None) -> GatewayStatus:
     credentials = credentials or KeychainCredentials()
+    process_ids = gateway_process_ids()
+    host_health = trading_host_health()
     return classify_status(
         is_port_open=port_is_open(),
-        is_gateway_running=gateway_process_running(),
+        is_gateway_running=bool(process_ids),
         credentials_ready=credentials.ready(),
         ibc_installed=(paths.ibc_path / "config.ini").is_file()
         and (paths.ibc_path / "scripts" / "ibcstart.sh").is_file(),
         is_launch_agent_loaded=launch_agent_loaded(),
+        gateway_process_count=len(process_ids),
+        host_health=host_health,
     )
 
 
@@ -442,12 +507,17 @@ def _redact_ibc_output(stream, destination: Path, secrets: tuple[str, ...]) -> N
                 else:
                     for secret in secret_bytes:
                         raw = raw.replace(secret, b"<redacted>")
+                    # IBC places the Paper account in some window titles.  It
+                    # is private product data and must not enter diagnostics.
+                    raw = re.sub(rb"\b(?:DU|DUR)[0-9]{3,}\b", b"<redacted-account>", raw)
                 log.write(raw)
     finally:
         stream.close()
 
 
 def launch_ibc(paths: SupervisorPaths, credentials: KeychainCredentials) -> subprocess.Popen:
+    if gateway_process_ids():
+        raise GatewaySupervisorError("检测到已有 Gateway；拒绝再次启动，避免重复会话和重复 2FA。")
     username, password = credentials.pair()
     render_ibc_config(paths.ibc_path / "config.ini", paths.runtime_config, username, password)
     _ensure_private_directory(paths.log_dir)
@@ -493,6 +563,80 @@ def _write_status(paths: SupervisorPaths, status: GatewayStatus) -> None:
         raise
 
 
+def in_ibkr_maintenance_recovery_window(now: datetime | None = None) -> bool:
+    """Conservative Asia/Shanghai reset windows, including a 15 minute grace.
+
+    The first IBKR reset moves by one hour with US daylight saving time, so the
+    union of both seasonal windows is used.  The second reset is fixed locally.
+    """
+    now = now or datetime.now().astimezone()
+    minute = now.hour * 60 + now.minute
+    return (4 * 60 + 45 <= minute < 7 * 60 + 20
+            or 20 * 60 + 15 <= minute < 21 * 60 + 30)
+
+
+def terminate_single_gateway(
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> bool:
+    """Request a graceful stop only when exactly one matching Gateway exists."""
+    process_ids = gateway_process_ids(runner)
+    if len(process_ids) != 1:
+        return False
+    try:
+        os.kill(process_ids[0], signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _recovery_marker(paths: SupervisorPaths) -> Path:
+    return paths.state_dir / "recovery.json"
+
+
+def _read_recovery_marker(paths: SupervisorPaths) -> dict | None:
+    try:
+        payload = json.loads(_recovery_marker(paths).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(payload, dict) or not isinstance(payload.get("event_key"), str)
+            or payload.get("restart_requested") is not True
+            or type(payload.get("launch_used")) is not bool):
+        return None
+    return payload
+
+
+def _write_recovery_marker(paths: SupervisorPaths, event_key: str, *, launch_used: bool) -> None:
+    _ensure_private_directory(paths.state_dir)
+    destination = _recovery_marker(paths)
+    descriptor, temporary = tempfile.mkstemp(prefix="recovery.", suffix=".tmp", dir=paths.state_dir)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"event_key": event_key, "restart_requested": True,
+                       "launch_used": launch_used, "updated_at": int(time.time())},
+                      handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _event_age_seconds(observed_at: str | None) -> float | None:
+    if not isinstance(observed_at, str):
+        return None
+    try:
+        value = datetime.fromisoformat(observed_at)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - value.astimezone(timezone.utc)).total_seconds())
+
+
 def supervise(paths: SupervisorPaths, *, poll_interval: float = 5.0) -> int:
     credentials = KeychainCredentials()
     stopping = False
@@ -507,17 +651,65 @@ def supervise(paths: SupervisorPaths, *, poll_interval: float = 5.0) -> int:
     next_launch_at = 0.0
     backoff = 30.0
     child: subprocess.Popen | None = None
+    broker_outage_since: float | None = None
+    marker = _read_recovery_marker(paths)
+    recovery_restart_attempted = bool(marker)
+    recovery_launch_used = bool(marker and marker["launch_used"])
+    recovery_event_key = marker["event_key"] if marker else None
     while not stopping:
+        host_health = trading_host_health()
         status = current_status(paths, credentials)
+        recovery_action = "none"
+        active_recovery_outage = False
+        if host_health and host_health.get("broker_connected") is True:
+            broker_outage_since = None
+            recovery_restart_attempted = False
+            recovery_launch_used = False
+            recovery_event_key = None
+            _recovery_marker(paths).unlink(missing_ok=True)
+        elif host_health and host_health.get("event_code") in (1100, 2110):
+            active_recovery_outage = True
+            event_key = f"{host_health['event_code']}:{host_health.get('event_observed_at') or 'unknown'}"
+            if event_key != recovery_event_key:
+                broker_outage_since = None
+                recovery_restart_attempted = False
+                recovery_launch_used = False
+                recovery_event_key = event_key
+                _recovery_marker(paths).unlink(missing_ok=True)
+            if broker_outage_since is None:
+                broker_outage_since = time.monotonic()
+            event_age = _event_age_seconds(host_health.get("event_observed_at"))
+            grace_elapsed = (event_age >= 15 * 60 if event_age is not None
+                             else time.monotonic() - broker_outage_since >= 15 * 60)
+            if in_ibkr_maintenance_recovery_window():
+                recovery_action = "waiting_maintenance"
+            elif not grace_elapsed:
+                recovery_action = "waiting_recovery_grace"
+            elif not recovery_restart_attempted:
+                recovery_restart_attempted = True
+                if terminate_single_gateway():
+                    recovery_action = "gateway_restart_requested"
+                    _write_recovery_marker(paths, event_key, launch_used=False)
+                    _notify("IBKR 上游恢复超时", "维护窗口和恢复宽限已结束；正在执行本轮唯一一次 Gateway 重启。")
+                else:
+                    recovery_action = "manual_intervention_required"
+                    _write_recovery_marker(paths, event_key, launch_used=True)
+                    recovery_launch_used = True
+                    _notify("IBKR 上游仍未恢复", "无法安全确认单一 Gateway 实例；已停止自动恢复，请人工检查。")
+            else:
+                recovery_action = "restart_already_attempted"
+        status = replace(status, recovery_action=recovery_action)
         _write_status(paths, status)
         if status.state != last_state:
             if status.state == "authentication_required":
                 _notify("IBKR Gateway 需要认证", "请在 IBKR Mobile 完成 2FA，或检查 Mac 上的登录窗口。")
             elif status.state == "credentials_missing":
                 _notify("IBKR 自动登录尚未启用", "请在终端运行 yolo-ibkr-gateway credentials-set。")
-            elif status.state == "gateway_ready":
-                _notify("IBKR Gateway 已连接", "Paper Gateway 端口 4002 已恢复；交易服务将重新对账。")
+            elif status.state == "local_api_ready":
+                _notify("IBKR Gateway 本地接口已恢复", "端口 4002 正在监听；上游连接和数据就绪状态将由 YoloTrade Host 单独确认。")
                 backoff = 30.0
+            elif status.state == "gateway_conflict":
+                _notify("检测到多个 IBKR Gateway", "已停止自动启动和自动恢复；请只保留一个 Gateway 实例。")
             last_state = status.state
 
         if child is not None and child.poll() is not None:
@@ -525,9 +717,16 @@ def supervise(paths: SupervisorPaths, *, poll_interval: float = 5.0) -> int:
             next_launch_at = time.monotonic() + backoff
             backoff = min(backoff * 2, 900.0)
 
-        if status.state == "gateway_stopped" and child is None and time.monotonic() >= next_launch_at:
+        may_launch_recovery = (not active_recovery_outage or not recovery_restart_attempted
+                               or not recovery_launch_used)
+        if (status.state == "gateway_stopped" and child is None and may_launch_recovery
+                and time.monotonic() >= next_launch_at):
             try:
                 child = launch_ibc(paths, credentials)
+                if recovery_restart_attempted:
+                    recovery_launch_used = True
+                    if recovery_event_key is not None:
+                        _write_recovery_marker(paths, recovery_event_key, launch_used=True)
                 next_launch_at = time.monotonic() + 30.0
             except Exception:
                 _notify("IBKR Gateway 启动失败", "IBC 未能启动；请运行状态检查并查看本机日志。")
@@ -544,10 +743,15 @@ def _repo_root() -> Path:
     raise GatewaySupervisorError("无法定位 yolo-agents 仓库。")
 
 
-def install_launch_agent(paths: SupervisorPaths) -> None:
+def install_launch_agent(paths: SupervisorPaths, credentials: KeychainCredentials | None = None) -> None:
     wrapper = _repo_root() / "bin" / "yolo-ibkr-gateway"
     if not wrapper.is_file():
         raise GatewaySupervisorError("Gateway Supervisor 启动脚本不存在。")
+    credentials = credentials or KeychainCredentials()
+    if not credentials.ready():
+        raise GatewaySupervisorError("安装前必须先在 Keychain 配置 Paper 凭据。")
+    username, password = credentials.pair()
+    render_ibc_config(paths.ibc_path / "config.ini", paths.runtime_config, username, password)
     _ensure_private_directory(paths.log_dir)
     paths.launch_agent.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     payload = {

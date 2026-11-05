@@ -149,6 +149,12 @@ class IBKRAdapter:
         self._events = []
         self._session_id = None
         self._environment_verified = False
+        # The SDK socket can remain connected to the local Gateway while the
+        # Gateway has lost its upstream IBKR session (1100/2110).  Keep these
+        # two layers separate so health never treats an open local socket as a
+        # usable broker connection.
+        self._broker_connected = False
+        self._last_connection_event = None
         self._reads = {name: False for name in (
             "account", "positions", "open_orders", "completed_orders", "executions", "account_summary")}
         self._positions = []
@@ -205,13 +211,15 @@ class IBKRAdapter:
         if self._client is not None and not self._client.isConnected() and state not in ("connecting", "disconnected"):
             state = "gateway_unavailable"
         connected = bool(self._client is not None and self._client.isConnected())
-        ready = bool(connected and self._account_verified and self._reconciliation_phase == "ready"
+        ready = bool(connected and self._broker_connected and self._account_verified
+                     and self._reconciliation_phase == "ready"
                      and self._ready_generation == self._reconciliation_generation and all(self._reads.values()))
         return {"state": state, "configuration": self._config.audit(),
                 "configuration_revision": self._revision, "last_configuration_change": self._last_change,
                 "dependency_available": available, "test_client": self._client_factory is not None,
                 "connection_attempted": self._attempted,
-                "connected": connected, "ready": ready,
+                "connected": connected, "gateway_connected": connected,
+                "broker_connected": bool(connected and self._broker_connected), "ready": ready,
                 "environment_verified": self._environment_verified, "data_complete": ready,
                 "session_id": self._session_id, "account_verified": self._account_verified,
                 "permissions_verified": self._config.paper_execution_enabled and self._account_verified,
@@ -224,7 +232,8 @@ class IBKRAdapter:
                 "execution_enabled": bool(self._config.paper_execution_enabled and ready
                                           and self._environment_verified
                                           and self._state == "connected_paper"),
-                "tracked_orders": len(self._orders), "blockers": blockers, "error": self._error}
+                "tracked_orders": len(self._orders), "blockers": blockers, "error": self._error,
+                "last_connection_event": deepcopy(self._last_connection_event)}
 
     def _fail(self, state, code, message):
         self._state, self._error = state, {"code": code, "message": message}
@@ -281,6 +290,7 @@ class IBKRAdapter:
     def _disconnect_client(self):
         self._assert_owner()
         client = self._client
+        self._broker_connected = False
         # Retire the active session before touching the SDK.  A disconnect can
         # raise while the socket still looks connected; that uncertainty must
         # never preserve a previously ready/executable generation.
@@ -313,6 +323,7 @@ class IBKRAdapter:
 
     def _on_disconnected(self, *args):
         self._assert_owner()
+        self._broker_connected = False
         self._invalidate_reconciliation("connection_lost", code="connection_lost",
                                         message="Gateway 连接已断开，需重新连接并完整对账。")
         self._mark_orders_unknown("connection_lost")
@@ -322,11 +333,19 @@ class IBKRAdapter:
         self._assert_owner()
         # Never publish/log broker error_text: it can contain account details.
         if error_code in (1100, 1300, 2110):
+            self._broker_connected = False
+            self._last_connection_event = {
+                "code": error_code, "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
             self._invalidate_reconciliation("connection_lost", code="broker_connection_lost",
                                             message="Gateway 与 IBKR 的连接异常，等待恢复后重新对账。")
             self._mark_orders_unknown("broker_connection_lost")
             self._fail("broker_unavailable", "broker_connection_lost", "Gateway 与 IBKR 的连接异常，当前数据不可视为最新。")
         elif error_code in (1101, 1102):
+            self._broker_connected = True
+            self._last_connection_event = {
+                "code": error_code, "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
             self._invalidate_reconciliation("reconciliation_required", code="connection_restored",
                                             message="券商连接已恢复，必须完整重跑启动对账。")
             self._fail("reconciliation_required", "reconciliation_required", "券商连接恢复，需重新核对账户、挂单、成交和订阅。")
@@ -357,6 +376,7 @@ class IBKRAdapter:
             if self._config.account is None or not self._dependency_available():
                 return self.health()
             self._state, self._error, self._attempted = "connecting", None, True
+            self._broker_connected = False
             self._invalidate_reconciliation("connecting")
             try:
                 factory = self._client_factory
@@ -515,6 +535,7 @@ class IBKRAdapter:
         self._ready_generation = reconciliation_generation
         self._reconciliation_phase = "ready"
         self._reconciliation_failure = None
+        self._broker_connected = True
         self._session_id = str(uuid4())
         self._state = "connected_paper" if self._config.paper_execution_enabled else "connected_read_only"
         self._error = None
@@ -766,6 +787,7 @@ class IBKRAdapter:
         self._assert_owner()
         async with self._lock:
             if self._disconnect_client():
+                self._broker_connected = False
                 self._state, self._error = "disconnected", None
             return self.health()
 
@@ -779,6 +801,8 @@ class IBKRAdapter:
                 return self.health()
             self._config = config
             self._revision += 1
+            self._broker_connected = False
+            self._last_connection_event = None
             self._state, self._error, self._attempted = "disconnected", None, False
             self._last_change = {"from_config_id": previous, "to_config_id": config.config_id,
                                  "changed_at": datetime.now(timezone.utc).isoformat()}

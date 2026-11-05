@@ -477,16 +477,29 @@ class TradingAPIExtension:
         configuration = broker.get("configuration") if isinstance(broker, dict) else None
         environment = configuration.get("environment") if isinstance(configuration, dict) else None
         label = "IBKR Paper" if environment == "paper" else "IBKR Live" if environment == "live" else "IBKR"
-        if (broker.get("connected") is True and broker.get("environment_verified") is True
-                and broker.get("data_complete") is True and broker.get("health_stale") is not True):
-            state, detail = "ready", "已连接"
-        elif broker.get("state") in ("connecting", "recovering"):
-            state, detail = "checking", "正在连接"
-        else:
-            state, detail = "unavailable", "未连接"
-        return {"trade_execution_enabled": enabled, "broker": broker, "components": [{
-            "id": "ibkr", "label": label, "state": state, "detail": detail,
-        }]}
+        local_connected = broker.get("gateway_connected", broker.get("connected")) is True
+        upstream_connected = broker.get("broker_connected", broker.get("connected")) is True
+        data_ready = (upstream_connected and broker.get("environment_verified") is True
+                      and broker.get("data_complete") is True and broker.get("health_stale") is not True)
+        checking = broker.get("state") in ("connecting", "recovering", "reconciliation_required")
+        components = [
+            {
+                "id": "ibkr_gateway", "label": "IBKR 本地接口",
+                "state": "ready" if local_connected else "checking" if checking else "unavailable",
+                "detail": "端口已连接" if local_connected else "正在连接" if checking else "未连接",
+            },
+            {
+                "id": "ibkr_upstream", "label": f"{label} 上游",
+                "state": "ready" if upstream_connected else "checking" if checking else "unavailable",
+                "detail": "已连接" if upstream_connected else "正在恢复" if checking else "已断开",
+            },
+            {
+                "id": "ibkr_data", "label": "IBKR 数据",
+                "state": "ready" if data_ready else "checking" if upstream_connected or checking else "unavailable",
+                "detail": "已就绪" if data_ready else "正在重新核对" if upstream_connected or checking else "不可用",
+            },
+        ]
+        return {"trade_execution_enabled": enabled, "broker": broker, "components": components}
 
     def route(self, handler, method, path, query, caller):
         if path == "/v1/broker/health" and method == "GET":

@@ -6,11 +6,11 @@
 
 本流程只负责在 macOS 上启动和恢复 **IB Gateway Paper Trading** 登录界面，不负责交易判断、订单提交或券商 API 对账。
 
-- `Gateway Supervisor` 检测 `127.0.0.1:4002`、Gateway 进程、IBC 安装和 Keychain 凭据。
+- `Gateway Supervisor` 通过系统监听表被动检查 `127.0.0.1:4002`，不会建立残缺的 API socket；同时读取 8765 Host 的公开健康状态。
 - Gateway 进程不存在时，Supervisor 才通过 IBC 启动它。
 - Gateway 进程存在但 4002 未监听时，状态为 `authentication_required`，提醒用户检查登录窗口或在 IBKR Mobile 完成 2FA；不会循环结束进程。
-- 4002 恢复后，现有 `IBKRBrokerLifecycle` 自动重连并完整对账；Supervisor 不调用 TWS API。
-- Gateway 与 IBKR 之间的 `1100`／`2110` 网络中断不触发进程重启。
+- 4002、本地 API client、IBKR 上游和数据就绪是四个独立事实；只有完整对账后才发布数据就绪。
+- `1100`／`2110` 在维护窗口内只等待；窗口结束后的 15 分钟宽限仍没有 `1101`／`1102` 时，Supervisor 最多执行一次受控 Gateway 重启。多个 Gateway 实例时失败关闭，不自动结束任一实例。
 - Live 模式没有入口；IBC 配置固定 `TradingMode=paper` 和 `ReadOnlyLogin=no`。
 
 ## 凭据与本机文件
@@ -20,7 +20,7 @@
 - `com.yolo-agents.ibkr.paper.username`
 - `com.yolo-agents.ibkr.paper.password`
 
-IBC 启动前，Supervisor 从 Keychain 读取两项，在 `~/Library/Caches/YoloAgents/ibkr-gateway/config.runtime.ini` 原子生成权限为 `0600` 的运行配置。凭据不会进入命令行、环境变量、仓库、应用数据库或 Supervisor 状态文件。IBC 诊断输出经过流式过滤，实际凭据和 `IbLoginId`／`IbPassword`／FIX 凭据行会在落盘前替换为 `<redacted>`。
+IBC 启动前，Supervisor 从 Keychain 读取两项，在 `~/Library/Caches/YoloAgents/ibkr-gateway/config.runtime.ini` 原子生成权限为 `0600` 的运行配置。凭据不会进入命令行、环境变量、仓库、应用数据库或 Supervisor 状态文件。IBC 诊断输出经过流式过滤，实际凭据和 `IbLoginId`／`IbPassword`／FIX 凭据行会在落盘前替换为 `<redacted>`，Paper 账户标识替换为 `<redacted-account>`。
 
 运行配置在 IBC 存活期间保留，以支持 IBC 的每日自动重启。Mac 用户目录应启用 FileVault；登录 Keychain 未解锁时自动启动会保持失败关闭。
 
@@ -31,7 +31,9 @@ cd /Users/yololippy/project/yolo-agents
 bin/install-ibc-macos
 bin/yolo-ibkr-gateway credentials-set
 bin/yolo-ibkr-gateway install-launch-agent
+bin/yolo-trade-host-service install-launch-agent --ibkr-config /path/to/ibkr-paper.json
 bin/yolo-ibkr-gateway status
+bin/yolo-trade-host-service status
 ```
 
 `credentials-set` 必须在交互式终端执行。命令会依次以隐藏输入方式读取用户名、密码和密码确认，再通过 macOS `Security.framework` 直接写入 Keychain；不会再出现 `security` CLI 的额外输入提示。不要把凭据附加在命令后。
@@ -53,7 +55,7 @@ LaunchAgent 安装到：
 
 生成配置采用以下安全默认值：
 
-- `AutoRestartTime=06:15 AM`：每天在 Asia/Shanghai 的美股常规时段之外自动重启。
+- `AutoRestartTime=07:30 AM`：避开冬令时亚太第一次维护窗口及恢复宽限。
 - `ColdRestartTime=14:15`：每周日在 IBKR 美东 01:00 令牌失效后发起完整登录，届时通常需要手机 2FA。
 - `AcceptIncomingConnectionAction=reject`：只使用 Gateway 中已经配置的 localhost/Trusted IP。
 - `ReadOnlyApi=`：不由 IBC 修改 Gateway 的 API 读写设置。
@@ -73,7 +75,8 @@ Gateway 本身仍需确认：
 
 | 状态 | 含义与处理 |
 | --- | --- |
-| `gateway_ready` | 4002 可连接；交易服务随后重新对账。 |
+| `local_api_ready` | 4002 正在监听；这不代表 IBKR 上游已连接或数据已就绪。 |
+| `gateway_conflict` | 检测到多个 Gateway 进程；自动启动和自动恢复停止。 |
 | `authentication_required` | Gateway/IBC 仍在，但 API 端口未开放；检查 Mac 登录窗口和 IBKR Mobile。 |
 | `credentials_missing` | 尚未在 Keychain 保存两项 Paper 凭据。 |
 | `ibc_missing` | Keychain 已准备，但固定版本 IBC 尚未安装。 |
@@ -100,3 +103,9 @@ bin/yolo-ibkr-gateway credentials-delete
 ```
 
 第一条停止并移除用户级 Supervisor；第二条删除两项 Keychain 凭据及缓存中的明文运行配置。IBC 程序目录可保留，便于核对和回滚版本。
+
+常驻 Host 可单独卸载，产品数据和不含登录凭据的 IBKR 配置会保留：
+
+```bash
+bin/yolo-trade-host-service uninstall-launch-agent
+```
