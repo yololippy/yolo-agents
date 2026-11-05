@@ -27,7 +27,9 @@
 | `finish_run(..., status='failed', error=...)` | 同上，但最终事件为 `assistant.failed`，payload 为 `{run_id, message, error}` |
 | `save_agent_state` | 不产生产品事件，不把模型内部状态发送给客户端 |
 
-图片由 `create_media` 先保存，再通过 `append_message(..., media_ids=...)` 或 `finish_run(..., media_ids=...)` 原子绑定到消息。公开消息只含媒体元数据；原始字节由认证 API 单独读取。本地只接受 JPEG/PNG/WebP，单张 10 MiB、每条 4 张/20 MiB，尺寸和像素数也有限制；每个 Agent 数据库最多保存 512 MiB。上传重试使用客户端 UUID 幂等，运行时输出使用独立的 run_id 来源，上传设备和存储字节不会暴露给产品事件。
+图片由 `create_media` 先保存，再通过 `append_message(..., media_ids=...)` 或 `finish_run(..., media_ids=...)` 原子绑定到消息。公开消息只含媒体元数据；原始字节由认证 API 单独读取。SQLite v6 不保存图片 BLOB，只保存元数据与规范相对路径；内容按 `<data-dir>/media/YYYY/MM/<sha256>.<ext>` 存放，目录权限 0700、文件权限 0600，读取时复核路径、类型、大小与 SHA-256。v5 BLOB 在启动时先原子写入并校验全部文件，然后一次事务升级表结构；失败不删除旧 BLOB。
+
+本地只接受 JPEG/PNG/WebP，单张 10 MiB、每条 4 张/20 MiB，尺寸和像素数也有限制；每个 Agent 的媒体配额为 512 MiB，按实际唯一内容文件计算，多个媒体 ID 可安全共享同一物理文件。未绑定消息且超过 24 小时的上传/运行时媒体会有界回收；已绑定的历史图片不按月份删除。上传重试使用客户端 UUID 幂等，运行时输出使用独立的 run_id 来源，上传设备和存储路径不会暴露给产品事件。
 
 `append_message` 的 `client_message_id` 在会话内唯一；重复 ID 且 role/content 相同返回原消息，不再写事件；不同内容或角色抛 `ValueError`。不同会话可使用相同 ID。没有幂等 ID 的消息每次追加。
 

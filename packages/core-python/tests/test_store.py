@@ -1,15 +1,20 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 import base64
+import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
+import struct
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
+import zlib
 
 from yolo_agents.store import Store
 from yolo_agents.agent_runtime import DemoRuntime
@@ -19,6 +24,43 @@ from yolo_agents.service import ChatService, ContextResetError
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+def png_1x1(red, green, blue, alpha=255):
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload)))
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes((0, red, green, blue, alpha))))
+            + chunk(b"IEND", b""))
+
+
+OTHER_PNG_1X1 = png_1x1(255, 0, 0)
+
+
+def create_v5_media_database(path, rows):
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("""
+            CREATE TABLE media (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind = 'image'),
+                media_type TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK (byte_count > 0),
+                sha256 TEXT NOT NULL, width INTEGER NOT NULL CHECK (width > 0),
+                height INTEGER NOT NULL CHECK (height > 0), filename TEXT, alt_text TEXT,
+                created_at TEXT NOT NULL, source TEXT NOT NULL CHECK (source IN ('upload', 'runtime')),
+                uploader_device_id TEXT, run_id TEXT,
+                message_id TEXT, position INTEGER, data BLOB NOT NULL,
+                UNIQUE (message_id, position)
+            )
+        """)
+        for media_id, data, created_at in rows:
+            db.execute("""
+                INSERT INTO media(
+                    id, kind, media_type, byte_count, sha256, width, height,
+                    created_at, source, uploader_device_id, data
+                ) VALUES (?, 'image', 'image/png', ?, ?, 1, 1, ?, 'upload', 'legacy-device', ?)
+            """, (media_id, len(data), hashlib.sha256(data).hexdigest(), created_at, data))
+        db.execute("PRAGMA user_version = 5")
 
 
 class StoreTests(unittest.TestCase):
@@ -356,6 +398,126 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.append_message(self.cid, "user", "reuse", media_ids=(media_id,))
 
+    def test_v6_media_uses_utc_content_path_private_permissions_and_no_blob_column(self):
+        media_id = "10101010-1010-4010-8010-101010101010"
+        timestamp = "2026-02-01T00:00:00.000000Z"
+        with patch("yolo_agents.store._now", return_value=timestamp):
+            self.store.create_media(
+                media_id, PNG_1X1, "image/png", source="upload",
+                uploader_device_id="device-1", filename="untrusted-name.png",
+            )
+        with closing(sqlite3.connect(self.path)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
+            row = db.execute("SELECT storage_path FROM media WHERE id = ?", (media_id,)).fetchone()
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 6)
+        self.assertNotIn("data", columns)
+        digest = hashlib.sha256(PNG_1X1).hexdigest()
+        self.assertEqual(row[0], f"2026/02/{digest}.png")
+        target = self.path.parent / "media" / row[0]
+        self.assertEqual(target.read_bytes(), PNG_1X1)
+        for directory in (target.parent.parent.parent, target.parent.parent, target.parent):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertNotIn("untrusted-name", str(target))
+
+    def test_content_deduplication_counts_one_physical_file_for_quota(self):
+        first = "11111111-1111-4111-8111-111111111111"
+        second = "22222222-2222-4222-8222-222222222222"
+        third = "33333333-3333-4333-8333-333333333333"
+        with patch("yolo_agents.store.MAX_MEDIA_STORE_BYTES", len(PNG_1X1)):
+            self.store.create_media(
+                first, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            )
+            self.store.create_media(
+                second, PNG_1X1, "image/png", source="upload", uploader_device_id="device-2",
+            )
+            with self.assertRaises(RuntimeError):
+                self.store.create_media(
+                    third, OTHER_PNG_1X1, "image/png", source="upload",
+                    uploader_device_id="device-3",
+                )
+        with closing(sqlite3.connect(self.path)) as db:
+            paths = [row[0] for row in db.execute("SELECT storage_path FROM media ORDER BY id")]
+        self.assertEqual(len(set(paths)), 1)
+        self.assertEqual(len(list((self.path.parent / "media").rglob("*.png"))), 1)
+
+    def test_media_read_rejects_corruption_noncanonical_paths_and_symlinks(self):
+        media_id = "40404040-4040-4040-8040-404040404040"
+        self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+        )
+        with closing(sqlite3.connect(self.path)) as db:
+            storage_path = db.execute(
+                "SELECT storage_path FROM media WHERE id = ?", (media_id,),
+            ).fetchone()[0]
+        for invalid_path in ("../escape.png", "/tmp/escape.png"):
+            with self.subTest(storage_path=invalid_path), closing(sqlite3.connect(self.path)) as db, db:
+                db.execute("UPDATE media SET storage_path = ? WHERE id = ?", (invalid_path, media_id))
+            with self.assertRaises(RuntimeError):
+                self.store.read_media(media_id)
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE media SET storage_path = ? WHERE id = ?", (storage_path, media_id))
+
+        target = self.path.parent / "media" / storage_path
+        target.chmod(0o644)
+        with self.assertRaises(RuntimeError):
+            self.store.read_media(media_id)
+        target.chmod(0o600)
+        target.write_bytes(PNG_1X1[:-1])
+        with self.assertRaises(RuntimeError):
+            self.store.read_media(media_id)
+        target.write_bytes(PNG_1X1)
+        target.chmod(0o600)
+        external = self.path.parent / "outside.png"
+        external.write_bytes(PNG_1X1)
+        target.unlink()
+        target.symlink_to(external)
+        with self.assertRaises(RuntimeError):
+            self.store.read_media(media_id)
+
+    def test_media_root_and_month_symlinks_are_rejected(self):
+        self.store.close()
+        media_root = self.path.parent / "injected-media"
+        external = self.path.parent / "external-media"
+        external.mkdir()
+        media_root.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            Store(self.path.parent / "other.sqlite3", media_root=media_root)
+
+        self.store = Store(self.path)
+        media_id = "50505050-5050-4050-8050-505050505050"
+        self.store.create_media(
+            media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+        )
+        with closing(sqlite3.connect(self.path)) as db:
+            storage_path = db.execute(
+                "SELECT storage_path FROM media WHERE id = ?", (media_id,),
+            ).fetchone()[0]
+        month = self.path.parent / "media" / Path(storage_path).parent
+        moved = month.with_name(month.name + "-real")
+        month.rename(moved)
+        month.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.store.read_media(media_id)
+
+    def test_existing_corrupt_content_address_fails_closed_without_metadata(self):
+        timestamp = "2026-04-01T00:00:00.000000Z"
+        digest = hashlib.sha256(PNG_1X1).hexdigest()
+        storage_path = self.store._media_storage.storage_path(timestamp, digest, "image/png")
+        target = self.path.parent / "media" / storage_path
+        target.parent.mkdir(parents=True, mode=0o700)
+        target.parent.parent.chmod(0o700)
+        target.parent.chmod(0o700)
+        target.write_bytes(b"x" * len(PNG_1X1))
+        target.chmod(0o600)
+        media_id = "51515151-5151-4151-8151-515151515151"
+        with patch("yolo_agents.store._now", return_value=timestamp), self.assertRaises(RuntimeError):
+            self.store.create_media(
+                media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            )
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM media WHERE id = ?", (media_id,)).fetchone())
+
     def test_runtime_media_attaches_only_to_completed_assistant_run(self):
         media_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         metadata, _ = self.store.create_media(
@@ -379,11 +541,156 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(self.store.create_media(
                 media_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
             ), (metadata, False))
+            self.store.create_media(
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PNG_1X1, "image/png",
+                source="upload", uploader_device_id="device-1",
+            )
             with self.assertRaises(RuntimeError):
                 self.store.create_media(
-                    "dddddddd-dddd-4ddd-8ddd-dddddddddddd", PNG_1X1, "image/png",
+                    "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", OTHER_PNG_1X1, "image/png",
                     source="upload", uploader_device_id="device-1",
                 )
+
+    def test_v5_multi_image_migration_is_durable_and_restart_idempotent(self):
+        legacy_path = self.path.parent / "legacy.sqlite3"
+        media_root = self.path.parent / "legacy-media"
+        rows = (
+            ("61616161-6161-4161-8161-616161616161", PNG_1X1,
+             "2025-12-31T23:59:59.000000Z"),
+            ("62626262-6262-4262-8262-626262626262", OTHER_PNG_1X1,
+             "2026-01-01T00:00:00.000000Z"),
+        )
+        create_v5_media_database(legacy_path, rows)
+        legacy = Store(legacy_path, media_root=media_root)
+        try:
+            for media_id, data, _ in rows:
+                self.assertEqual(legacy.read_media(media_id)[1], data)
+            with closing(sqlite3.connect(legacy_path)) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
+                paths = [row[0] for row in db.execute("SELECT storage_path FROM media ORDER BY id")]
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertNotIn("data", columns)
+            self.assertEqual([Path(path).parts[:2] for path in paths], [("2025", "12"), ("2026", "01")])
+        finally:
+            legacy.close()
+
+        before = {path.relative_to(media_root): path.stat().st_mtime_ns
+                  for path in media_root.rglob("*.png")}
+        reopened = Store(legacy_path, media_root=media_root)
+        try:
+            for media_id, data, _ in rows:
+                self.assertEqual(reopened.read_media(media_id)[1], data)
+        finally:
+            reopened.close()
+        after = {path.relative_to(media_root): path.stat().st_mtime_ns
+                 for path in media_root.rglob("*.png")}
+        self.assertEqual(after, before)
+
+    def test_v5_migration_write_failure_preserves_schema_and_blobs(self):
+        legacy_path = self.path.parent / "failed-legacy.sqlite3"
+        media_root = self.path.parent / "failed-legacy-media"
+        media_id = "63636363-6363-4363-8363-636363636363"
+        create_v5_media_database(legacy_path, ((
+            media_id, PNG_1X1, "2026-01-01T00:00:00.000000Z",
+        ),))
+        with patch("yolo_agents.media_storage.MediaStorage.write", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                Store(legacy_path, media_root=media_root)
+        with closing(sqlite3.connect(legacy_path)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
+            row = db.execute("SELECT data FROM media WHERE id = ?", (media_id,)).fetchone()
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertIn("data", columns)
+        self.assertEqual(row[0], PNG_1X1)
+
+        migrated = Store(legacy_path, media_root=media_root)
+        try:
+            self.assertEqual(migrated.read_media(media_id)[1], PNG_1X1)
+        finally:
+            migrated.close()
+
+    def test_orphan_ttl_deletes_metadata_then_only_unreferenced_files(self):
+        created = datetime.now(UTC)
+        old = created.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        attached_id = "71717171-7171-4171-8171-717171717171"
+        shared_orphan_id = "72727272-7272-4272-8272-727272727272"
+        unique_orphan_id = "73737373-7373-4373-8373-737373737373"
+        with patch("yolo_agents.store._now", return_value=old):
+            self.store.create_media(
+                attached_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-1",
+            )
+            self.store.create_media(
+                shared_orphan_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-2",
+            )
+            self.store.create_media(
+                unique_orphan_id, OTHER_PNG_1X1, "image/png", source="upload",
+                uploader_device_id="device-3",
+            )
+            self.store.append_message(
+                self.cid, "user", "keep image", "keep-image", media_ids=(attached_id,),
+            )
+        with closing(sqlite3.connect(self.path)) as db:
+            paths = {row[0]: row[1] for row in db.execute("SELECT id, storage_path FROM media")}
+        removed = self.store.cleanup_orphan_media(
+            now=created + timedelta(days=2), limit=10,
+        )
+        self.assertEqual(removed, 2)
+        self.assertEqual(self.store.read_media(attached_id)[1], PNG_1X1)
+        self.assertTrue((self.path.parent / "media" / paths[shared_orphan_id]).is_file())
+        self.assertFalse((self.path.parent / "media" / paths[unique_orphan_id]).exists())
+        with self.assertRaises(KeyError):
+            self.store.read_media(shared_orphan_id)
+
+    def test_new_upload_runs_bounded_ttl_cleanup_before_physical_quota(self):
+        current = datetime.now(UTC)
+        old = (current - timedelta(days=2)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        old_id = "74747474-7474-4474-8474-747474747474"
+        new_id = "75757575-7575-4575-8575-757575757575"
+        with patch("yolo_agents.store._now", return_value=old):
+            self.store.create_media(
+                old_id, PNG_1X1, "image/png", source="upload", uploader_device_id="device-old",
+            )
+        with patch("yolo_agents.store.MAX_MEDIA_STORE_BYTES", len(OTHER_PNG_1X1)):
+            self.store.create_media(
+                new_id, OTHER_PNG_1X1, "image/png", source="upload", uploader_device_id="device-new",
+            )
+        with self.assertRaises(KeyError):
+            self.store.read_media(old_id)
+        self.assertEqual(self.store.read_media(new_id)[1], OTHER_PNG_1X1)
+
+    def test_startup_removes_only_managed_unreferenced_and_temp_files(self):
+        timestamp = "2026-03-01T00:00:00.000000Z"
+        digest = hashlib.sha256(PNG_1X1).hexdigest()
+        storage_path = self.store._media_storage.storage_path(timestamp, digest, "image/png")
+        self.store._media_storage.write(
+            PNG_1X1, storage_path=storage_path, created_at=timestamp,
+            digest=digest, media_type="image/png",
+        )
+        month = self.path.parent / "media" / "2026" / "03"
+        temporary = month / f".{digest}.png.tmp-{'a' * 32}"
+        temporary.write_bytes(b"temporary")
+        temporary.chmod(0o600)
+        unrelated = month / "keep-me.txt"
+        unrelated.write_text("private")
+        symlink = month / "not-managed-link"
+        symlink.symlink_to(unrelated)
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertFalse((self.path.parent / "media" / storage_path).exists())
+        self.assertFalse(temporary.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(symlink.is_symlink())
+
+    def test_memory_store_owns_and_removes_its_temporary_media_root(self):
+        memory = Store(":memory:")
+        root = memory._media_storage.root
+        self.assertTrue(root.is_dir())
+        memory.create_media(
+            "81818181-8181-4181-8181-818181818181", PNG_1X1, "image/png",
+            source="upload", uploader_device_id="device-1",
+        )
+        memory.close()
+        self.assertFalse(root.exists())
 
     def test_future_schema_is_not_silently_downgraded(self):
         self.store.close()

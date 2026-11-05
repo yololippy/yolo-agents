@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ from .media import (
     MAX_IMAGES_PER_MESSAGE, MAX_MEDIA_STORE_BYTES, MAX_MESSAGE_IMAGE_BYTES,
     MediaStorageFullError, inspect_image, public_media, validate_filename,
 )
+from .media_storage import MediaStorage, TemporaryMediaStorage
 
 UNSET = object()
 
@@ -48,11 +49,19 @@ class Store:
     service; the runtime/API must authorize callers and serialize a conversation's runs.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, media_root: str | Path | None = None):
         self.path = str(path)
+        self._temporary_media = None
         if self.path != ":memory:":
             Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             self.path = str(Path(path).expanduser())
+            root = Path(media_root).expanduser() if media_root is not None else Path(self.path).parent / "media"
+            self._media_storage = MediaStorage(root)
+        elif media_root is not None:
+            self._media_storage = MediaStorage(media_root)
+        else:
+            self._temporary_media = TemporaryMediaStorage()
+            self._media_storage = self._temporary_media.storage
         self._lock = threading.RLock()
         self._closed = False
         self._db = sqlite3.connect(
@@ -65,14 +74,17 @@ class Store:
             self._db.execute("PRAGMA busy_timeout = 10000")
             self._db.execute("PRAGMA journal_mode = WAL")
             self._initialize()
+            self._cleanup_storage_residue()
         except BaseException:
             self._db.close()
+            if self._temporary_media is not None:
+                self._temporary_media.cleanup()
             raise
 
     def _initialize(self) -> None:
         with self._transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise RuntimeError("Unsupported product database schema; do not downgrade it")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -129,12 +141,24 @@ class Store:
                     created_at TEXT NOT NULL, source TEXT NOT NULL CHECK (source IN ('upload', 'runtime')),
                     uploader_device_id TEXT, run_id TEXT,
                     message_id TEXT REFERENCES messages(id), position INTEGER,
-                    data BLOB NOT NULL,
+                    storage_path TEXT NOT NULL,
                     UNIQUE (message_id, position),
                     CHECK ((message_id IS NULL AND position IS NULL) OR
                            (message_id IS NOT NULL AND position IS NOT NULL AND position >= 0))
                 )
             """)
+            media_columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
+            if "data" in media_columns:
+                self._migrate_media_v5(db)
+            elif "storage_path" not in media_columns:
+                raise RuntimeError("Unsupported media table schema; refusing unsafe recovery")
+            for row in db.execute(
+                "SELECT storage_path, created_at, sha256, media_type FROM media"
+            ):
+                self._media_storage.validate_storage_path(
+                    row["storage_path"], created_at=row["created_at"],
+                    digest=row["sha256"], media_type=row["media_type"],
+                )
             db.execute("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, seq)")
             db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS assistant_final_run
@@ -145,7 +169,77 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS events_conversation ON events(conversation_id, seq)")
             db.execute("CREATE INDEX IF NOT EXISTS media_message ON media(message_id, position)")
             db.execute("CREATE INDEX IF NOT EXISTS media_run ON media(run_id, created_at)")
-            db.execute("PRAGMA user_version = 5")
+            db.execute("PRAGMA user_version = 6")
+
+    @staticmethod
+    def _create_media_v6_table(db: sqlite3.Connection, name: str) -> None:
+        if name != "media_v6":
+            raise ValueError("invalid migration table")
+        db.execute("""
+            CREATE TABLE media_v6 (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind = 'image'),
+                media_type TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK (byte_count > 0),
+                sha256 TEXT NOT NULL, width INTEGER NOT NULL CHECK (width > 0),
+                height INTEGER NOT NULL CHECK (height > 0), filename TEXT, alt_text TEXT,
+                created_at TEXT NOT NULL, source TEXT NOT NULL CHECK (source IN ('upload', 'runtime')),
+                uploader_device_id TEXT, run_id TEXT,
+                message_id TEXT REFERENCES messages(id), position INTEGER,
+                storage_path TEXT NOT NULL,
+                UNIQUE (message_id, position),
+                CHECK ((message_id IS NULL AND position IS NULL) OR
+                       (message_id IS NOT NULL AND position IS NOT NULL AND position >= 0))
+            )
+        """)
+
+    def _migrate_media_v5(self, db: sqlite3.Connection) -> None:
+        """Persist and verify every BLOB before atomically replacing the v5 table."""
+        rows = db.execute("SELECT * FROM media ORDER BY id").fetchall()
+        migrated = []
+        for row in rows:
+            data = bytes(row["data"])
+            if len(data) != row["byte_count"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
+                raise RuntimeError("Legacy media BLOB failed integrity verification")
+            try:
+                _, media_type, width, height = inspect_image(data, row["media_type"])
+            except ValueError:
+                raise RuntimeError("Legacy media BLOB is not a valid declared image") from None
+            if (media_type, width, height) != (row["media_type"], row["width"], row["height"]):
+                raise RuntimeError("Legacy media metadata does not match its image BLOB")
+            storage_path = self._media_storage.storage_path(
+                row["created_at"], row["sha256"], row["media_type"],
+            )
+            self._media_storage.write(
+                data, storage_path=storage_path, created_at=row["created_at"],
+                digest=row["sha256"], media_type=row["media_type"],
+            )
+            # Re-read the durable target before any SQLite schema mutation.
+            self._media_storage.read(
+                storage_path, created_at=row["created_at"], digest=row["sha256"],
+                media_type=row["media_type"], byte_count=row["byte_count"],
+            )
+            migrated.append((row, storage_path))
+
+        self._create_media_v6_table(db, "media_v6")
+        for row, storage_path in migrated:
+            db.execute("""
+                INSERT INTO media_v6(
+                    id, kind, media_type, byte_count, sha256, width, height, filename,
+                    alt_text, created_at, source, uploader_device_id, run_id,
+                    message_id, position, storage_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row["id"], row["kind"], row["media_type"], row["byte_count"], row["sha256"],
+                row["width"], row["height"], row["filename"], row["alt_text"],
+                row["created_at"], row["source"], row["uploader_device_id"], row["run_id"],
+                row["message_id"], row["position"], storage_path,
+            ))
+        db.execute("DROP TABLE media")
+        db.execute("ALTER TABLE media_v6 RENAME TO media")
+
+    def _cleanup_storage_residue(self) -> None:
+        with self._transaction() as db:
+            referenced = {row[0] for row in db.execute("SELECT DISTINCT storage_path FROM media")}
+            self._media_storage.cleanup_residue(referenced)
 
     def _check_open(self) -> None:
         if self._closed:
@@ -366,6 +460,8 @@ class Store:
                 raise ValueError("invalid alt_text")
         digest = hashlib.sha256(data).hexdigest()
         timestamp = _now()
+        # Preserve exact idempotency even when the record is old enough for TTL
+        # cleanup or the physical quota is otherwise full.
         with self._transaction() as db:
             existing = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
             if existing is not None:
@@ -375,18 +471,53 @@ class Store:
                         source, media_type, len(data), digest, filename, alt_text,
                         uploader_device_id, run_id):
                     raise ValueError("media_id already identifies different content")
+                self._media_storage.read(
+                    existing["storage_path"], created_at=existing["created_at"],
+                    digest=existing["sha256"], media_type=existing["media_type"],
+                    byte_count=existing["byte_count"],
+                )
                 return self._media(existing), False
-            used = db.execute("SELECT COALESCE(SUM(byte_count), 0) FROM media").fetchone()[0]
-            if used + len(data) > MAX_MEDIA_STORE_BYTES:
+
+        self.cleanup_orphan_media(limit=100)
+        storage_path = self._media_storage.storage_path(timestamp, digest, media_type)
+        with self._transaction() as db:
+            existing = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            if existing is not None:
+                if (existing["source"], existing["media_type"], existing["byte_count"],
+                        existing["sha256"], existing["filename"], existing["alt_text"],
+                        existing["uploader_device_id"], existing["run_id"]) != (
+                        source, media_type, len(data), digest, filename, alt_text,
+                        uploader_device_id, run_id):
+                    raise ValueError("media_id already identifies different content")
+                self._media_storage.read(
+                    existing["storage_path"], created_at=existing["created_at"],
+                    digest=existing["sha256"], media_type=existing["media_type"],
+                    byte_count=existing["byte_count"],
+                )
+                return self._media(existing), False
+            used = db.execute("""
+                SELECT COALESCE(SUM(byte_count), 0) FROM (
+                    SELECT storage_path, MAX(byte_count) AS byte_count
+                    FROM media GROUP BY storage_path
+                )
+            """).fetchone()[0]
+            already_stored = db.execute(
+                "SELECT 1 FROM media WHERE storage_path = ? LIMIT 1", (storage_path,),
+            ).fetchone() is not None
+            if used + (0 if already_stored else len(data)) > MAX_MEDIA_STORE_BYTES:
                 raise MediaStorageFullError("media store quota exceeded")
+            self._media_storage.write(
+                data, storage_path=storage_path, created_at=timestamp,
+                digest=digest, media_type=media_type,
+            )
             db.execute("""
                 INSERT INTO media(
                     id, kind, media_type, byte_count, sha256, width, height, filename,
-                    alt_text, created_at, source, uploader_device_id, run_id, data
+                    alt_text, created_at, source, uploader_device_id, run_id, storage_path
                 ) VALUES (?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 media_id, media_type, len(data), digest, width, height, filename, alt_text,
-                timestamp, source, uploader_device_id, run_id, data,
+                timestamp, source, uploader_device_id, run_id, storage_path,
             ))
             row = db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
             return self._media(row), True
@@ -401,7 +532,41 @@ class Store:
             row = self._db.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
             if row is None:
                 raise KeyError(media_id)
-            return self._media(row), bytes(row["data"])
+            data = self._media_storage.read(
+                row["storage_path"], created_at=row["created_at"], digest=row["sha256"],
+                media_type=row["media_type"], byte_count=row["byte_count"],
+            )
+            return self._media(row), data
+
+    def cleanup_orphan_media(self, *, now: datetime | None = None, limit: int = 100) -> int:
+        """Delete bounded, unattached media metadata older than 24 hours, then files."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("media cleanup limit must be between 1 and 1000")
+        current = datetime.now(UTC) if now is None else now
+        if not isinstance(current, datetime) or current.tzinfo is None:
+            raise ValueError("media cleanup time must be timezone-aware")
+        cutoff = (current.astimezone(UTC) - timedelta(hours=24)).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
+        with self._transaction() as db:
+            rows = db.execute("""
+                SELECT id, storage_path FROM media
+                WHERE message_id IS NULL AND source IN ('upload', 'runtime') AND created_at < ?
+                ORDER BY created_at, id LIMIT ?
+            """, (cutoff, limit)).fetchall()
+            if rows:
+                db.executemany("DELETE FROM media WHERE id = ?", ((row["id"],) for row in rows))
+
+        for storage_path in {row["storage_path"] for row in rows}:
+            # A second immediate transaction serializes the final reference check
+            # with new media inserts. The metadata deletion is already committed.
+            with self._transaction() as db:
+                referenced = db.execute(
+                    "SELECT 1 FROM media WHERE storage_path = ? LIMIT 1", (storage_path,),
+                ).fetchone()
+                if referenced is None:
+                    self._media_storage.remove(storage_path)
+        return len(rows)
 
     def media_for_run(self, run_id: str) -> list[dict]:
         _text(run_id, "run_id")
@@ -677,6 +842,8 @@ class Store:
             if not self._closed:
                 self._db.close()
                 self._closed = True
+                if self._temporary_media is not None:
+                    self._temporary_media.cleanup()
 
     def __enter__(self) -> Store:
         return self
