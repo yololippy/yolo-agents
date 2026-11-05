@@ -89,7 +89,7 @@
 
 - [x] 根 `AGENTS.md` 明确共享层不得依据产品 ID、显示名、目录或端口推断并开启产品能力；产品入口必须通过通用能力声明、配置、回调或依赖注入显式接入。
 - [x] Python 共享运行时改为消费不可变 `RuntimeCapabilities`；YoloTrade 在私有 `product.py` 注入交易提示、工具、动态工具、文本过滤和收尾逻辑，YoloBeni 使用显式空能力配置。共享 Host 不再提供产品端口或产品旧目录分支。
-- [x] 两个产品分别集中 Python 的 ID、显示名和默认端口；Swift 的 ID、显示名、Keychain、默认地址与旧服务策略；Xcode 的显示名、版本和 Bundle ID。YoloBeni 已新增与 YoloTrade 对称的 `Brand.xcconfig`，现有 Bundle ID 保持不变。
+- [x] 两个产品分别集中 Python 的 ID、显示名和默认端口；Swift 的 ID、显示名、Keychain 和默认地址；Xcode 的显示名、版本和 Bundle ID。YoloBeni 已新增与 YoloTrade 对称的 `Brand.xcconfig`，现有 Bundle ID 保持不变。
 - [x] 共享 Swift UI 要求显式 `AgentAppIdentity`，共享 SDK 的 Keychain/Repository 不再默认使用 YoloTrade 命名空间；协议与通用 Host 不再声明 `8765` 为共享默认值。
 - [x] 结构测试确认仅传入产品 ID 不会自动开启交易能力，且共享 Python 运行时源码不再引用具体产品身份；契约测试继续保留独立字面量断言。
 - [x] 回归通过：Core 158、YoloTrade 165、YoloBeni 4、双 Agent 隔离 1 项；Swift SDK 61、Swift UI 43、YoloTrade Client 27、YoloBeni Client 1 项；两个产品的 macOS arm64 与 iOS Simulator 四目标构建成功。
@@ -105,6 +105,14 @@
 - [x] 回归通过：Core 145、YoloTrade 178、YoloBeni 5、双 Agent 隔离 1 项；Swift SDK 61（另 1 项真实服务测试跳过）、Swift UI 44、YoloTrade Client 27、YoloBeni Client 1 项。两个产品 macOS arm64 与 iOS Simulator arm64 四目标构建成功。
 
 边界：本轮没有迁移生产目录、Keychain 或已安装 App，没有执行真实签名、安装、真机、OAuth、IBKR 连接或订单操作。安全复审另发现的未认证健康信息、媒体配额回收、本地文件权限、请求解析和配对码展示问题尚未修改，需按优先级单独处理。
+
+## 本轮补充：ID-04 旧版移除（2026-11-05）
+
+- [x] 已安装的旧“有路交易”App 与旧 `com.yoloagents.trading-agent` LaunchAgent 已停止并移入废纸篓；旧数据目录冻结保留，不再由任何服务自动接管。
+- [x] Swift SDK/UI 与 YoloTrade 客户端删除无身份旧服务、无前缀 Keychain、旧 Codex 账号路由及旧类型别名兼容；健康、配对、缓存和账号管理现在都要求明确匹配产品身份。
+- [x] 回归通过：Swift SDK 61 项、Swift UI 43 项、YoloTrade Client 27 项；新版 Mac App 重建、签名验证并安装为 `com.yoloagents.yolotrade`。
+
+边界：旧数据、日志和 Keychain 尚未销毁；需要删除时必须单独确认精确范围。新版后台当前使用独立验收实例，生产 LaunchAgent 迁移与 8765 常驻部署另行完成。
 
 ## 2. M0：环境与 IBKR 接入准备
 

@@ -216,8 +216,8 @@ iOS 仅查看订单列表、详情和事件；其编译产物不包含订单 Wri
 
 ## 独立 App 身份与 ChatGPT 账号（2026-10-28）
 
-`YoloTradeRootView` 注入 yolo-trade 身份、`YoloTrade` 名称、默认端口 8765，沿用原有 `com.yoloagents.yolo-trade.apple.v1` Keychain service 和缓存键，不迁移或清除已有配对。名称由 YoloTrade 私有产品常量和 Xcode `Brand.xcconfig` 集中管理；YoloBeni 使用完全独立的名称、service、键空间和端口 8766。新服务须匹配 Agent ID；只有 YoloTrade 显式允许缺少身份的旧服务，并在连接设置中说明。账号和 Paper 页面都会在发送设备凭据前阻断明确属于其他 Agent 的健康响应。
+`YoloTradeRootView` 注入 yolo-trade 身份、`YoloTrade` 名称、默认端口 8765 和 `com.yoloagents.yolo-trade.apple.v1` Keychain service。名称由 YoloTrade 私有产品常量和 Xcode `Brand.xcconfig` 集中管理；YoloBeni 使用完全独立的名称、service、键空间和端口 8766。服务必须明确返回匹配的 Agent ID；账号和 Paper 页面都会在发送设备凭据前阻断身份缺失或属于其他 Agent 的健康响应。
 
-“ChatGPT 账号”默认使用 `/v1/account`、`/login`、`/login/cancel`、`/logout`。取消或超时会调用后端取消接口，失败保持未确认提示；Provider 退出只针对当前 Agent，旧 Codex 模式保留真实影响说明。访问令牌需刷新及未授予套餐权限两种状态仍可明确退出，远程撤销未确认不会显示成已撤销。iOS 仅查看模型目录中的脱敏状态，所有 OAuth 凭据留在后端。
+“ChatGPT 账号”只使用 `/v1/account`、`/login`、`/login/cancel`、`/logout`。取消或超时会调用后端取消接口，失败保持未确认提示；Provider 退出只针对当前 Agent。访问令牌需刷新及未授予套餐权限两种状态仍可明确退出，远程撤销未确认不会显示成已撤销。iOS 仅查看模型目录中的脱敏状态，所有 OAuth 凭据留在后端。
 
 最终验证：SDK 47 项通过、1 项真实服务测试默认跳过；共享 UI 23 项通过；YoloTrade 私有客户端 22 项通过；两 Agent 的 Mac / iOS Simulator 四个通用目标构建成功。Mac 产物为 `/tmp/yolo-provider-yolo-trade/Build/Products/Debug/YoloTradeMac.app`，scheme 仍为 `YoloTradeMac`；iOS 为同一根目录的 `Debug-iphonesimulator/YoloTradeIOS.app`，scheme 为 `YoloTradeIOS`。后续已在独立 YoloTrade 验收后端完成真实 OAuth、流式、模型切换及记忆/Skills 验证，并在 YoloBeni Mac 验证共享账号和聊天界面。未替换生产 YoloTrade App、访问其 Keychain 或执行真实 IBKR 联调；边界与证据见 [TODO](../../docs/TODO.md)。

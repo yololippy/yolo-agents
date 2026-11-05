@@ -10,11 +10,11 @@ Swift 客户端通信 SDK：设备配对、认证、会话、消息、事件同�
 
 ## ChatGPT 账号与 App 身份
 
-`account()`、`startAccountLogin()`、`cancelAccountLogin()`、`logoutAccount()` 默认使用 `/v1/account` 及 `/login`、`/login/cancel`、`/logout`，携带设备 Bearer 凭据；所有 POST 只发送空 JSON。账号状态读取 `{account:{status,email?,plan_type?,method,can_manage,app_name,agent_id,error?}}`，登录为 `{login_id,auth_url,status?}`，取消和退出也返回账号包装。`AccountRoute.codexLegacy` 显式选择旧路由；SDK 不自动重放或回退 POST。保留旧 Codex 类型别名以兼容调用方。
+`account()`、`startAccountLogin()`、`cancelAccountLogin()`、`logoutAccount()` 使用 `/v1/account` 及 `/login`、`/login/cancel`、`/logout`，携带设备 Bearer 凭据；所有 POST 只发送空 JSON。账号状态读取 `{account:{status,email?,plan_type?,method,can_manage,app_name,agent_id,error?}}`，登录为 `{login_id,auth_url,status?}`，取消和退出也返回账号包装。SDK 不探测或回退旧 Codex 路由。
 
 `ChatGPTLoginResponse.authorizationURL()` 只允许 HTTPS 的 `chatgpt.com` / `auth.openai.com`，拒绝其他 host、用户凭据、非标准端口、fragment、控制字符和令牌参数。OAuth 凭据留在后端；Mac 只在内存展示邮箱和套餐，iOS 只使用模型目录的脱敏状态，不调用账号管理接口。
 
-私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service、默认地址及旧服务策略。健康响应兼容可空 `agent_id` / `app_name`；配对前和恢复同步前校验服务身份。`ClientRepository(identity:)` 独立保存配对和缓存：YoloTrade 沿用 `com.yoloagents.yolo-trade.apple.v1` 和旧键保留数据；YoloBeni 使用 `com.yoloagents.yolo-beni.apple.v1` 与 `agent.yolo-beni.` 键前缀，绝不回读 YoloTrade。只有 YoloTrade 允许缺少身份的旧服务；明确身份不匹配始终拒绝。
+私有根视图注入 `AgentAppIdentity`，指定 Agent ID、名称、Keychain service 和默认地址。配对前和恢复同步前都要求服务明确返回匹配的 `agent_id`。`ClientRepository(identity:)` 使用 `agent.<agent-id>.` 键前缀独立保存配对和缓存；YoloTrade 与 YoloBeni 使用各自 Keychain service，既不回读无前缀旧键，也不读取另一产品的数据。
 
 2026-10-28：SDK 47 项通过，1 项真实服务测试默认跳过。身份与存储测试使用内存 fixtures，不访问生产 Keychain。
 

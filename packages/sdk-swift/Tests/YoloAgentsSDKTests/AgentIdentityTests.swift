@@ -3,7 +3,7 @@ import Testing
 @testable import YoloAgentsSDK
 
 private let yoloTradeIdentity = AgentAppIdentity(agentID: "yolo-trade", appName: "YoloTrade",
-    keychainService: "com.yoloagents.yolo-trade.apple.v1", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
+    keychainService: "com.yoloagents.yolo-trade.apple.v1", defaultServiceAddress: "http://127.0.0.1:8765")
 private let yoloBeniIdentity = AgentAppIdentity(agentID: "yolo-beni", appName: "YoloBeni",
     keychainService: "com.yoloagents.yolo-beni.apple.v1", defaultServiceAddress: "http://127.0.0.1:8766")
 private final class IdentityMemory: SecureStore, @unchecked Sendable {
@@ -13,7 +13,7 @@ private final class IdentityMemory: SecureStore, @unchecked Sendable {
     func write(_ value: Data, for key: String) { lock.withLock { data[key] = value } }
     func remove(_ key: String) { _ = lock.withLock { data.removeValue(forKey: key) } }
 }
-private func identityConnection(_ agentID: String? = nil) throws -> PairedConnection {
+private func identityConnection(_ agentID: String?) throws -> PairedConnection {
     let pairing = try WireJSON.decoder().decode(PairingResponse.self, from: Data("""
     {"device":{"id":"10000000-0000-4000-8000-000000000001","name":"Fixture","platform":"macos","permissions":["devices:manage"],
     "created_at":"2026-10-28T00:00:00Z"},"token":"fixture-token","server_id":"40000000-0000-4000-8000-000000000004","api_version":1}
@@ -27,43 +27,46 @@ private func identityHealth(_ id: String?) throws -> Health {
     return try WireJSON.decoder().decode(Health.self, from: JSONSerialization.data(withJSONObject: object))
 }
 
-@Test func agentIdentityRejectsCrossConnectionsAndLimitsLegacyCompatibility() throws {
+@Test func agentIdentityRequiresExactIdentityForHealthAndConnections() throws {
     try yoloTradeIdentity.validate(identityHealth("yolo-trade"))
     try yoloBeniIdentity.validate(identityHealth("yolo-beni"))
-    try yoloTradeIdentity.validate(identityHealth(nil))
     #expect(throws: ClientError.agentIdentityMismatch) { try yoloBeniIdentity.validate(identityHealth("yolo-trade")) }
     #expect(throws: ClientError.agentIdentityMismatch) { try yoloTradeIdentity.validate(identityHealth("yolo-beni")) }
+    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloTradeIdentity.validate(identityHealth(nil)) }
     #expect(throws: ClientError.agentIdentityUnavailable) { try yoloBeniIdentity.validate(identityHealth(nil)) }
     #expect(throws: ClientError.incompatibleServer) { try yoloBeniIdentity.validate(identityHealth("yolo-beni"), serverID: UUID()) }
     #expect(throws: ClientError.agentIdentityMismatch) { try yoloBeniIdentity.validate(identityConnection("yolo-trade")) }
+    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloTradeIdentity.validate(identityConnection(nil)) }
 }
 
-@Test func scopedStoragePreservesYoloTradeMigrationAndNeverImportsItIntoYoloBeni() throws {
+@Test func scopedStorageNeverImportsUnidentifiedOrOtherAgentState() throws {
     let memory = IdentityMemory()
-    let legacyConnection = try identityConnection()
+    let unidentifiedConnection = try identityConnection(nil)
+    try memory.write(WireJSON.encoder().encode(unidentifiedConnection), for: "connection")
     var yoloTradeState = ClientState()
     let date = Date(timeIntervalSince1970: 1_800_000_000)
     yoloTradeState.upsertConversation(Conversation(id: UUID(), title: "YoloTrade only", createdAt: date, updatedAt: date))
-    try memory.write(WireJSON.encoder().encode(legacyConnection), for: "connection")
-    try memory.write(WireJSON.encoder().encode(yoloTradeState.cacheSnapshot()), for: legacyConnection.cacheKey)
     let yoloTrade = ClientRepository(identity: yoloTradeIdentity, store: memory)
     let yoloBeni = ClientRepository(identity: yoloBeniIdentity, store: memory)
     #expect(yoloTrade.identity == yoloTradeIdentity)
     #expect(yoloBeni.identity == yoloBeniIdentity)
-    #expect(try yoloTrade.connection() == legacyConnection)
-    #expect(try yoloTrade.state(for: legacyConnection).conversations.first?.title == "YoloTrade only")
+    #expect(try yoloTrade.connection() == nil)
     #expect(try yoloBeni.connection() == nil)
+    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloTrade.saveConnection(unidentifiedConnection) }
+    let yoloTradeConnection = try identityConnection("yolo-trade")
+    try yoloTrade.saveConnection(yoloTradeConnection)
+    try yoloTrade.saveState(yoloTradeState, for: yoloTradeConnection)
     let yoloBeniConnection = try identityConnection("yolo-beni")
     try yoloBeni.saveConnection(yoloBeniConnection)
     #expect(try yoloBeni.state(for: yoloBeniConnection).conversations.isEmpty)
     var yoloBeniState = ClientState()
     yoloBeniState.upsertConversation(Conversation(id: UUID(), title: "YoloBeni only", createdAt: date, updatedAt: date))
     try yoloBeni.saveState(yoloBeniState, for: yoloBeniConnection)
-    #expect(try yoloTrade.state(for: legacyConnection).conversations.first?.title == "YoloTrade only")
+    #expect(try yoloTrade.state(for: yoloTradeConnection).conversations.first?.title == "YoloTrade only")
     #expect(try yoloBeni.state(for: yoloBeniConnection).conversations.first?.title == "YoloBeni only")
-    #expect(throws: ClientError.agentIdentityUnavailable) { try yoloBeni.saveConnection(legacyConnection) }
+    #expect(throws: ClientError.agentIdentityMismatch) { try yoloBeni.saveConnection(yoloTradeConnection) }
     try yoloBeni.forget(yoloBeniConnection)
-    #expect(try yoloBeni.connection() == nil && yoloTrade.connection() == legacyConnection)
+    #expect(try yoloBeni.connection() == nil && yoloTrade.connection() == yoloTradeConnection)
     #expect(yoloTradeIdentity.keychainService != yoloBeniIdentity.keychainService)
 }
 

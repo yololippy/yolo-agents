@@ -1,10 +1,5 @@
 import Foundation
 
-public enum AccountRoute: Sendable {
-    case agent, codexLegacy
-    var path: String { self == .agent ? "account" : "codex/account" }
-}
-
 public struct ChatGPTAccountStatus: Decodable, Equatable, Sendable {
     public let status: String
     public let email: String?
@@ -100,7 +95,3 @@ public struct AccountLoginCancellation: Decodable, Sendable {
         ["login_required", "authenticated", "logged_in", "logged_out"].contains(account?.status ?? "")
     }
 }
-
-// Source compatibility for existing clients; new account routes are provider-neutral.
-public typealias CodexAccountStatus = ChatGPTAccountStatus
-public typealias CodexLoginResponse = ChatGPTLoginResponse

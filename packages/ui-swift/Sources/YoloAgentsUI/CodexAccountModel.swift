@@ -15,7 +15,6 @@ public enum AccountAccess {
             device.permissions.contains("devices:manage") && device.revokedAt == nil && serverAllows != false
     }
 }
-
 @MainActor
 public final class ChatGPTAccountModel: ObservableObject {
     @Published public private(set) var account: ChatGPTAccountStatus?
@@ -30,7 +29,7 @@ public final class ChatGPTAccountModel: ObservableObject {
     private let platform: DevicePlatform
     private let pollInterval: Duration
     private let loginTimeout: Duration
-    private var route: AccountRoute?
+    private var accountReady = false
     private var loginID: String?
     private var pollingTask: Task<Void, Never>?
     private var generation = UUID()
@@ -50,12 +49,12 @@ public final class ChatGPTAccountModel: ObservableObject {
         #endif
     }
     public var canManage: Bool {
-        managerDevice && route != nil && (route == .codexLegacy ||
-            (account?.canManage == true && ["chatgpt", "codex"].contains(account?.method ?? ""))) && AccountAccess.canManage(platform: platform,
+        managerDevice && accountReady && account?.canManage == true &&
+            ["chatgpt", "codex"].contains(account?.method ?? "") && AccountAccess.canManage(platform: platform,
             device: connection.pairing.device, serverAllows: account?.canManage)
     }
     public var appName: String { identity?.appName ?? account?.appName ?? "当前 Agent" }
-    public var usesCodex: Bool { route == .codexLegacy || account?.method == "codex" }
+    public var usesCodex: Bool { account?.method == "codex" }
     public var hasPendingLogin: Bool { loginID != nil || ["pending", "login_pending"].contains(account?.status ?? "") }
     public var canLogout: Bool {
         canManage && (hasPendingLogin || ["authenticated", "logged_in", "expired", "permission_required"].contains(account?.status ?? ""))
@@ -81,13 +80,9 @@ public final class ChatGPTAccountModel: ObservableObject {
         let health = try await client.health()
         try identity.validate(health, serverID: connection.pairing.serverID)
     }
-    private func validateAccount(_ value: ChatGPTAccountStatus, route: AccountRoute) throws {
+    private func validateAccount(_ value: ChatGPTAccountStatus) throws {
         guard let identity else { return }
-        if route == .codexLegacy && identity.allowsLegacyServer {
-            if let id = value.agentID, id != identity.agentID { throw ClientError.agentIdentityMismatch }
-        } else {
-            guard value.agentID == identity.agentID else { throw ClientError.agentIdentityMismatch }
-        }
+        guard value.agentID == identity.agentID else { throw ClientError.agentIdentityMismatch }
     }
     public func refresh() async {
         guard !isLoading, !isManaging else { return }
@@ -98,16 +93,10 @@ public final class ChatGPTAccountModel: ObservableObject {
             try await validateHealth()
             let value: ChatGPTAccountStatus
             if managerDevice {
-                var selectedRoute = route ?? .agent
-                do { value = try await client.account(route: selectedRoute) }
-                catch ClientError.http(let status, _, _) where status == 404 && selectedRoute == .agent && (identity?.allowsLegacyServer ?? true) {
-                    // Discover a missing read endpoint only. Never replay a POST on another route.
-                    selectedRoute = .codexLegacy
-                    value = try await client.account(route: selectedRoute)
-                }
-                try validateAccount(value, route: selectedRoute)
+                value = try await client.account()
+                try validateAccount(value)
                 try check(attempt)
-                route = selectedRoute
+                accountReady = true
             } else {
                 let catalog = try await client.models()
                 let status = catalog.auth?.status ?? (catalog.auth?.authenticated == true ? "authenticated" : "unavailable")
@@ -119,20 +108,20 @@ public final class ChatGPTAccountModel: ObservableObject {
         } catch {
             guard generation == attempt, !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
-            if let error = error as? ClientError, error.requiresPairing { route = nil }
+            if let error = error as? ClientError, error.requiresPairing { accountReady = false }
         }
     }
     public func beginLogin() async -> URL? {
         guard managerDevice, !isManaging, !hasPendingLogin else { return nil }
-        if route == nil { await refresh() }
-        guard canManage, !hasPendingLogin, let route else { return nil }
+        if !accountReady { await refresh() }
+        guard canManage, !hasPendingLogin else { return nil }
         isManaging = true
         let attempt = generation
         defer { if generation == attempt { isManaging = false } }
         do {
             try await validateHealth()
             try check(attempt)
-            let response = try await client.startAccountLogin(route: route)
+            let response = try await client.startAccountLogin()
             try check(attempt)
             if let error = response.error { errorMessage = error.message; return nil }
             if ["authenticated", "already_authenticated"].contains(response.status ?? "") {
@@ -188,7 +177,7 @@ public final class ChatGPTAccountModel: ObservableObject {
         }
     }
     public func cancelLogin() async {
-        guard managerDevice, !isManaging, let route, hasPendingLogin else { return }
+        guard managerDevice, !isManaging, accountReady, hasPendingLogin else { return }
         stopWaiting()
         isManaging = true
         let attempt = generation
@@ -196,11 +185,11 @@ public final class ChatGPTAccountModel: ObservableObject {
         do {
             try await validateHealth()
             try check(attempt)
-            let result = try await client.cancelAccountLogin(route: route)
+            let result = try await client.cancelAccountLogin()
             try check(attempt)
             guard result.isCancelled else { throw ClientError.http(status: 409, code: "cancellation_unconfirmed", message: "服务端尚未确认取消登录。") }
             if let value = result.account {
-                try validateAccount(value, route: route)
+                try validateAccount(value)
                 account = value
             }
             self.loginID = nil; isWaitingForLogin = false; noticeMessage = "本次登录等待已取消。"
@@ -212,7 +201,7 @@ public final class ChatGPTAccountModel: ObservableObject {
         }
     }
     public func logout() async {
-        guard canManage, !isManaging, let route else { return }
+        guard canManage, !isManaging else { return }
         stopWaiting()
         isManaging = true
         let attempt = generation
@@ -220,8 +209,8 @@ public final class ChatGPTAccountModel: ObservableObject {
         do {
             try await validateHealth()
             try check(attempt)
-            let value = try await client.logoutAccount(route: route)
-            try check(attempt); try validateAccount(value, route: route)
+            let value = try await client.logoutAccount()
+            try check(attempt); try validateAccount(value)
             account = value; errorMessage = value.error?.message
             loginID = nil; isWaitingForLogin = false
             if !value.isAuthenticated {
@@ -241,5 +230,3 @@ public final class ChatGPTAccountModel: ObservableObject {
         if generation != attempt { throw CancellationError() }
     }
 }
-
-public typealias CodexAccountModel = ChatGPTAccountModel

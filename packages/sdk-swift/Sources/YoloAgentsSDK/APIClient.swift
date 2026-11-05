@@ -179,17 +179,17 @@ public struct APIClient: Sendable {
     public func models() async throws -> ModelCatalog {
         try await request("GET", path: "models")
     }
-    public func account(route: AccountRoute = .agent) async throws -> ChatGPTAccountStatus {
-        try await request("GET", path: route.path)
+    public func account() async throws -> ChatGPTAccountStatus {
+        try await request("GET", path: "account")
     }
-    public func startAccountLogin(route: AccountRoute = .agent) async throws -> ChatGPTLoginResponse {
-        try await request("POST", path: route.path + "/login", body: Data("{}".utf8))
+    public func startAccountLogin() async throws -> ChatGPTLoginResponse {
+        try await request("POST", path: "account/login", body: Data("{}".utf8))
     }
-    public func logoutAccount(route: AccountRoute = .agent) async throws -> ChatGPTAccountStatus {
-        try await request("POST", path: route.path + "/logout", body: Data("{}".utf8))
+    public func logoutAccount() async throws -> ChatGPTAccountStatus {
+        try await request("POST", path: "account/logout", body: Data("{}".utf8))
     }
-    public func cancelAccountLogin(route: AccountRoute = .agent) async throws -> AccountLoginCancellation {
-        try await request("POST", path: route.path + "/login/cancel", body: Data("{}".utf8))
+    public func cancelAccountLogin() async throws -> AccountLoginCancellation {
+        try await request("POST", path: "account/login/cancel", body: Data("{}".utf8))
     }
     public func pair(code: String, name: String, platform: DevicePlatform) async throws -> PairingResponse {
         struct Body: Encodable {

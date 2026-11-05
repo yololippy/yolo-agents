@@ -2,7 +2,7 @@
 
 此模块属于 YoloTrade，由 macOS 和 iOS 入口共同使用，不是跨 Agent 共享包。`YoloTradeRootView` 向共享聊天壳注入订单入口；`PaperAPIClient`、`PaperHealth`、订单模型、Writer 与界面均在这里。公共聊天与传输继续依赖 `packages/ui-swift` 和 `packages/sdk-swift`。
 
-根视图注入 `yolo-trade` 身份、`YoloTrade` 名称、端口 8765 及原有 `com.yoloagents.yolo-trade.apple.v1` Keychain service，保留配对和历史。Agent ID 与中英文名称由私有的 `YoloTradeProduct` 集中管理；Bundle ID 由 Xcode 私有的 `Brand.xcconfig` 集中管理。它们不进入共享 SDK/UI，也不影响 YoloBeni。仅此 App 显式允许缺少身份的旧服务，并在连接设置中说明兼容边界；明确返回其他 Agent 时拒绝。订单健康检查和 Writer 也拒绝其他 Agent。
+根视图注入 `yolo-trade` 身份、`YoloTrade` 名称、端口 8765 及 `com.yoloagents.yolo-trade.apple.v1` Keychain service。Agent ID 与名称由私有的 `YoloTradeProduct` 集中管理；Bundle ID 由 Xcode 私有的 `Brand.xcconfig` 集中管理。它们不进入共享 SDK/UI，也不影响 YoloBeni。客户端只接受明确返回 `yolo-trade` 身份的服务，缺失或不匹配都拒绝；订单健康检查和 Writer 使用同一边界。
 
 订单协议见 [Paper 订单 v1](../../../agents/yolo-trade/PAPER_ORDERS.md)。
 

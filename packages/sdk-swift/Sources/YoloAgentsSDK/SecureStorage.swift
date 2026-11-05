@@ -63,8 +63,7 @@ public struct ClientRepository: Sendable {
     public init(identity: AgentAppIdentity, store: (any SecureStore)? = nil) {
         self.identity = identity
         self.store = store ?? KeychainStore(service: identity.keychainService)
-        // Only the app explicitly opting into legacy compatibility can reuse old keys.
-        prefix = identity.allowsLegacyServer ? "" : "agent.\(identity.agentID)."
+        prefix = "agent.\(identity.agentID)."
     }
     public func connection() throws -> PairedConnection? {
         let connection = try store.read(prefix + "connection").map { try WireJSON.decoder().decode(PairedConnection.self, from: $0) }

@@ -23,7 +23,7 @@
 
 Mac 编辑器保留原生 NSTextView、中文组字与 Enter / Shift+Enter 行为。
 
-侧边栏和工具栏提供“ChatGPT 账号”。`ChatGPTAccountModel` 展示所属 App，默认使用通用账号接口；只有允许旧服务的 YoloTrade 在 GET 404 后发现旧 Codex 读接口。POST 不回退。Mac 发起官方浏览器授权、轮询状态；取消和超时真正调用后端取消接口，取消失败保持未确认提示，旧 Codex 模式不支持取消时显示实际错误。
+侧边栏和工具栏提供“ChatGPT 账号”。`ChatGPTAccountModel` 展示所属 App，并且只使用当前通用账号接口。Mac 发起官方浏览器授权、轮询状态；取消和超时真正调用后端取消接口，取消失败保持未确认提示。服务身份缺失或不匹配时，在发送账号管理请求前失败关闭。
 
 Provider 退出仅针对当前 Agent；`method:codex` 或旧接口保留 Codex 受管登录对其他使用者的影响说明。`expired` 显示“登录状态需要刷新”，`permission_required` 显示待授予套餐权限，两者仍能退出清理。远程撤销未确认会明确显示。iOS 和非管理设备只读健康身份与模型目录中的脱敏认证状态，邮箱和套餐不进入其状态或聊天缓存。
 

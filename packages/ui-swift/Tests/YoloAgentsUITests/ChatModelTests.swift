@@ -10,8 +10,7 @@ private let chatTestIdentity = AgentAppIdentity(
     agentID: "fixture-agent",
     appName: "Fixture Agent",
     keychainService: "fixture.chat-model",
-    defaultServiceAddress: "https://fixture.invalid",
-    allowsLegacyServer: true
+    defaultServiceAddress: "https://fixture.invalid"
 )
 private let conversationJSON = """
 {"id":"\(testConversationID)","title":"Fixture","model":"model-a","archived":false,
@@ -120,7 +119,7 @@ private actor UIHTTP: HTTPTransport {
         let path = request.url!.path
         let json: String
         if path == "/v1/health" {
-            json = "{\"status\":\"ok\",\"api_version\":1,\"server_id\":\"\(serverID)\",\"agent_mode\":\"codex\",\"model\":null,\"trade_execution_enabled\":false}"
+            json = "{\"status\":\"ok\",\"api_version\":1,\"server_id\":\"\(serverID)\",\"agent_mode\":\"codex\",\"agent_id\":\"fixture-agent\",\"app_name\":\"Fixture Agent\",\"model\":null,\"trade_execution_enabled\":false}"
         } else if path == "/v1/models" {
             json = catalogError ? "{\"models\":[],\"default_model\":null,\"error\":{\"code\":\"codex_unavailable\",\"message\":\"服务端登录需要处理\"}}" :
                 "{\"models\":[{\"id\":\"model-a\",\"display_name\":\"Model A\"},{\"id\":\"model-b\",\"display_name\":\"Model B\"}],\"default_model\":\"model-a\",\"auth\":{\"status\":\"authenticated\"}}"
@@ -195,7 +194,7 @@ private actor PagingUIHTTP: HTTPTransport {
         if path == "/v1/health" {
             return HTTPResult(data: Data("""
             {"status":"ok","api_version":1,"server_id":"\(serverID)","agent_mode":"codex",
-            "model":null,"trade_execution_enabled":false}
+            "agent_id":"fixture-agent","app_name":"Fixture Agent","model":null,"trade_execution_enabled":false}
             """.utf8), status: 200)
         }
         if path == "/v1/models" {
@@ -237,7 +236,8 @@ private func fixtureConnection() throws -> PairedConnection {
     "token":"fixture-token","server_id":"\(serverID)","api_version":1}
     """
     return PairedConnection(endpoint: try ServiceEndpoint("https://example.com"),
-        pairing: try WireJSON.decoder().decode(PairingResponse.self, from: Data(json.utf8)))
+        pairing: try WireJSON.decoder().decode(PairingResponse.self, from: Data(json.utf8)),
+        agentID: chatTestIdentity.agentID)
 }
 private func delta(_ seq: Int64, _ content: String) -> ServerEvent {
     ServerEvent(seq: seq, type: "assistant.delta", conversationID: testConversationID,

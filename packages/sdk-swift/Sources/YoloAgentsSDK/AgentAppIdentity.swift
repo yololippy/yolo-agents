@@ -6,22 +6,19 @@ public struct AgentAppIdentity: Equatable, Sendable {
     public let appName: String
     public let keychainService: String
     public let defaultServiceAddress: String
-    public let allowsLegacyServer: Bool
 
     public init(agentID: String, appName: String, keychainService: String,
-                defaultServiceAddress: String, allowsLegacyServer: Bool = false) {
+                defaultServiceAddress: String) {
         self.agentID = agentID; self.appName = appName; self.keychainService = keychainService
-        self.defaultServiceAddress = defaultServiceAddress; self.allowsLegacyServer = allowsLegacyServer
+        self.defaultServiceAddress = defaultServiceAddress
     }
     public func validate(_ health: Health, serverID: UUID? = nil) throws {
         guard health.apiVersion == 1, serverID == nil || health.serverID == serverID else { throw ClientError.incompatibleServer }
-        if let id = health.agentID {
-            guard id == agentID else { throw ClientError.agentIdentityMismatch }
-        } else if !allowsLegacyServer { throw ClientError.agentIdentityUnavailable }
+        guard let id = health.agentID else { throw ClientError.agentIdentityUnavailable }
+        guard id == agentID else { throw ClientError.agentIdentityMismatch }
     }
     public func validate(_ connection: PairedConnection) throws {
-        if let id = connection.agentID {
-            guard id == agentID else { throw ClientError.agentIdentityMismatch }
-        } else if !allowsLegacyServer { throw ClientError.agentIdentityUnavailable }
+        guard let id = connection.agentID else { throw ClientError.agentIdentityUnavailable }
+        guard id == agentID else { throw ClientError.agentIdentityMismatch }
     }
 }

@@ -12,8 +12,7 @@ private let repositoryIdentity = AgentAppIdentity(
     agentID: "fixture-agent",
     appName: "Fixture Agent",
     keychainService: "fixture.sdk-tests",
-    defaultServiceAddress: "https://fixture.invalid",
-    allowsLegacyServer: true
+    defaultServiceAddress: "https://fixture.invalid"
 )
 
 private func media(id: UUID = UUID(), filename: String = "chart.png") -> MessageMedia {
@@ -557,7 +556,8 @@ func invalidServiceAddressesFail(_ value: String) {
 
 @Test func cacheSurvivesRestartWithoutAutomaticallyResending() throws {
     let repository = ClientRepository(identity: repositoryIdentity, store: MemoryStore())
-    let connection = PairedConnection(endpoint: try ServiceEndpoint("https://example.com"), pairing: try pairing())
+    let connection = PairedConnection(endpoint: try ServiceEndpoint("https://example.com"), pairing: try pairing(),
+                                      agentID: repositoryIdentity.agentID)
     try repository.saveConnection(connection)
     var state = ClientState()
     state.upsertConversation(conversation)
@@ -570,7 +570,8 @@ func invalidServiceAddressesFail(_ value: String) {
     #expect(restored.messages(in: conversationID).first?.content == "尚未确认")
     #expect(restored.outgoing.first?.id == clientID)
     #expect(restored.outgoing.first?.status == .needsRetry)
-    let other = PairedConnection(endpoint: connection.endpoint, pairing: try pairing())
+    let other = PairedConnection(endpoint: connection.endpoint, pairing: try pairing(),
+                                 agentID: repositoryIdentity.agentID)
     #expect(try repository.state(for: other) == ClientState())
     try repository.forget(connection)
     #expect(try repository.connection() == nil)

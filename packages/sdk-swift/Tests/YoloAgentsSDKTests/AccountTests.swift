@@ -14,13 +14,13 @@ private actor AccountHTTP: HTTPTransport {
 }
 
 @Test func managedAccountEnvelopeAndDetailsDecode() throws {
-    let status = try WireJSON.decoder().decode(CodexAccountStatus.self, from: Data("""
+    let status = try WireJSON.decoder().decode(ChatGPTAccountStatus.self, from: Data("""
     {"account":{"status":"authenticated","email":"fixture@example.test","plan_type":"plus"}}
     """.utf8))
     #expect(status.isAuthenticated)
     #expect(status.email == "fixture@example.test")
     #expect(status.planType == "plus")
-    let pending = try WireJSON.decoder().decode(CodexAccountStatus.self, from: Data("{\"account\":{\"status\":\"login_pending\",\"email\":null,\"plan_type\":null}}".utf8))
+    let pending = try WireJSON.decoder().decode(ChatGPTAccountStatus.self, from: Data("{\"account\":{\"status\":\"login_pending\",\"email\":null,\"plan_type\":null}}".utf8))
     #expect(!pending.isAuthenticated)
     #expect(pending.status == "login_pending")
 }
@@ -47,7 +47,7 @@ private actor AccountHTTP: HTTPTransport {
 func loginAllowsOnlyCurrentOfficialAuthorizationHosts(_ address: String) throws {
     let object = ["auth_url": address]
     let data = try JSONSerialization.data(withJSONObject: object)
-    let response = try WireJSON.decoder().decode(CodexLoginResponse.self, from: data)
+    let response = try WireJSON.decoder().decode(ChatGPTLoginResponse.self, from: data)
     #expect(try response.authorizationURL() != nil)
 }
 
@@ -59,25 +59,23 @@ func loginAllowsOnlyCurrentOfficialAuthorizationHosts(_ address: String) throws 
 ])
 func unsafeAuthorizationURLIsRejected(_ address: String) throws {
     let data = try JSONSerialization.data(withJSONObject: ["auth_url": address])
-    let response = try WireJSON.decoder().decode(CodexLoginResponse.self, from: data)
+    let response = try WireJSON.decoder().decode(ChatGPTLoginResponse.self, from: data)
     #expect(throws: ClientError.untrustedAuthorizationURL) { try response.authorizationURL() }
 }
 
 @Test func missingAccountStateDoesNotPretendToBeLoggedOut() {
     #expect(throws: (any Error).self) {
-        try WireJSON.decoder().decode(CodexAccountStatus.self, from: Data("{\"email\":null}".utf8))
+        try WireJSON.decoder().decode(ChatGPTAccountStatus.self, from: Data("{\"email\":null}".utf8))
     }
 }
 
-@Test func accountCancellationUsesEmptyJSONAndLegacyRouteIsExplicit() async throws {
+@Test func accountCancellationUsesEmptyJSONAndCurrentRoute() async throws {
     let transport = AccountHTTP([
         "{\"account\":{\"status\":\"login_required\",\"method\":\"chatgpt\",\"can_manage\":true}}",
-        "{\"account\":{\"status\":\"login_required\"}}",
     ])
     let api = APIClient(endpoint: try ServiceEndpoint("https://example.test"), token: "fixture", transport: transport)
     #expect(try await api.cancelAccountLogin().isCancelled)
-    _ = try await api.account(route: .codexLegacy)
     let requests = await transport.requests
-    #expect(requests.map { $0.url?.path } == ["/v1/account/login/cancel", "/v1/codex/account"])
+    #expect(requests.map { $0.url?.path } == ["/v1/account/login/cancel"])
     #expect(requests[0].httpBody == Data("{}".utf8))
 }

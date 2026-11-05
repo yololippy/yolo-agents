@@ -62,10 +62,6 @@ public final class ChatModel: ObservableObject {
     public let identity: AgentAppIdentity
     public var appName: String { identity.appName }
     public var defaultServiceAddress: String { identity.defaultServiceAddress }
-    public var legacyIdentityNotice: String? {
-        guard identity.allowsLegacyServer, let health, health.agentID == nil else { return nil }
-        return "当前为旧服务兼容连接，服务未提供 Agent 身份。请更新服务端以启用完整身份校验。"
-    }
 
     public init(identity: AgentAppIdentity,
                 transport: any HTTPTransport = URLSessionTransport(),

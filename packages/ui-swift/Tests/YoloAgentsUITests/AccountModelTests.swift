@@ -5,7 +5,6 @@ import YoloAgentsSDK
 
 private let accountServerID = "40000000-0000-4000-8000-000000000004"
 private let accountIdentity = AgentAppIdentity(agentID: "yolo-beni", appName: "YoloBeni", keychainService: "fixture.yolo-beni", defaultServiceAddress: "http://127.0.0.1:8766")
-private let legacyIdentity = AgentAppIdentity(agentID: "yolo-trade", appName: "YoloTrade", keychainService: "fixture.yolo-trade", defaultServiceAddress: "http://127.0.0.1:8765", allowsLegacyServer: true)
 private actor AccountStateHTTP: HTTPTransport {
     private(set) var requests: [URLRequest] = []
     private var status: String
@@ -15,11 +14,9 @@ private actor AccountStateHTTP: HTTPTransport {
     private var healthAgent: String? = "yolo-beni"
     private var failure: (String, Int)?
     private var officialURL = "https://auth.openai.com/oauth/authorize?state=fixture"
-    private var legacy = false
     init(status: String = "login_required", authenticatedAfter: Int? = nil) {
         self.status = status; self.authenticatedAfter = authenticatedAfter
     }
-    func legacyOnly() { legacy = true; healthAgent = nil; accountAgent = "yolo-trade" }
     func setHealthAgent(_ value: String?) { healthAgent = value }
     func setAccountAgent(_ value: String) { accountAgent = value }
     func fail(_ path: String, status: Int) { failure = (path, status) }
@@ -39,7 +36,6 @@ private actor AccountStateHTTP: HTTPTransport {
         if path == "/v1/models" {
             return try response(["models": [], "auth": ["status": status, "email": "must-not-copy@example.test", "plan_type": "secret"]])
         }
-        if legacy && path == "/v1/account" { return try response(["error": ["code": "not_found", "message": "Legacy"]], status: 404) }
         if path.hasSuffix("/login/cancel") {
             status = "login_required"
             return try response(["account": account()])
@@ -60,8 +56,8 @@ private actor AccountStateHTTP: HTTPTransport {
         return try response(["account": account()])
     }
     private func account() -> [String: Any] {
-        var value: [String: Any] = ["status": status, "method": legacy ? "codex" : "chatgpt", "can_manage": true]
-        if !legacy { value["agent_id"] = accountAgent; value["app_name"] = "YoloBeni" }
+        var value: [String: Any] = ["status": status, "method": "chatgpt", "can_manage": true,
+                                    "agent_id": accountAgent, "app_name": "YoloBeni"]
         if status == "authenticated" { value["email"] = "fixture@example.test"; value["plan_type"] = "plus" }
         return value
     }
@@ -77,7 +73,7 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
     ]
     let pairing = try WireJSON.decoder().decode(PairingResponse.self, from: JSONSerialization.data(withJSONObject: body))
     return PairedConnection(endpoint: try ServiceEndpoint("https://example.test"), pairing: pairing,
-                            agentID: identity.allowsLegacyServer ? nil : identity.agentID)
+                            agentID: identity.agentID)
 }
 @MainActor private func accountModel(_ http: AccountStateHTTP, platform: DevicePlatform = .macos,
     identity: AgentAppIdentity = accountIdentity, timeout: Duration = .seconds(2)) throws -> ChatGPTAccountModel {
@@ -184,22 +180,6 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
     try await accountWait { !pending.isWaitingForLogin }
     #expect(pending.errorMessage?.contains("超时") == true)
     #expect(await pendingHTTP.requests.last?.url?.path == "/v1/account/login/cancel")
-}
-
-@Test @MainActor func legacyYoloTradeFallbackIsReadDiscoveryOnlyAndShowsRealCodexImpact() async throws {
-    let http = AccountStateHTTP(status: "authenticated")
-    await http.legacyOnly()
-    let model = try accountModel(http, identity: legacyIdentity)
-    await model.refresh()
-    #expect(model.canManage && model.usesCodex && model.logoutExplanation.contains("Codex"))
-    #expect(await http.requests.map { $0.url?.path } == ["/v1/health", "/v1/account", "/v1/codex/account"])
-    await model.logout()
-    #expect(await http.requests.last?.url?.path == "/v1/codex/account/logout")
-    let failed = AccountStateHTTP()
-    await failed.fail("/v1/account/login", status: 503)
-    let other = try accountModel(failed)
-    #expect(await other.beginLogin() == nil)
-    #expect(await failed.requests.allSatisfy { $0.url?.path.contains("/codex/") == false })
 }
 
 @Test @MainActor func wrongAgentAndUnidentifiedHealthBlockPrivateAccountCalls() async throws {

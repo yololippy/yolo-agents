@@ -107,7 +107,6 @@ private struct PairingView: View {
                         LabeledContent("设备", value: connection.pairing.device.name)
                         LabeledContent("状态", value: model.connectionState.label)
                         LabeledContent("所属应用", value: model.appName)
-                        if let notice = model.legacyIdentityNotice { Text(notice).foregroundStyle(.orange) }
                         Text("此客户端的配对和历史仅属于当前 Agent。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
