@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from yolo_agents.agent_runtime import (
     DemoRuntime, RuntimeConfigurationError, RuntimeConnectionError, RuntimeExecutionError,
-    RuntimeProviderError, RuntimeStateError, _public_model_http_error, create_runtime,
+    RuntimeCapabilities, RuntimeProviderError, RuntimeStateError, _public_model_http_error,
+    create_runtime,
 )
 from yolo_agents.store import Store
 
@@ -20,6 +21,19 @@ from yolo_agents.store import Store
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+def trading_runtime_capabilities():
+    from yolo_agents.runtime_tools import (
+        TRADING_TOOL_INSTRUCTIONS, PaperOrderStreamFilter, finish_trading_reply,
+        pydantic_trading_tools,
+    )
+    return RuntimeCapabilities(
+        instructions=TRADING_TOOL_INSTRUCTIONS,
+        pydantic_tools_factory=pydantic_trading_tools,
+        text_filter_factory=PaperOrderStreamFilter,
+        finish_reply=finish_trading_reply,
+    )
 
 
 def official_sdk_available():
@@ -135,9 +149,12 @@ class RuntimeTests(unittest.TestCase):
         self.store.append_message(cid, "user", text)
         return self.store.list_messages(cid)
 
-    def pydantic(self, backend):
+    def pydantic(self, backend, *, agent_name="base", runtime_capabilities=None):
         with patch("yolo_agents.agent_runtime._load_pydantic_backend", return_value=backend):
-            runtime = create_runtime("pydantic", "openai:configured-model", self.root, self.store)
+            runtime = create_runtime(
+                "pydantic", "openai:configured-model", self.root, self.store,
+                agent_name=agent_name, runtime_capabilities=runtime_capabilities,
+            )
             self.runtimes.append(runtime)
             return runtime
 
@@ -148,7 +165,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsInstance(runtime, DemoRuntime)
         self.assertEqual(runtime.mode, "demo")
         self.assertIn("演示模式", reply)
-        self.assertIn("未连接真实模型或 IBKR", reply)
+        self.assertIn("未连接真实模型或外部服务", reply)
         self.assertIn("你好", reply)
         self.assertIsNotNone(self.store.get_agent_state(self.cid))
 
@@ -212,6 +229,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(paths), 2)
         self.assertTrue(all(path.is_relative_to(self.root / "users") for path in paths))
         self.assertNotIn("alice", str(paths))
+
+    def test_product_identity_alone_does_not_enable_runtime_capabilities(self):
+        backend = fake_backend()
+        runtime = self.pydantic(backend, agent_name="yolo-trade")
+        self.assertEqual("".join(runtime.stream_reply(self.user("hello"), self.cid)), "真实适配测试回复")
+        options = backend.agents[0].options
+        self.assertNotIn("tools", options)
+        self.assertNotIn("IBKR Paper", options["instructions"])
+
+    def test_shared_runtime_sources_do_not_reference_product_identities(self):
+        source_root = Path(__file__).parents[1] / "yolo_agents"
+        shared_runtime = "\n".join(
+            (source_root / filename).read_text()
+            for filename in ("agent_runtime.py", "chatgpt_runtime.py", "codex_runtime.py")
+        )
+        for product_id in ("yolo-trade", "yolo-beni"):
+            self.assertNotIn(product_id, shared_runtime)
 
     def test_real_continuation_round_trips_usage_and_does_not_resend_ui_history(self):
         backend = fake_backend()
@@ -466,9 +500,9 @@ class OfficialSDKTests(unittest.TestCase):
                 loop.close()
             asyncio.set_event_loop(self.original_loop)
 
-    def runtime(self, model, *, compact_after=None, agent_name="base"):
+    def runtime(self, model, *, compact_after=None, agent_name="base", runtime_capabilities=None):
         runtime = create_runtime("pydantic", "openai:offline-placeholder", self.root, self.store,
-                                 agent_name=agent_name)
+                                 agent_name=agent_name, runtime_capabilities=runtime_capabilities)
         self.addCleanup(runtime.close)
         runtime._backend.Agent = lambda _model, **kwargs: self.official_agent(model, **kwargs)
         if compact_after is not None:
@@ -624,7 +658,10 @@ class OfficialSDKTests(unittest.TestCase):
                 yield action
 
         calls, order_id = [], str(uuid4())
-        runtime = self.runtime(FunctionModel(stream_function=stream), agent_name="yolo-trade")
+        runtime = self.runtime(
+            FunctionModel(stream_function=stream), agent_name="arbitrary-product",
+            runtime_capabilities=trading_runtime_capabilities(),
+        )
         context = RuntimeToolContext(
             conversation_id=self.cid, user_message_id=str(uuid4()), run_id=str(uuid4()),
             caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},

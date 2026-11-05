@@ -6,7 +6,7 @@ from .host import create_parser, run_host, validate_host_arguments
 
 
 def main() -> int:
-    parser = create_parser(__doc__)
+    parser = create_parser(__doc__, default_port=None)
     args = parser.parse_args()
     validate_host_arguments(args, parser)
     try:

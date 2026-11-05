@@ -883,7 +883,7 @@ private struct ChatDetail: View {
                 if case .offline(let reason) = model.connectionState {
                     Text(reason).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                 } else if let health = model.health, health.agentMode == "demo" {
-                    Text("演示模式 · 未调用真实模型或券商")
+                    Text("演示模式 · 未调用真实模型或外部服务")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

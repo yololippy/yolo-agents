@@ -48,19 +48,19 @@ public final class ChatModel: ObservableObject {
     private var generation = UUID()
     private var active = true
     private var selectPrimaryAfterSnapshot = false
-    public let identity: AgentAppIdentity?
-    public var appName: String { identity?.appName ?? "Agent" }
-    public var defaultServiceAddress: String { identity?.defaultServiceAddress ?? "http://127.0.0.1:8765" }
+    public let identity: AgentAppIdentity
+    public var appName: String { identity.appName }
+    public var defaultServiceAddress: String { identity.defaultServiceAddress }
     public var legacyIdentityNotice: String? {
-        guard identity?.allowsLegacyServer == true, let health, health.agentID == nil else { return nil }
+        guard identity.allowsLegacyServer, let health, health.agentID == nil else { return nil }
         return "当前为旧服务兼容连接，服务未提供 Agent 身份。请更新服务端以启用完整身份校验。"
     }
 
-    public init(identity: AgentAppIdentity? = nil, repository: ClientRepository? = nil,
+    public init(identity: AgentAppIdentity, repository: ClientRepository? = nil,
                 transport: any HTTPTransport = URLSessionTransport(),
                 streamTransport: any SSETransport = URLSessionSSETransport()) {
         self.identity = identity
-        self.repository = repository ?? identity.map { ClientRepository(identity: $0) } ?? ClientRepository()
+        self.repository = repository ?? ClientRepository(identity: identity)
         self.transport = transport; self.streamTransport = streamTransport
     }
     private func client(for connection: PairedConnection) -> APIClient {
@@ -136,7 +136,7 @@ public final class ChatModel: ObservableObject {
             let client = APIClient(endpoint: endpoint, transport: transport, streamTransport: streamTransport)
             let health = try await client.health()
             guard health.apiVersion == 1 else { throw ClientError.incompatibleServer }
-            try identity?.validate(health)
+            try identity.validate(health)
             let response = try await client.pair(code: code.trimmingCharacters(in: .whitespacesAndNewlines),
                 name: deviceName.trimmingCharacters(in: .whitespacesAndNewlines), platform: devicePlatform)
             guard generation == attempt else { return false }
@@ -252,7 +252,7 @@ public final class ChatModel: ObservableObject {
                     guard health.apiVersion == 1, health.serverID == connection.pairing.serverID else {
                         throw ClientError.incompatibleServer
                     }
-                    try self.identity?.validate(health, serverID: connection.pairing.serverID)
+                    try self.identity.validate(health, serverID: connection.pairing.serverID)
                     self.apply(health)
                 } catch {
                     if self.isCancellation(error) || self.generation != attempt { return }
@@ -271,7 +271,7 @@ public final class ChatModel: ObservableObject {
             guard health.apiVersion == 1, health.serverID == connection.pairing.serverID else {
                 throw ClientError.incompatibleServer
             }
-            try identity?.validate(health, serverID: connection.pairing.serverID)
+            try identity.validate(health, serverID: connection.pairing.serverID)
             apply(health)
             await refreshModels()
             try check(attempt)

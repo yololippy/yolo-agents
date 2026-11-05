@@ -16,7 +16,7 @@ import re
 import sqlite3
 import threading
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .media import RuntimeMedia
 from .store import Store
@@ -48,6 +48,40 @@ class RuntimeGuardrailError(RuntimeExecutionError):
 
 class LoginRequiredError(RuntimeConfigurationError):
     """Managed ChatGPT login must be completed locally in Codex."""
+
+
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    """Trusted product-supplied runtime behavior; shared code never infers it from identity."""
+
+    instructions: str = ""
+    pydantic_tools_factory: Callable[[], list[Any]] | None = None
+    codex_instructions: str = ""
+    codex_dynamic_tools_factory: Callable[[], list[dict[str, Any]]] | None = None
+    tool_schema_version: int = 0
+    text_filter_factory: Callable[[], Any] | None = None
+    extracted_tool_name: str | None = None
+    finish_reply: Callable[[str, Any], str] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.tool_schema_version) is not int or self.tool_schema_version < 0:
+            raise ValueError("tool_schema_version must be a non-negative integer")
+        if self.extracted_tool_name is not None and self.text_filter_factory is None:
+            raise ValueError("an extracted tool requires a text filter")
+
+    def pydantic_tools(self) -> list[Any]:
+        return [] if self.pydantic_tools_factory is None else list(self.pydantic_tools_factory())
+
+    def codex_dynamic_tools(self) -> list[dict[str, Any]]:
+        tools = [] if self.codex_dynamic_tools_factory is None else list(self.codex_dynamic_tools_factory())
+        names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+        if len(names) != len(tools) or any(not isinstance(name, str) or not name for name in names):
+            raise RuntimeConfigurationError("Product dynamic tool declarations are invalid.")
+        if len(set(names)) != len(names):
+            raise RuntimeConfigurationError("Product dynamic tool names must be unique.")
+        if self.extracted_tool_name is not None and self.extracted_tool_name not in names:
+            raise RuntimeConfigurationError("Extracted product tool is not declared.")
+        return tools
 
 
 _SAFE_PROVIDER_FIELD = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
@@ -233,9 +267,9 @@ class DemoRuntime(_Runtime):
             turns = sum(message.get("role") == "user" for message in history)
             display = prompt or f"[收到 {len(history[-1].get('media', []))} 张图片]"
             reply = (
-                "【演示模式｜未连接真实模型或 IBKR】\n"
+                "【演示模式｜未连接真实模型或外部服务】\n"
                 f"已收到第 {turns} 轮消息：{display}\n"
-                "当前用于验证聊天、持久化和设备同步；不会读取账户、生成真实行情或提交订单。"
+                "当前用于验证聊天、持久化和设备同步；不会读取或操作外部数据。"
             )
             yield from _chunks(reply)
             self.store.save_agent_state(conversation_id, _encode({
@@ -289,12 +323,14 @@ class PydanticRuntime(_Runtime):
 
     mode = "pydantic"
 
-    def __init__(self, model: str, data_dir: str | Path, store: Store, *, agent_name="base"):
+    def __init__(self, model: str, data_dir: str | Path, store: Store, *, agent_name="base",
+                 runtime_capabilities: RuntimeCapabilities | None = None):
         super().__init__(store)
         if not isinstance(model, str) or not model.strip() or ":" not in model:
             raise RuntimeConfigurationError("真实模式需要显式的 provider:model 模型配置。")
         self.model_name = model
         self.agent_id = agent_name
+        self.runtime_capabilities = runtime_capabilities or RuntimeCapabilities()
         self._backend = _load_pydantic_backend()
         self._data_dir = Path(data_dir).expanduser()
         self._agents: dict[tuple[str, int, str], Any] = {}
@@ -317,7 +353,6 @@ class PydanticRuntime(_Runtime):
 
     def _agent(self, namespace: str, model_name: str | None = None) -> Any:
         from .guardrails import capabilities
-        from .runtime_tools import TRADING_TOOL_INSTRUCTIONS, pydantic_trading_tools
         # Keep provider clients on one worker's sync-stream event loop.
         selected = model_name or self.model_name
         key = (namespace, threading.get_ident(), selected)
@@ -338,25 +373,22 @@ class PydanticRuntime(_Runtime):
                     self._prepared_namespaces.add(namespace)
                 steps = backend.SqliteStepStore(database=str(directory / "agent.sqlite3"))
                 notes = backend.SqliteMemoryStore(database=str(directory / "memory.sqlite3"))
+                product_tools = self.runtime_capabilities.pydantic_tools()
                 self._agents[key] = backend.Agent(
                     self._model_instance(selected), deps_type=_AgentDeps,
                     output_type=([str, backend.BinaryImage]
                                  if self._supports_image_output(selected) else str),
                     retries=self._retry_policy(),
                     instructions=(
-                        "你是个人 AI 助手，当前只开放对话、记忆、历史检索"
-                        + ("、IBKR Paper 只读查询和非执行 Paper 草稿创建。" if self.agent_id == "yolo-trade" else "。")
-                        +
-                        ("本服务的模型工具不能确认或执行订单；不得声称模型已经提交订单。"
-                         if self.agent_id == "yolo-trade" else
-                         "本服务尚无账户、行情或交易执行工具；不得声称已经查询账户或执行订单。")
-                        + "记忆只保存用户明确表达的长期偏好与背景，不保存密钥。"
-                        "订单授权、风险限额和实时账户状态不能由记忆或历史确认代替。"
+                        "你是个人 AI 助手，当前只开放应用明确提供的对话、记忆、历史检索和受控工具。"
+                        "不得声称调用未提供的账户、行情、交易或其他外部能力。"
+                        "模型工具不能绕过应用授权或完成未明确开放的操作。"
+                        "记忆只保存用户明确表达的长期偏好与背景，不保存密钥。"
                         "历史检索为词法检索，中文可能漏召回；找不到时说明不确定。"
                         "相关历史可按需检索；请区分过去记录与当前事实。"
-                        + (TRADING_TOOL_INSTRUCTIONS if self.agent_id == "yolo-trade" else "")
+                        + self.runtime_capabilities.instructions
                     ),
-                    **({"tools": pydantic_trading_tools()} if self.agent_id == "yolo-trade" else {}),
+                    **({"tools": product_tools} if product_tools else {}),
                     capabilities=[
                         backend.StepPersistence(store=steps, capture_frontier=True),
                         backend.ConversationSearch(backend.SnapshotHistorySource(steps), scope="all", max_matches=5, context_lines=2),
@@ -491,7 +523,6 @@ class PydanticRuntime(_Runtime):
 
     def stream_reply(self, history: list[dict], conversation_id: str, user_id: str = "local-user", *, runtime_tools=None) -> Iterator[str | RuntimeMedia]:
         from .guardrails import check_text, check_value, CredentialStreamFilter, is_guardrail_error
-        from .runtime_tools import PaperOrderStreamFilter, finish_trading_reply
         prompt, message_id = _prompt(history, conversation_id)
         check_text(prompt)
         namespace = self._namespace(user_id)
@@ -544,7 +575,8 @@ class PydanticRuntime(_Runtime):
             pieces: list[str] = []
             safe_pieces: list[str] = []
             output_filter = CredentialStreamFilter()
-            order_filter = PaperOrderStreamFilter() if self.agent_id == "yolo-trade" else None
+            text_filter = (self.runtime_capabilities.text_filter_factory()
+                           if self.runtime_capabilities.text_filter_factory is not None else None)
             self._before_model_request(conversation_id, user_id, message_id)
             try:
                 with agent.run_stream_sync(model_prompt, **kwargs) as response:
@@ -561,9 +593,9 @@ class PydanticRuntime(_Runtime):
                                 if delta:
                                     pieces.append(delta)
                                     safe = output_filter.feed(delta)
-                                    if self.agent_id == "yolo-trade":
+                                    if text_filter is not None:
                                         for fragment in safe:
-                                            for filtered in order_filter.feed(fragment):
+                                            for filtered in text_filter.feed(fragment):
                                                 safe_pieces.append(filtered)
                                                 yield filtered
                                     else:
@@ -623,16 +655,17 @@ class PydanticRuntime(_Runtime):
                 yield RuntimeMedia(data=output.data, media_type=output.media_type)
                 final_output = "已生成图片。"
                 yield final_output
-            elif self.agent_id == "yolo-trade":
-                for filtered in order_filter.feed(tail):
+            elif text_filter is not None:
+                for filtered in text_filter.feed(tail):
                     safe_pieces.append(filtered)
                     yield filtered
-                filtered_tail = order_filter.finish()
+                filtered_tail = text_filter.finish()
                 if filtered_tail:
                     safe_pieces.append(filtered_tail)
                     yield filtered_tail
                 cleaned = "".join(safe_pieces)
-                suffix = finish_trading_reply(cleaned, runtime_tools)
+                suffix = (self.runtime_capabilities.finish_reply(cleaned, runtime_tools)
+                          if self.runtime_capabilities.finish_reply is not None else "")
                 if suffix:
                     yield suffix
                 final_output = cleaned + suffix
@@ -640,7 +673,11 @@ class PydanticRuntime(_Runtime):
             else:
                 if tail:
                     yield tail
-                final_output = output
+                suffix = (self.runtime_capabilities.finish_reply(output, runtime_tools)
+                          if self.runtime_capabilities.finish_reply is not None else "")
+                if suffix:
+                    yield suffix
+                final_output = output + suffix
             # No partial/failed state replaces the last successful official Conversation.
             # Cache the reply to recover the window before the API commits its assistant row.
             self.store.save_agent_state(conversation_id, _encode({
@@ -651,15 +688,19 @@ class PydanticRuntime(_Runtime):
             self._after_model_saved(conversation_id, user_id, message_id)
 
 
-def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store, *, agent_name="base", app_name=None):
+def create_runtime(mode: str, model: str | None, data_dir: str | Path, store: Store, *, agent_name="base",
+                   app_name=None, runtime_capabilities: RuntimeCapabilities | None = None):
     if mode == "demo":
         return DemoRuntime(store)
     if mode == "pydantic":
-        return PydanticRuntime(model, data_dir, store, agent_name=agent_name)
+        return PydanticRuntime(model, data_dir, store, agent_name=agent_name,
+                               runtime_capabilities=runtime_capabilities)
     if mode == "codex":
         from .codex_runtime import CodexRuntime
-        return CodexRuntime(model, data_dir, store, agent_name=agent_name)
+        return CodexRuntime(model, data_dir, store, agent_name=agent_name,
+                            runtime_capabilities=runtime_capabilities)
     if mode == "chatgpt":
         from .chatgpt_runtime import ChatGPTRuntime
-        return ChatGPTRuntime(model, data_dir, store, agent_name=agent_name, app_name=app_name or agent_name)
+        return ChatGPTRuntime(model, data_dir, store, agent_name=agent_name, app_name=app_name or agent_name,
+                              runtime_capabilities=runtime_capabilities)
     raise RuntimeConfigurationError("运行模式必须明确为 demo、pydantic、codex 或 chatgpt。")

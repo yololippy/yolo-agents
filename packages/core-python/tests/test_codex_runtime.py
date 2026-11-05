@@ -15,7 +15,9 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from yolo_agents.agent_runtime import LoginRequiredError, RuntimeExecutionError, RuntimeStateError
+from yolo_agents.agent_runtime import (
+    LoginRequiredError, RuntimeCapabilities, RuntimeExecutionError, RuntimeStateError,
+)
 from yolo_agents.api import ChatHTTPServer
 from yolo_agents.auth import DeviceAuth
 from yolo_agents.codex_runtime import (
@@ -28,6 +30,22 @@ from yolo_agents.store import Store
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+def trading_runtime_capabilities():
+    from yolo_agents.runtime_tools import (
+        CODEX_TRADING_PROPOSAL_INSTRUCTIONS, PAPER_DRAFT_TOOL,
+        PAPER_DRAFT_TOOL_SCHEMA_VERSION, PaperOrderStreamFilter, finish_trading_reply,
+        trading_dynamic_tools,
+    )
+    return RuntimeCapabilities(
+        codex_instructions=CODEX_TRADING_PROPOSAL_INSTRUCTIONS,
+        codex_dynamic_tools_factory=trading_dynamic_tools,
+        tool_schema_version=PAPER_DRAFT_TOOL_SCHEMA_VERSION,
+        text_filter_factory=PaperOrderStreamFilter,
+        extracted_tool_name=PAPER_DRAFT_TOOL,
+        finish_reply=finish_trading_reply,
+    )
 
 
 FAKE_SERVER = r'''
@@ -170,9 +188,12 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def runtime(self, **scenario):
         agent_name = scenario.pop("agent_name", "base")
+        runtime_capabilities = scenario.pop("runtime_capabilities", None)
         script = self.root / "fixture.py"
         script.write_text(FAKE_SERVER.replace("__CONFIG__", repr(scenario)).replace("__LOG__", repr(str(self.log))).replace("__GATE__", repr(str(self.gate))))
-        runtime = CodexRuntime(None, self.root, self.store, agent_name=agent_name, command=[sys.executable, str(script)],
+        runtime = CodexRuntime(None, self.root, self.store, agent_name=agent_name,
+                               runtime_capabilities=runtime_capabilities,
+                               command=[sys.executable, str(script)],
                                request_timeout=0.5, turn_timeout=1)
         self.runtimes.append(runtime)
         self.addCleanup(runtime.close)
@@ -425,7 +446,7 @@ class CodexRuntimeTests(unittest.TestCase):
         old = json.loads(self.store.get_agent_state(self.cid))["thread_id"]
         runtime.close()
 
-        trading = self.runtime(agent_name="yolo-trade")
+        trading = self.runtime(runtime_capabilities=trading_runtime_capabilities())
         second = self.history("continue after enabling the draft tool")
         self.assertEqual("".join(trading.stream_reply(second, self.cid)), "Hello world")
         new = json.loads(self.store.get_agent_state(self.cid))
@@ -500,11 +521,18 @@ class CodexRuntimeTests(unittest.TestCase):
             self.assertFalse(params["allowProviderModelFallback"])
         self.assertEqual(self.requests("command/exec"), [])
 
+    def test_product_identity_alone_does_not_enable_codex_capabilities(self):
+        runtime = self.runtime(agent_name="yolo-trade")
+        self.assertEqual("".join(runtime.stream_reply(self.history(), self.cid)), "Hello world")
+        start = self.requests("thread/start")[-1]["params"]
+        self.assertEqual(start["dynamicTools"], [])
+        self.assertNotIn("paper-order-proposal", start["developerInstructions"])
+
     def test_yolo_trade_validates_model_proposal_and_creates_only_trusted_draft(self):
         from yolo_agents.runtime_tools import RuntimeToolContext
 
         calls, order_id = [], str(uuid4())
-        runtime = self.runtime(agent_name="yolo-trade", paper_proposal=True)
+        runtime = self.runtime(runtime_capabilities=trading_runtime_capabilities(), paper_proposal=True)
         context = RuntimeToolContext(
             conversation_id=self.cid, user_message_id="message-1", run_id=str(uuid4()),
             caller={"id": str(uuid4()), "platform": "macos", "permissions": ["devices:manage"]},

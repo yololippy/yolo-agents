@@ -2,6 +2,8 @@
 
 `YoloBeni.xcodeproj` 提供 `YoloBeniMac` / `YoloBeniIOS` schemes，通过 `../client-swift` 复用 SDK/UI。产品名、Bundle ID 和存储独立，无 YoloTrade 或 Paper 依赖。
 
+产品显示名、两端 Bundle ID 和版本统一定义在 `Configuration/Brand.xcconfig`；修改品牌配置时无需在 Info.plist 或各 target 重复维护。
+
 在本目录构建，不安装软件或申请签名：
 
 ```sh

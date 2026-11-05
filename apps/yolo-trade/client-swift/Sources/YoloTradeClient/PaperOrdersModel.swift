@@ -78,10 +78,10 @@ public final class PaperOrdersModel: ObservableObject {
         do { try await readDetail(id); readError = nil } catch { recordReadError(error) }
     }
     private func fetchHealth() async throws {
-        guard connection.agentID == nil || connection.agentID == "yolo-trade" else { throw ClientError.agentIdentityMismatch }
+        guard connection.agentID == nil || connection.agentID == YoloTradeProduct.agentID else { throw ClientError.agentIdentityMismatch }
         let publicHealth = try await client.health()
         guard publicHealth.serverID == connection.pairing.serverID, publicHealth.apiVersion == 1 else { throw ClientError.incompatibleServer }
-        guard publicHealth.agentID == nil || publicHealth.agentID == "yolo-trade" else { throw ClientError.agentIdentityMismatch }
+        guard publicHealth.agentID == nil || publicHealth.agentID == YoloTradeProduct.agentID else { throw ClientError.agentIdentityMismatch }
         let protectedBroker = try await client.paperBrokerHealth()
         health = publicHealth; broker = protectedBroker; fetchedAt = clock()
     }

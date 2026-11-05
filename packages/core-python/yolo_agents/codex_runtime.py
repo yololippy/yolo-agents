@@ -22,14 +22,9 @@ from uuid import UUID, uuid4
 
 from .agent_runtime import (
     LoginRequiredError, RuntimeConfigurationError, RuntimeExecutionError,
-    RuntimeStateError, _Runtime, _encode, _prompt,
+    RuntimeCapabilities, RuntimeStateError, _Runtime, _encode, _prompt,
 )
 from .store import validate_model_id
-from .runtime_tools import (
-    CODEX_TRADING_PROPOSAL_INSTRUCTIONS, PAPER_DRAFT_TOOL, PAPER_DRAFT_TOOL_SCHEMA_VERSION,
-    READ_TOOL_NAMES, PaperOrderStreamFilter, RuntimeToolContext, finish_trading_reply,
-    trading_dynamic_tools,
-)
 
 
 class CodexUnavailableError(RuntimeConfigurationError):
@@ -285,7 +280,7 @@ class AppServerClient:
                                 raise ValueError
                         except Exception:
                             result = {"contentItems": [{"type": "inputText", "text":
-                                '{"status":"draft_unavailable","message":"Paper 草稿未创建。"}'}], "success": False}
+                                '{"status":"tool_unavailable","message":"应用工具调用失败。"}'}], "success": False}
                         self._send({"id": message["id"], "result": result})
                         continue
                     # No approvals, file/command tools, elicitation or external auth-token refresh.
@@ -349,11 +344,14 @@ class AppServerClient:
 class CodexRuntime(_Runtime):
     mode = "codex"
 
-    def __init__(self, model, data_dir, store, *, agent_name="base", command=None, request_timeout=15, turn_timeout=120):
+    def __init__(self, model, data_dir, store, *, agent_name="base",
+                 runtime_capabilities: RuntimeCapabilities | None = None,
+                 command=None, request_timeout=15, turn_timeout=120):
         super().__init__(store)
         validate_model_id(model)
         self.model_name = model
         self.agent_id = agent_name
+        self.runtime_capabilities = runtime_capabilities or RuntimeCapabilities()
         self._command = command or [os.environ.get("YOLO_AGENTS_CODEX_BIN", "codex")]
         self._workspace = Path(data_dir).expanduser().resolve() / "codex-chat-workspace"
         self._client_lock = threading.Lock()
@@ -547,8 +545,7 @@ class CodexRuntime(_Runtime):
             raise RuntimeStateError("保存的 Codex thread 映射无效。")
 
     def _thread_params(self, model):
-        instructions = CHAT_INSTRUCTIONS + (CODEX_TRADING_PROPOSAL_INSTRUCTIONS
-                                             if self.agent_id == "yolo-trade" else "")
+        instructions = CHAT_INSTRUCTIONS + self.runtime_capabilities.codex_instructions
         return {"model": model, "modelProvider": "openai", "cwd": str(self._workspace),
                 "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": "read-only",
                 "baseInstructions": instructions, "developerInstructions": instructions,
@@ -625,17 +622,18 @@ class CodexRuntime(_Runtime):
             model = conversation["model"] or catalog["default_model"]
             if model is None or model not in {m["id"] for m in catalog["models"]}:
                 raise RuntimeConfigurationError("所选模型当前不在 Codex 目录中，请重新选择。")
+            dynamic_tools = self.runtime_capabilities.codex_dynamic_tools()
+            dynamic_tool_names = frozenset(tool["name"] for tool in dynamic_tools)
             tools_changed = bool(
-                state and self.agent_id == "yolo-trade"
-                and state.get("tool_schema_version") != PAPER_DRAFT_TOOL_SCHEMA_VERSION
+                state and state.get("tool_schema_version", 0)
+                != self.runtime_capabilities.tool_schema_version
             )
             rebuild = state and (
                 state.get("model") != model or state.get("reply_status") != "completed" or tools_changed
             )
             if state is None or rebuild:
                 params = self._thread_params(model)
-                params.update({"dynamicTools": (trading_dynamic_tools()
-                                                if self.agent_id == "yolo-trade" else []),
+                params.update({"dynamicTools": dynamic_tools,
                                "environments": [], "selectedCapabilityRoots": [],
                                "ephemeral": False, "allowProviderModelFallback": False})
                 result = client.call("thread/start", params)
@@ -658,34 +656,35 @@ class CodexRuntime(_Runtime):
             pending = {"schema_version": 1, "mode": self.mode, "user_id": user_id,
                        "thread_id": thread_id, "model": model, "account_key": principal,
                        "last_user_message_id": message_id, "reply_status": "in_progress",
-                       "tool_schema_version": (PAPER_DRAFT_TOOL_SCHEMA_VERSION
-                                               if self.agent_id == "yolo-trade" else 0)}
+                       "tool_schema_version": self.runtime_capabilities.tool_schema_version}
             self.store.save_agent_state(conversation_id, _encode(pending))
             expected_turn = {"id": None}
 
             def dynamic_tool(params):
-                if (not isinstance(runtime_tools, RuntimeToolContext)
+                result_handler = getattr(runtime_tools, "codex_result", None)
+                if (not callable(result_handler)
                         or set(params) != {"threadId", "turnId", "callId", "namespace", "tool", "arguments"}
                         or params.get("threadId") != thread_id or not isinstance(params.get("turnId"), str)
                         or params.get("namespace") is not None
-                        or params.get("tool") not in ({PAPER_DRAFT_TOOL} | READ_TOOL_NAMES)
+                        or params.get("tool") not in dynamic_tool_names
                         or not isinstance(params.get("callId"), str)):
                     raise ValueError("invalid dynamic tool call")
                 if expected_turn["id"] is None:
                     expected_turn["id"] = params["turnId"]
                 elif params["turnId"] != expected_turn["id"]:
                     raise ValueError("dynamic tool call belongs to another turn")
-                return runtime_tools.codex_result(params["tool"], params["arguments"])
+                return result_handler(params["tool"], params["arguments"])
 
             turn_input, turn_media = self._turn_input(text, history[-1])
             events = None
             turn_id, completed = None, False
             pieces, item_text, current_item = [], {}, None
             safe_pieces: list[str] = []
-            order_filter = PaperOrderStreamFilter() if self.agent_id == "yolo-trade" else None
+            text_filter = (self.runtime_capabilities.text_filter_factory()
+                           if self.runtime_capabilities.text_filter_factory is not None else None)
             try:
                 events = client.subscribe(
-                    thread_id, dynamic_tool if self.agent_id == "yolo-trade" else None,
+                    thread_id, dynamic_tool if dynamic_tool_names else None,
                 )
                 started = client.call("turn/start", {
                     "threadId": thread_id, "input": turn_input, "model": model,
@@ -721,7 +720,7 @@ class CodexRuntime(_Runtime):
                         item = params.get("item") or {}
                         item_type = item.get("type")
                         if item_type == "dynamicToolCall":
-                            if (self.agent_id != "yolo-trade" or item.get("tool") != PAPER_DRAFT_TOOL
+                            if (item.get("tool") not in dynamic_tool_names
                                     or item.get("namespace") is not None):
                                 client._fail(CodexSafetyError("Codex 尝试使用未授权的动态工具，已停止。"))
                                 raise CodexSafetyError("Codex 尝试使用未授权的动态工具，已停止。")
@@ -734,16 +733,16 @@ class CodexRuntime(_Runtime):
                             if isinstance(final, str) and item_id not in item_text:
                                 if current_item is not None:
                                     pieces.append("\n\n")
-                                    if self.agent_id == "yolo-trade":
-                                        for filtered in order_filter.feed("\n\n"):
+                                    if text_filter is not None:
+                                        for filtered in text_filter.feed("\n\n"):
                                             safe_pieces.append(filtered)
                                             yield filtered
                                     else:
                                         yield "\n\n"
                                 item_text[item_id], current_item = final, item_id
                                 pieces.append(final)
-                                if self.agent_id == "yolo-trade":
-                                    for filtered in order_filter.feed(final):
+                                if text_filter is not None:
+                                    for filtered in text_filter.feed(final):
                                         safe_pieces.append(filtered)
                                         yield filtered
                                 else:
@@ -756,8 +755,8 @@ class CodexRuntime(_Runtime):
                             raise CodexProtocolError("Codex 文本增量格式无效。")
                         if item_id != current_item and current_item is not None:
                             pieces.append("\n\n")
-                            if self.agent_id == "yolo-trade":
-                                for filtered in order_filter.feed("\n\n"):
+                            if text_filter is not None:
+                                for filtered in text_filter.feed("\n\n"):
                                     safe_pieces.append(filtered)
                                     yield filtered
                             else:
@@ -765,8 +764,8 @@ class CodexRuntime(_Runtime):
                         current_item = item_id
                         item_text[item_id] = item_text.get(item_id, "") + delta
                         pieces.append(delta)
-                        if self.agent_id == "yolo-trade":
-                            for filtered in order_filter.feed(delta):
+                        if text_filter is not None:
+                            for filtered in text_filter.feed(delta):
                                 safe_pieces.append(filtered)
                                 yield filtered
                         else:
@@ -778,21 +777,29 @@ class CodexRuntime(_Runtime):
                         raw_reply = "".join(pieces)
                         if not raw_reply.strip():
                             raise CodexProtocolError("Codex 完成事件没有可接受的文本回复。")
-                        if self.agent_id == "yolo-trade":
-                            filtered_tail = order_filter.finish()
+                        if text_filter is not None:
+                            filtered_tail = text_filter.finish()
                             if filtered_tail:
                                 safe_pieces.append(filtered_tail)
                                 yield filtered_tail
                             cleaned = "".join(safe_pieces)
-                            proposal = order_filter.proposal()
-                            if proposal is not None and isinstance(runtime_tools, RuntimeToolContext):
-                                runtime_tools.invoke(PAPER_DRAFT_TOOL, proposal)
-                            suffix = finish_trading_reply(cleaned, runtime_tools)
+                            proposal = (text_filter.proposal()
+                                        if self.runtime_capabilities.extracted_tool_name is not None else None)
+                            invoke = getattr(runtime_tools, "invoke", None)
+                            if (proposal is not None and self.runtime_capabilities.extracted_tool_name is not None
+                                    and callable(invoke)):
+                                invoke(self.runtime_capabilities.extracted_tool_name, proposal)
+                            suffix = (self.runtime_capabilities.finish_reply(cleaned, runtime_tools)
+                                      if self.runtime_capabilities.finish_reply is not None else "")
                             if suffix:
                                 yield suffix
                             reply = cleaned + suffix
                         else:
-                            reply = raw_reply
+                            suffix = (self.runtime_capabilities.finish_reply(raw_reply, runtime_tools)
+                                      if self.runtime_capabilities.finish_reply is not None else "")
+                            if suffix:
+                                yield suffix
+                            reply = raw_reply + suffix
                         self.store.save_agent_state(conversation_id, _encode({
                             **pending, "turn_id": turn_id, "reply_status": "completed", "last_reply": reply,
                         }))

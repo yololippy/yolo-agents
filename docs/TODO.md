@@ -1,6 +1,6 @@
 # IBKR AI 助手：开发任务与验收
 
-更新日期：2026-11-04
+更新日期：2026-11-05
 
 状态：Agent/产品存储、聊天通信和 Apple 客户端首版已完成本机验收，双端图片上传与 Agent 图片返回链路已通过自动化测试及 macOS/iOS 构建；IBKR Paper 股票限价单的后端状态机、Mac 确认界面、iOS 只读界面和模拟故障测试已实现，Live 执行关闭。本机 Gateway 已安装并登录 Paper，但其 Read-Only API 仍开启，因此真实 What-if、模拟提交/成交/撤单尚未验收。
 
@@ -74,6 +74,17 @@
 - [x] 重命名后 Core 154、YoloTrade 165、YoloBeni 4、双实例隔离 1 项 Python 测试通过；Swift SDK 61、Swift UI 42、YoloTrade Client 27 项测试通过，YoloBeni Client 构建以及两个产品的 macOS/iOS Simulator 四目标构建通过。
 
 边界：本次只修改仓库代码和构建身份，不自动移动仓库外的既有数据目录，也不迁移旧 App 的 Keychain 配对或沙盒数据；需要保留时另行设计一次性迁移。现有未提交的 YoloTrade 图标工程修改、`design/` 与 `Resources/` 已原样保留。
+
+## 本轮补充：ID-02 产品配置与共享层边界（2026-11-05）
+
+- [x] 根 `AGENTS.md` 明确共享层不得依据产品 ID、显示名、目录或端口推断并开启产品能力；产品入口必须通过通用能力声明、配置、回调或依赖注入显式接入。
+- [x] Python 共享运行时改为消费不可变 `RuntimeCapabilities`；YoloTrade 在私有 `product.py` 注入交易提示、工具、动态工具、文本过滤和收尾逻辑，YoloBeni 使用显式空能力配置。共享 Host 不再提供产品端口或产品旧目录分支。
+- [x] 两个产品分别集中 Python 的 ID、显示名和默认端口；Swift 的 ID、显示名、Keychain、默认地址与旧服务策略；Xcode 的显示名、版本和 Bundle ID。YoloBeni 已新增与 YoloTrade 对称的 `Brand.xcconfig`，现有 Bundle ID 保持不变。
+- [x] 共享 Swift UI 要求显式 `AgentAppIdentity`，共享 SDK 的 Keychain/Repository 不再默认使用 YoloTrade 命名空间；协议与通用 Host 不再声明 `8765` 为共享默认值。
+- [x] 结构测试确认仅传入产品 ID 不会自动开启交易能力，且共享 Python 运行时源码不再引用具体产品身份；契约测试继续保留独立字面量断言。
+- [x] 回归通过：Core 158、YoloTrade 165、YoloBeni 4、双 Agent 隔离 1 项；Swift SDK 61、Swift UI 43、YoloTrade Client 27、YoloBeni Client 1 项；两个产品的 macOS arm64 与 iOS Simulator 四目标构建成功。
+
+边界：本轮不迁移仓库外旧数据、Keychain 或已安装 App，不执行真实签名、安装或真机验收。旧身份数据如需迁移，必须由对应产品另行提供显式迁移方案，共享 Host 不自动猜测或接管。
 
 ## 2. M0：环境与 IBKR 接入准备
 

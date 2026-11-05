@@ -4,6 +4,6 @@ import YoloBeniClient
 @main
 struct YoloBeniMacApp: App {
     var body: some Scene {
-        Window("YoloBeni", id: "main") { YoloBeniRootView() }
+        Window(YoloBeniProduct.displayName, id: "main") { YoloBeniRootView() }
     }
 }

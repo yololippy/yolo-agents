@@ -22,6 +22,7 @@ from yolo_trade.api_extension import TradingAPIExtension
 from yolo_trade.ibkr import IBKRAdapter
 from yolo_trade.ibkr_config import IBKRConfig
 from yolo_trade.ibkr_lifecycle import IBKRBrokerLifecycle
+from yolo_trade.product import RUNTIME_CAPABILITIES
 
 from test_ibkr import Client, Event
 
@@ -375,11 +376,12 @@ class LifecycleTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__):
                 broker, _, clients = self.build()
                 extension_seen = []
-                def host(args, *, extension, agent_name, app_name):
+                def host(args, *, extension, agent_name, app_name, runtime_capabilities):
                     extension_seen.append(extension)
                     self.wait(lambda: extension.broker_health()["connected"])
                     self.assertEqual(agent_name, "yolo-trade")
                     self.assertEqual(app_name, "YoloTrade")
+                    self.assertIs(runtime_capabilities, RUNTIME_CAPABILITIES)
                     if failure is not None:
                         raise failure
                     return 7

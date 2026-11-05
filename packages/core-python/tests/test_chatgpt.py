@@ -41,31 +41,39 @@ def credential(subject='subject-a', client='client-a', scope='chatgpt.tokens.use
 
 
 class IdentityTests(unittest.TestCase):
+    def test_shared_parser_requires_an_explicit_product_port(self):
+        with self.assertRaises(TypeError):
+            create_parser()
+        parser = create_parser(default_port=None)
+        with self.assertRaises(SystemExit):
+            parser.parse_args([])
+        self.assertEqual(parser.parse_args(["--port", "8100"]).port, 8100)
+
     def test_distinct_defaults_and_cross_agent_nested_and_symlink_rejected(self):
-        self.assertNotEqual(create_parser(agent_name='yolo-trade').parse_args([]).data_dir,
-                            create_parser(agent_name='yolo-beni', default_port=8766).parse_args([]).data_dir)
+        self.assertNotEqual(create_parser(agent_name='alpha', default_port=8101).parse_args([]).data_dir,
+                            create_parser(agent_name='beta', default_port=8102).parse_args([]).data_dir)
         with tempfile.TemporaryDirectory() as temp:
             a, b = Path(temp) / 'a', Path(temp) / 'b'
-            prepare_agent_directory(a, 'yolo-trade', 'YoloTrade')
-            prepare_agent_directory(b, 'yolo-beni', 'YoloBeni')
+            prepare_agent_directory(a, 'alpha', 'Alpha')
+            prepare_agent_directory(b, 'beta', 'Beta')
             alias = Path(temp) / 'alias'
             alias.symlink_to(a, target_is_directory=True)
             for path in (a, alias, a / 'nested'):
                 with self.subTest(path=path), self.assertRaises(RuntimeError):
-                    prepare_agent_directory(path, 'yolo-beni', 'YoloBeni', adopt_existing=True)
+                    prepare_agent_directory(path, 'beta', 'Beta', adopt_existing=True)
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'yolo-trade', adopt_existing=True)
+                prepare_agent_directory(temp, 'alpha', adopt_existing=True)
 
     def test_unmarked_legacy_requires_explicit_adoption_and_preserves_data(self):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp) / 'app.sqlite3'
             data.write_bytes(b'legacy')
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'yolo-trade')
-            prepare_agent_directory(temp, 'yolo-trade', adopt_existing=True)
+                prepare_agent_directory(temp, 'alpha')
+            prepare_agent_directory(temp, 'alpha', adopt_existing=True)
             self.assertEqual(data.read_bytes(), b'legacy')
             with self.assertRaises(RuntimeError):
-                prepare_agent_directory(temp, 'yolo-beni', adopt_existing=True)
+                prepare_agent_directory(temp, 'beta', adopt_existing=True)
 
 
 class AuthTests(unittest.TestCase):

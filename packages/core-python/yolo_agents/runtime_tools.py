@@ -585,7 +585,7 @@ def pydantic_paper_draft_tool():
 
 
 def pydantic_trading_tools():
-    """Build the YoloTrade's application-owned tools lazily."""
+    """Build application-owned trading tools lazily for an explicit product profile."""
     from pydantic_ai import Tool
 
     def context(ctx):

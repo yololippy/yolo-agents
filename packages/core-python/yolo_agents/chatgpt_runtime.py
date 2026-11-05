@@ -19,7 +19,10 @@ from pydantic_ai_harness import Skills
 from pydantic_ai.workspaces.local import LocalWorkspaceBackend
 import httpx2
 
-from .agent_runtime import PydanticRuntime, LoginRequiredError, RuntimeConfigurationError, RuntimeExecutionError, RuntimeStateError, _scope
+from .agent_runtime import (
+    LoginRequiredError, PydanticRuntime, RuntimeCapabilities, RuntimeConfigurationError,
+    RuntimeExecutionError, RuntimeStateError, _scope,
+)
 from .chatgpt_auth import AccountManager, _claims
 from .codex_runtime import CodexBusyError
 from .store import validate_model_id
@@ -60,10 +63,12 @@ class SerializedChatGPTProvider(OpenAIChatGPTProvider):
 class ChatGPTRuntime(PydanticRuntime):
     mode = 'chatgpt'
 
-    def __init__(self, model, data_dir, store, *, agent_name, app_name):
+    def __init__(self, model, data_dir, store, *, agent_name, app_name,
+                 runtime_capabilities: RuntimeCapabilities | None = None):
         validate_model_id(model)
         # Initialize the official Harness and its independent user stores.
-        super().__init__('openai:placeholder', data_dir, store, agent_name=agent_name)
+        super().__init__('openai:placeholder', data_dir, store, agent_name=agent_name,
+                         runtime_capabilities=runtime_capabilities)
         self.model_name = model
         self.agent_id, self.app_name = agent_name, app_name
         self.account = AccountManager(Path(data_dir) / 'chatgpt-auth', app_name)

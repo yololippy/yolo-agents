@@ -12,15 +12,15 @@ python3 -m venv .venv
 在仓库根目录运行：
 
 ```sh
-PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo
+PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --port 8800
 ```
 
-默认地址 `http://127.0.0.1:8765`，数据保存到 `~/Library/Application Support/YoloAgents`。启动控制台显示 Mac / iOS 两个一次性配对码，十分钟过期；客户端按自身平台使用对应配对码。不要把配对码、设备 token、模型 API key 提交仓库或发到共享日志。
+共享 Host 不预设任何产品端口；通用入口必须显式提供 `--port`。产品入口各自在产品配置中提供默认端口。通用入口的数据默认保存到 `~/Library/Application Support/YoloAgents/base`。启动控制台显示 Mac / iOS 两个一次性配对码，十分钟过期；客户端按自身平台使用对应配对码。不要把配对码、设备 token、模型 API key 提交仓库或发到共享日志。
 
 本地协议验证可以指定临时或单独的数据目录和端口：
 
 ```sh
-PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --data-dir /tmp/yolo-agents-demo --port 8765
+PYTHONPATH=packages/core-python python3 -m yolo_agents --mode demo --data-dir /tmp/yolo-agents-demo --port 8800
 ```
 
 关闭客户端窗口不会停止独立运行的后端。终端 Ctrl-C / SIGTERM 关闭服务；相同数据目录只允许一个服务实例。重启保留会话、消息、事件和设备授权；Runtime 已保存的完整回复可补齐产品结果，其余未完成回复显示中断，不自动重新执行模型或工具。

@@ -15,12 +15,12 @@ from .service import ChatService
 from .identity import ensure_agent_identity, validate_agent_id
 
 
-def create_parser(description: str | None = None, *, agent_name: str = "base", app_name: str | None = None,
-                  default_port: int = 8765) -> argparse.ArgumentParser:
+def create_parser(description: str | None = None, *, default_port: int | None,
+                  agent_name: str = "base", app_name: str | None = None) -> argparse.ArgumentParser:
     validate_agent_id(agent_name)
     parser = argparse.ArgumentParser(description=description or __doc__)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=default_port)
+    parser.add_argument("--port", type=int, default=default_port, required=default_port is None)
     parser.add_argument("--data-dir", type=Path,
                         default=Path.home() / "Library/Application Support/YoloAgents" / agent_name)
     parser.add_argument("--adopt-existing-data", action="store_true", help="明确接管未标记的旧数据目录")
@@ -53,16 +53,11 @@ def prepare_agent_directory(data_dir, agent_name="base", app_name=None, *, adopt
     caller must not start a broker before this function succeeds.
     """
     directory = Path(data_dir).expanduser().resolve()
-    legacy = (Path.home() / "Library/Application Support/YoloAgents").resolve()
-    if agent_name == "yolo-beni" and directory == legacy and (legacy / "app.sqlite3").exists():
-        raise RuntimeError("YoloBeni cannot adopt the legacy YoloTrade directory.")
-    if (agent_name == "yolo-trade" and directory == legacy / agent_name
-            and (legacy / "app.sqlite3").exists() and not (directory / ".agent-owner.json").exists()):
-        raise RuntimeError("Legacy YoloTrade chat exists. Explicitly use the old --data-dir with --adopt-existing-data, or migrate it before using the new default.")
     return ensure_agent_identity(directory, agent_name, adopt_existing=adopt_existing)
 
 
-def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | None = None) -> int:
+def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | None = None,
+             runtime_capabilities=None) -> int:
     """Run one configured agent host with an optional agent-owned API extension."""
     args.data_dir = args.data_dir.expanduser().resolve()
     args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -83,7 +78,8 @@ def run_host(args, *, extension=None, agent_name: str = "base", app_name: str | 
     store = Store(args.data_dir / "app.sqlite3")
     try:
         runtime = create_runtime(args.mode, args.model, args.data_dir, store, agent_name=agent_name,
-                                 app_name=app_name or agent_name)
+                                 app_name=app_name or agent_name,
+                                 runtime_capabilities=runtime_capabilities)
     except (ImportError, RuntimeError, ValueError) as exc:
         print(f"Agent initialization failed ({type(exc).__name__}); check dependencies and model settings.", file=sys.stderr)
         store.close()

@@ -11,7 +11,7 @@ from .api_extension import TradingAPIExtension
 from .ibkr import IBKRAdapter
 from .ibkr_config import ENV_PREFIX, IBKRConfigurationError, load_ibkr_config
 from .ibkr_lifecycle import IBKRBrokerLifecycle
-from .product import AGENT_ID, DISPLAY_NAME
+from .product import AGENT_ID, DEFAULT_PORT, DISPLAY_NAME, RUNTIME_CAPABILITIES
 
 
 def add_trading_arguments(parser) -> None:
@@ -69,14 +69,16 @@ def run_trading_host(args, broker) -> int:
         if lifecycle is not None:
             extension.prepare_broker_recovery()
             lifecycle.start()
-        return run_host(args, extension=extension, agent_name=AGENT_ID, app_name=DISPLAY_NAME)
+        return run_host(args, extension=extension, agent_name=AGENT_ID, app_name=DISPLAY_NAME,
+                        runtime_capabilities=RUNTIME_CAPABILITIES)
     finally:
         if lifecycle is not None and not lifecycle.close():
             print("IBKR background shutdown could not be confirmed; check Gateway and Host process.", file=sys.stderr)
 
 
 def build_parser():
-    parser = create_parser(__doc__, agent_name=AGENT_ID, app_name=DISPLAY_NAME, default_port=8765)
+    parser = create_parser(__doc__, agent_name=AGENT_ID, app_name=DISPLAY_NAME,
+                           default_port=DEFAULT_PORT)
     parser.set_defaults(mode="chatgpt")
     add_trading_arguments(parser)
     return parser
