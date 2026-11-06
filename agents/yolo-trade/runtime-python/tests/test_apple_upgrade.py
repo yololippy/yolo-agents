@@ -8,6 +8,9 @@ from unittest.mock import Mock
 from yolo_trade.apple_upgrade import (
     AppleUpgradeError, bundle_metadata, replace_ios_app, replace_macos_app, restore_macos_app,
 )
+from yolo_trade.upgrade_test import (
+    UpgradeTestError, exercise_ios_simulator_upgrade, exercise_macos_upgrade, select_simulator,
+)
 
 
 def app_bundle(root: Path, name: str, *, bundle_id: str = "com.yoloagents.yolotrade",
@@ -63,6 +66,46 @@ class DeviceRunner:
             self.apps[metadata.bundle_id] = (metadata.short_version, metadata.build_version)
         output.write_text("{}", encoding="utf-8")
         return Mock(returncode=0)
+
+
+class SimulatorRunner:
+    def __init__(self, root: Path, baseline: Path, candidate: Path):
+        self.root = root
+        self.baseline = baseline
+        self.candidate = candidate
+        self.data = root / "sim-data"
+        self.app = root / "sim-app/YoloTradeIOS.app"
+        self.deleted = False
+
+    def __call__(self, command, **_kwargs):
+        if command[0] == "/usr/bin/codesign":
+            return Mock(returncode=0, stdout=b"")
+        action = command[1]
+        if action == "list" and command[2] == "runtimes":
+            body = {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "isAvailable": True}]}
+            return Mock(returncode=0, stdout=__import__("json").dumps(body).encode())
+        if action == "list" and command[2] == "devicetypes":
+            body = {"devicetypes": [{
+                "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test",
+                "productFamily": "iPhone",
+                "minRuntimeVersionString": "27.0.0",
+                "maxRuntimeVersionString": "65535.255.255",
+            }]}
+            return Mock(returncode=0, stdout=__import__("json").dumps(body).encode())
+        if action == "create":
+            return Mock(returncode=0, stdout=b"fixture-simulator\n")
+        if action == "install":
+            source = Path(command[-1])
+            if self.app.exists():
+                shutil.rmtree(self.app)
+            shutil.copytree(source, self.app)
+            self.data.mkdir(parents=True, exist_ok=True)
+            return Mock(returncode=0, stdout=b"")
+        if action == "get_app_container":
+            return Mock(returncode=0, stdout=(str(self.app if command[-1] == "app" else self.data) + "\n").encode())
+        if action == "delete":
+            self.deleted = True
+        return Mock(returncode=0, stdout=b"")
 
 
 class AppleUpgradeTests(unittest.TestCase):
@@ -158,6 +201,53 @@ class AppleUpgradeTests(unittest.TestCase):
             with self.assertRaises(AppleUpgradeError):
                 replace_ios_app(candidate, "fixture-device", rollback_candidate=rollback, run=runner)
         self.assertEqual(runner.installs, 2)
+
+    def test_isolated_macos_upgrade_removes_old_version_residue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = app_bundle(root / "old", "YoloTrade.app", version="1")
+            candidate = app_bundle(root / "new", "YoloTrade.app", version="2")
+            result = exercise_macos_upgrade(baseline, candidate, root / "exercise", run=apple_runner)
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(result["backup_created"])
+
+    def test_simulator_selection_requires_available_ios_runtime(self):
+        def run(_command, **_kwargs):
+            return Mock(returncode=0, stdout=b'{"runtimes": []}')
+        with self.assertRaises(UpgradeTestError):
+            select_simulator(run=run)
+
+    def test_simulator_selection_ignores_device_types_incompatible_with_latest_runtime(self):
+        def run(command, **_kwargs):
+            if command[2] == "runtimes":
+                body = {"runtimes": [{
+                    "identifier": "runtime-iOS-27-1", "version": "27.1", "isAvailable": True,
+                }]}
+            else:
+                body = {"devicetypes": [
+                    {
+                        "identifier": "iphone-xs-max", "productFamily": "iPhone",
+                        "minRuntimeVersionString": "12.0.0", "maxRuntimeVersionString": "18.99.0",
+                    },
+                    {
+                        "identifier": "iphone-18-pro", "productFamily": "iPhone",
+                        "minRuntimeVersionString": "27.0.0", "maxRuntimeVersionString": "65535.255.255",
+                    },
+                ]}
+            return Mock(returncode=0, stdout=__import__("json").dumps(body).encode())
+
+        self.assertEqual(select_simulator(run=run), ("runtime-iOS-27-1", "iphone-18-pro"))
+
+    def test_isolated_ios_upgrade_preserves_data_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = app_bundle(root / "old", "YoloTradeIOS.app", version="1", platform="ios")
+            candidate = app_bundle(root / "new", "YoloTradeIOS.app", version="2", platform="ios")
+            runner = SimulatorRunner(root, baseline, candidate)
+            result = exercise_ios_simulator_upgrade(baseline, candidate, root / "exercise", run=runner)
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(result["data_preserved"])
+        self.assertTrue(runner.deleted)
 
 
 if __name__ == "__main__":
