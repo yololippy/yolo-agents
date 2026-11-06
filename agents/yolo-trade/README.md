@@ -31,13 +31,13 @@ PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
   .venv/bin/python -m yolo_trade --mode chatgpt
 ```
 
-生产常驻方式使用独立用户级 LaunchAgent；配置必须显式包含 Paper 环境和目标账户，且不得包含登录凭据：
+生产常驻方式使用独立用户级 LaunchAgent；配置必须显式包含 Paper 环境、目标账户、`read_only=false` 和 `execution_enabled=true`，且不得包含登录凭据。安装失败会恢复既有配置和已加载服务，不留下半安装状态：
 
 ```sh
 bin/yolo-trade-host-service install-launch-agent --ibkr-config /path/to/ibkr-paper.json
 ```
 
-Host 异常退出会由 macOS 自动拉起；同一数据目录仍由 `server.lock` 保证单实例。
+Host 异常退出会由 macOS 自动拉起；同一数据目录仍由 `server.lock` 保证单实例。`bin/yolo-trade-host-service status` 还会脱敏核对 LaunchAgent、执行配置、8765 单一监听者和 `yolo-trade` Host 身份。
 
 不调用真实模型或 IBKR 的演示模式：
 
