@@ -1,4 +1,6 @@
 from pathlib import Path
+import fcntl
+import os
 import subprocess
 import sys
 import tempfile
@@ -342,6 +344,51 @@ class FullTestRunnerTests(unittest.TestCase):
             with self.assertRaises(full_test.FullTestAlreadyRunning):
                 with full_test.full_test_lock("fixture-product"):
                     self.fail("nested lock unexpectedly succeeded")
+
+
+class FullTestSharedLockTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "primary"
+        self.root.mkdir()
+        self.root = self.root.resolve()
+        self.linked = self.root.parent / "linked"
+        self.git("init", "-b", "master")
+        self.git("config", "user.name", "Lock Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("commit", "--allow-empty", "-m", "fixture")
+        self.git("worktree", "add", "--detach", str(self.linked), "HEAD")
+
+    def git(self, *arguments):
+        return subprocess.run(["git", *arguments], cwd=self.root, capture_output=True, check=True)
+
+    def test_linked_worktrees_contend_for_the_same_product_lock(self):
+        with full_test.full_test_lock("yolo-trade", root=self.root):
+            with self.assertRaises(full_test.FullTestAlreadyRunning):
+                with full_test.full_test_lock("yolo-trade", root=self.linked):
+                    self.fail("second worktree acquired the same product resource")
+        with full_test.full_test_lock("yolo-trade", root=self.linked):
+            pass  # Lease was released, not a permanent lock-file sentinel.
+
+    def test_full_test_contends_with_ui_runner_flock_and_does_not_touch_other_product(self):
+        directory = self.root / ".git/yolo-agents-pr-gate/locks"
+        with full_test.full_test_lock("yolo-trade", root=self.linked):
+            self.assertEqual({path.name for path in directory.iterdir()}, {"yolo-trade-ui.lock"})
+            descriptor = os.open(directory / "yolo-trade-ui.lock", os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+        self.assertFalse((self.root / ".agents/runtime/yolo-agents-full-test").exists())
+        self.assertFalse((self.linked / ".agents/runtime/yolo-agents-full-test").exists())
+
+    def test_unsafe_lock_product_is_rejected_without_creating_paths(self):
+        with self.assertRaises(full_test.FullTestAlreadyRunning):
+            with full_test.full_test_lock("../other-product", root=self.root):
+                self.fail("unsafe product was accepted")
+        self.assertFalse((self.root / ".git/yolo-agents-pr-gate").exists())
 
 
 if __name__ == "__main__":

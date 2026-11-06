@@ -3,6 +3,6 @@ set -euo pipefail
 
 repo_root="${0:A:h:h}"
 if [[ -x "$repo_root/.venv/bin/python" ]]; then
-  exec "$repo_root/.venv/bin/python" "$repo_root/bin/check_feature_tests.py"
+  exec "$repo_root/.venv/bin/python" "$repo_root/bin/check_feature_tests.py" "$@"
 fi
-exec /usr/bin/env python3 "$repo_root/bin/check_feature_tests.py"
+exec /usr/bin/env python3 "$repo_root/bin/check_feature_tests.py" "$@"
