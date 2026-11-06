@@ -136,6 +136,7 @@ class IBKRAdapter:
         self._client_factory = client_factory
         self._client = None
         self._lock = asyncio.Lock()
+        self._last_symbol_search = None
         self._state = "disconnected"
         self._error = None
         self._attempted = False
@@ -453,12 +454,14 @@ class IBKRAdapter:
                         raise ValueError()
                     request = self._request(value["intent"])
                     contract = value["qualified_contract"]
-                    expected_contract = {"con_id", "symbol", "sec_type", "exchange", "currency"}
+                    expected_contract = set(value["intent"]["contract"]) | {"con_id"}
                     if (not isinstance(contract, dict) or set(contract) != expected_contract
                             or type(contract["con_id"]) is not int or contract["con_id"] <= 0
                             or any(contract.get(key) != request[source] for key, source in (
                                 ("symbol", "symbol"), ("sec_type", "sec_type"),
                                 ("exchange", "exchange"), ("currency", "currency")))):
+                        raise ValueError()
+                    if any(contract.get(key) != request[key] for key in ("con_id", "primary_exchange") if key in request):
                         raise ValueError()
                     broker_id = value["broker_order_id"]
                     order_id = None
@@ -588,12 +591,26 @@ class IBKRAdapter:
         if (self._client is None or not health.get("connected") or not health.get("ready")
                 or not health.get("data_complete") or not self._account_verified):
             raise IBKROperationError("broker_not_ready", "IBKR 连接或启动对账尚未就绪。")
-        if self.config.account not in self._client.managedAccounts():
+        self._verify_current_target()
+
+    def _verify_current_target(self):
+        try:
+            accounts = self._client.managedAccounts()
+            unique = isinstance(accounts, (list, tuple)) and sum(account == self.config.account for account in accounts) == 1
+        except Exception:
+            unique = False
+        if not unique:
             self._account_verified = False
             raise IBKROperationError("account_mismatch", "当前连接不再包含目标账户。")
 
-    @staticmethod
-    def _position_row(row):
+    def _public_text(self, value, pattern, maximum):
+        if (not isinstance(value, str) or len(value) > maximum or not value
+                or re.fullmatch(pattern, value) is None or (self.config.account and self.config.account in value)
+                or re.search(r"\b(?:DU|DUR|U)[0-9]{5,}\b", value)):
+            return None
+        return value
+
+    def _position_row(self, row):
         contract = getattr(row, "contract", None)
         quantity = _decimal_text(getattr(row, "position", None))
         average_cost = _decimal_text(getattr(row, "avgCost", None), nonnegative=True)
@@ -602,13 +619,64 @@ class IBKRAdapter:
         sec_type = getattr(contract, "secType", None)
         currency = getattr(contract, "currency", None)
         exchange = getattr(contract, "exchange", None) or getattr(contract, "primaryExchange", None)
-        if (not isinstance(symbol, str) or not symbol or type(con_id) is not int or con_id <= 0
-                or not isinstance(sec_type, str) or not sec_type or not isinstance(currency, str)
-                or not currency or quantity is None or average_cost is None):
+        if (not self._public_text(symbol, r"[A-Z0-9 ._-]+", 32) or type(con_id) is not int or con_id <= 0
+                or not self._public_text(sec_type, r"[A-Z]+", 12)
+                or not self._public_text(currency, r"[A-Z]+", 8) or quantity is None or average_cost is None):
             return None
         return {"symbol": symbol[:32], "con_id": con_id, "sec_type": sec_type[:12],
-                "exchange": exchange[:24] if isinstance(exchange, str) and exchange else None,
+                "exchange": self._public_text(exchange, r"[A-Z0-9.]+", 24),
+                "primary_exchange": self._public_text(getattr(contract, "primaryExchange", None), r"[A-Z0-9.]+", 24),
                 "currency": currency[:8], "quantity": quantity, "average_cost": average_cost}
+
+    def _stock_identity(self, contract):
+        con_id = getattr(contract, "conId", None)
+        symbol = self._public_text(getattr(contract, "symbol", None), r"[A-Z][A-Z0-9.]*", 15)
+        primary = self._public_text(getattr(contract, "primaryExchange", None), r"[A-Z][A-Z0-9.]*", 24)
+        if (type(con_id) is not int or not 0 < con_id <= 2147483647 or not symbol or not primary
+                or getattr(contract, "secType", None) != "STK" or getattr(contract, "currency", None) != "USD"):
+            return None
+        return {"con_id": con_id, "symbol": symbol, "primary_exchange": primary,
+                "sec_type": "STK", "exchange": "SMART", "currency": "USD"}
+
+    async def search_instruments(self, query, *, timeout=5.0):
+        self._assert_owner()
+        timeout = _timeout(timeout)
+        if (not isinstance(query, str) or not 1 <= len(query) <= 64 or query != query.strip()
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .&'/-]*", query) is None):
+            raise IBKROperationError("invalid_search", "请输入 1 至 64 位股票代码或英文名称。")
+        async with self._lock:
+            self._read_guard()
+            loop = asyncio.get_running_loop()
+            if self._last_symbol_search is not None:
+                delay = max(0, self._last_symbol_search + 1.0 - loop.time())
+                if delay >= timeout:
+                    raise IBKROperationError("search_throttled", "搜索过于频繁，请稍后重试。")
+                await asyncio.sleep(delay)
+                timeout -= delay
+            self._read_guard()
+            self._last_symbol_search = loop.time()
+            try:
+                rows = await asyncio.wait_for(self._client.reqMatchingSymbolsAsync(query), timeout)
+            except Exception:
+                raise IBKROperationError("search_unavailable", "股票搜索失败或超时。") from None
+            self._read_guard()
+            if not isinstance(rows, (list, tuple)):
+                raise IBKROperationError("search_unavailable", "股票搜索返回格式无效。")
+            instruments, seen = [], set()
+            for row in rows[:16]:
+                contract = getattr(row, "contract", None)
+                identity = self._stock_identity(contract)
+                if identity is None or identity["con_id"] in seen:
+                    continue
+                seen.add(identity["con_id"])
+                name = self._public_text(getattr(contract, "description", None), r"[^\x00-\x1f\x7f]+", 160)
+                instruments.append({**identity, "name": name})
+            return {"instruments": instruments, "count": len(instruments), "as_of": datetime.now(timezone.utc).isoformat()}
+
+    async def instrument_quote(self, con_id, *, timeout=5.0):
+        if type(con_id) is not int or not 0 < con_id <= 2147483647:
+            raise IBKROperationError("invalid_contract", "合约 ID 无效。")
+        return await self.market_quote(None, timeout=timeout, con_id=con_id)
 
     @staticmethod
     def _open_order_row(trade):
@@ -626,8 +694,13 @@ class IBKRAdapter:
                 or side not in ("BUY", "SELL") or quantity is None or limit_price is None
                 or filled is None):
             return None
+        reference = getattr(order, "orderRef", None)
+        try:
+            reference = str(UUID(reference)) if isinstance(reference, str) else None
+        except ValueError:
+            reference = None
         return {
-            "broker_order_id": str(broker_id), "symbol": symbol[:32], "side": side,
+            "broker_order_id": str(broker_id), "order_ref": reference, "symbol": symbol[:32], "side": side,
             "quantity": quantity, "filled_quantity": filled, "remaining_quantity": remaining,
             "limit_price": limit_price, "average_fill_price": average,
             "status": str(getattr(status, "status", "Unknown"))[:32],
@@ -639,13 +712,13 @@ class IBKRAdapter:
             "currency": (getattr(contract, "currency", None) or None),
         }
 
-    async def market_quote(self, symbol, *, timeout=5.0):
+    async def market_quote(self, symbol, *, timeout=5.0, con_id=None):
         """Return entitlement-aware top-of-book data without paid snapshots."""
         self._assert_owner()
-        symbol, timeout = _symbol(symbol), _timeout(timeout)
+        symbol, timeout = _symbol(symbol) if con_id is None else None, _timeout(timeout)
         async with self._lock:
             self._read_guard()
-            contract = await self._qualify({"symbol": symbol}, timeout)
+            contract = await self._qualify({"symbol": symbol} if con_id is None else {"con_id": con_id}, timeout)
             self._read_guard()
             ticker = None
             try:
@@ -659,13 +732,15 @@ class IBKRAdapter:
                     data_type = getattr(ticker, "marketDataType", None)
                     values = {name: _decimal_text(getattr(ticker, name, None), positive=True)
                               for name in ("bid", "ask", "last", "close")}
-                    if data_type in (1, 2, 3, 4) and any(values.values()):
+                    if type(data_type) is int and data_type in (1, 2, 3, 4) and any(values.values()):
                         break
                     await asyncio.sleep(min(0.05, max(0.001, deadline - asyncio.get_running_loop().time())))
                 else:
                     raise IBKROperationError("market_data_unavailable", "在时限内未收到可用行情。")
                 labels = {1: "live", 2: "frozen", 3: "delayed", 4: "delayed_frozen"}
-                return {"symbol": symbol, "con_id": contract.conId, "exchange": contract.exchange,
+                self._read_guard()
+                return {"symbol": contract.symbol, "con_id": contract.conId, "exchange": contract.exchange,
+                        **({"primary_exchange": contract.primaryExchange, "sec_type": "STK"} if con_id is not None else {}),
                         "currency": contract.currency, "data_type": labels[data_type], **values,
                         "as_of": datetime.now(timezone.utc).isoformat()}
             except IBKROperationError:
@@ -692,7 +767,23 @@ class IBKRAdapter:
                 raise IBKROperationError("positions_unavailable", "持仓返回格式无效。")
             result = [self._position_row(row) for row in rows
                       if getattr(row, "account", None) == self.config.account]
-            result = sorted((row for row in result if row is not None), key=lambda row: (row["symbol"], row["con_id"]))[:500]
+            self._read_guard()
+            if len(result) > 500 or any(row is None for row in result):
+                raise IBKROperationError("positions_unavailable", "目标账户持仓不完整或数值无效。")
+            # Portfolio values are optional cache observations; absence is explicit.
+            portfolio = getattr(self._client, "portfolio", None)
+            try:
+                portfolio_rows = portfolio(self.config.account) if callable(portfolio) else []
+                values = {getattr(getattr(row, "contract", None), "conId", None): row
+                          for row in portfolio_rows if getattr(row, "account", None) == self.config.account}
+            except Exception:
+                raise IBKROperationError("positions_unavailable", "持仓市值读取失败。") from None
+            for row in result:
+                value = values.get(row["con_id"])
+                for field, attr in (("market_price", "marketPrice"), ("market_value", "marketValue"),
+                                    ("unrealized_pnl", "unrealizedPNL"), ("realized_pnl", "realizedPNL")):
+                    row[field] = _decimal_text(getattr(value, attr, None))
+            result.sort(key=lambda row: (row["symbol"], row["con_id"]))
             return {"positions": result, "count": len(result), "as_of": datetime.now(timezone.utc).isoformat()}
 
     async def open_orders_detail(self, *, broker_order_id=None, timeout=5.0):
@@ -773,7 +864,10 @@ class IBKRAdapter:
         before = self.paper_order_snapshot()
         context = {key: before.get(key) for key in ("config_id", "session_id")}
         per_read = max(1.0, min(5.0, timeout / 4))
-        quote = await self.market_quote(symbol, timeout=per_read)
+        quote = (await self.instrument_quote(intent["contract"]["con_id"], timeout=per_read)
+                 if "con_id" in intent["contract"] else await self.market_quote(symbol, timeout=per_read))
+        if "con_id" in intent["contract"] and any(quote.get(key) != value for key, value in intent["contract"].items()):
+            raise IBKROperationError("risk_data_unavailable", "风控行情与精确合约不一致。")
         positions = await self.positions_detail(timeout=per_read)
         open_orders = await self.open_orders_detail(timeout=per_read)
         account = await self.account_risk_detail(timeout=per_read)
@@ -829,21 +923,26 @@ class IBKRAdapter:
         if not all(ready[key] for key in ("account_verified", "permissions_verified", "environment_verified",
                                          "execution_enabled", "connected", "data_complete")):
             raise IBKROperationError("broker_not_ready", "账户、环境、连接或必需对账尚未满足要求。")
-        if self.config.account not in self._client.managedAccounts():
-            self._account_verified = False
-            raise IBKROperationError("account_mismatch", "当前连接不再包含目标账户。")
+        self._verify_current_target()
 
     def _request(self, intent):
         allowed = {"account_selection", "contract", "side", "quantity", "limit_price", "tif", "order_type"}
         if not isinstance(intent, dict) or set(intent) != allowed:
             raise IBKROperationError("unsupported_order_field", "订单意图包含未知或缺失字段。")
         contract = intent["contract"]
-        if not isinstance(contract, dict) or set(contract) != {"symbol", "sec_type", "exchange", "currency"}:
+        fields = {"symbol", "sec_type", "exchange", "currency"}
+        if not isinstance(contract, dict) or set(contract) not in (fields, fields | {"con_id", "primary_exchange"}):
             raise IBKROperationError("unsupported_contract", "只接受明确的股票合约字段。")
         if intent["account_selection"] != self.config.config_id:
             raise IBKROperationError("account_selection_mismatch", "账户选择与当前配置不一致。")
-        return normalize_order({**contract, "action": intent["side"], "quantity": intent["quantity"],
-                                "limit_price": intent["limit_price"], "tif": intent["tif"], "order_type": intent["order_type"]})
+        request = normalize_order({**{key: contract[key] for key in fields}, "action": intent["side"], "quantity": intent["quantity"],
+                                   "limit_price": intent["limit_price"], "tif": intent["tif"], "order_type": intent["order_type"]})
+        if "con_id" in contract:
+            if (type(contract["con_id"]) is not int or not 0 < contract["con_id"] <= 2147483647
+                    or not self._public_text(contract["primary_exchange"], r"[A-Z][A-Z0-9.]*", 24)):
+                raise IBKROperationError("unsupported_contract", "精确合约身份无效。")
+            request.update(con_id=contract["con_id"], primary_exchange=contract["primary_exchange"])
+        return request
 
     def _types(self):
         if self._contract_factory is None or self._order_factory is None:
@@ -853,7 +952,9 @@ class IBKRAdapter:
 
     async def _qualify(self, request, timeout):
         contract_type, _ = self._types()
-        query = contract_type(symbol=request["symbol"], secType="STK", exchange="SMART", currency="USD")
+        query = contract_type(secType="STK", exchange="SMART", currency="USD", **(
+            {"conId": request["con_id"], **({"primaryExchange": request["primary_exchange"]} if "primary_exchange" in request else {})}
+            if "con_id" in request else {"symbol": request["symbol"]}))
         try:
             details = await asyncio.wait_for(self._client.reqContractDetailsAsync(query), timeout)
         except Exception:
@@ -862,9 +963,12 @@ class IBKRAdapter:
             raise IBKROperationError("contract_not_unique", "必须恰好匹配一个 ContractDetails。")
         contract = deepcopy(getattr(details[0], "contract", None))
         if (contract is None or type(getattr(contract, "conId", None)) is not int or contract.conId <= 0
-                or getattr(contract, "symbol", None) != request["symbol"] or getattr(contract, "secType", None) != "STK"
+                or ("symbol" in request and getattr(contract, "symbol", None) != request["symbol"]) or getattr(contract, "secType", None) != "STK"
                 or getattr(contract, "currency", None) != "USD" or getattr(contract, "exchange", None) != "SMART"):
             raise IBKROperationError("invalid_qualified_contract", "返回合约的唯一标识或股票/路由/币种不一致。")
+        if "con_id" in request and (self._stock_identity(contract) is None or contract.conId != request["con_id"]
+                or ("primary_exchange" in request and contract.primaryExchange != request["primary_exchange"])):
+            raise IBKROperationError("invalid_qualified_contract", "返回合约与精确合约身份不一致。")
         return contract
 
     @staticmethod
@@ -900,7 +1004,10 @@ class IBKRAdapter:
             complete = all(value is not None for value in numbers.values()) and currency == "USD"
             accepted = (complete and numbers["commission"] >= 0 and not getattr(state, "warningText", "")
                         and getattr(state, "status", "") not in ("Inactive", "Cancelled", "ApiCancelled"))
-            result = {"qualified_contract": self._contract_snapshot(contract), "context": dict(context),
+            identity = self._contract_snapshot(contract)
+            if "con_id" in request:
+                identity["primary_exchange"] = contract.primaryExchange
+            result = {"qualified_contract": identity, "context": dict(context),
                       "what_if": {"complete": complete, "accepted": bool(accepted), "currency": currency if currency == "USD" else None,
                                   **{key: _broker_amount_text(value) if value is not None else None
                                      for key, value in numbers.items()}}}
@@ -927,6 +1034,11 @@ class IBKRAdapter:
                     or preview.get("what_if") != saved["result"]["what_if"] or preview.get("context") != context
                     or saved["result"]["context"] != context):
                 raise IBKROperationError("preview_required", "需要当前配置、会话和订单内容对应的有效 What-if 预览。")
+            identity = self._contract_snapshot(saved["contract"])
+            if "con_id" in request:
+                identity["primary_exchange"] = getattr(saved["contract"], "primaryExchange", None)
+            if identity != saved["result"]["qualified_contract"]:
+                raise IBKROperationError("preview_required", "预览合约身份已变化，需要重新预览。")
             if self._unresolved_recovery_refs or any(row["status"] == "unknown" for row in self._orders.values()):
                 raise IBKROperationError("unresolved_order", "已有结果未知的订单，先对账再提交新订单。")
             try:

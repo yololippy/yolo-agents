@@ -201,6 +201,8 @@ class RiskPolicy:
         data_type = quote.get("data_type")
         if quote.get("symbol") != symbol or data_type not in self.allowed_market_data_types:
             raise RiskPolicyError("risk_market_data_not_allowed")
+        if "con_id" in contract and any(quote.get(key) != value for key, value in contract.items()):
+            raise RiskPolicyError("risk_data_invalid")
         reference = _decimal(quote.get("ask") if side == "BUY" else quote.get("bid"), positive=True)
         limit_price = _decimal(intent.get("limit_price"), positive=True)
         order_notional = limit_price * quantity

@@ -10,12 +10,15 @@ struct PaperOrdersView: View {
     private let proposal: PaperOrderProposal?
     private let selectedOrderID: UUID?
     @Environment(\.dismiss) private var dismiss
-    #if os(macOS)
     @OrderViewState private var reviewing = false
-    #endif
+    private let contract: PaperStockContract?
+    private let initialSide: PaperOrderSide
+    private let quote: TradeQuote?
 
     init(connection: PairedConnection, proposal: PaperOrderProposal? = nil, selectedOrderID: UUID? = nil,
-         presentation: AgentContentPresentation = .modal) {
+         presentation: AgentContentPresentation = .modal, contract: PaperStockContract? = nil,
+         side: PaperOrderSide = .buy, quote: TradeQuote? = nil) {
+        self.contract = contract; initialSide = side; self.quote = quote
         self.presentation = presentation
         self.proposal = proposal
         self.selectedOrderID = selectedOrderID
@@ -23,46 +26,41 @@ struct PaperOrdersView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $model.selectedID) {
-                #if os(macOS)
-                if model.canManage {
-                    Button { model.newTicket() } label: { Label("新建 Paper 草稿", systemImage: "plus") }
-                        .disabled(model.isWriting).accessibilityIdentifier("orders.new-draft")
-                }
-                #endif
-                ForEach(model.orders) { order in
-                    NavigationLink(value: order.id) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("\(order.side.rawValue) \(order.contract.symbol)").font(.headline)
-                            Text("\(order.quantity) 股 · 限价 \(order.limitPrice) USD").font(.caption)
-                            Text(order.state.label).font(.caption).foregroundStyle(order.state.isUnresolved ? .orange : .secondary)
-                        }.padding(.vertical, 4)
-                    }.accessibilityIdentifier("orders.row.\(order.id.uuidString)")
-                }
-            }
-            .navigationTitle("Paper 订单")
-        } detail: {
-            VStack(spacing: 0) {
-                notices
-                if let order = model.currentOrder {
-                    orderDetail(order)
-                } else if model.selectedID != nil {
-                    ContentUnavailableView {
-                        Label("正在读取已有 Paper 草稿", systemImage: "doc.text.magnifyingglass")
-                    } description: {
-                        Text("只会读取服务端已有订单；读取失败时不会创建替代草稿。")
-                    }.accessibilityIdentifier("orders.existing-draft-loading")
+        Group {
+            #if os(iOS)
+            NavigationStack {
+                if model.currentOrder != nil || model.selectedID != nil || contract != nil {
+                    orderContent
                 } else {
-                    #if os(macOS)
-                    if model.canManage { PaperOrderTicket(model: model, proposal: proposal) }
-                    else { readOnlyPlaceholder }
-                    #else
-                    readOnlyPlaceholder
-                    #endif
+                    List(model.orders) { order in
+                        Button { model.selectedID = order.id } label: {
+                            VStack(alignment: .leading) {
+                                Text("\(order.side.rawValue) \(order.contract.symbol) · \(order.quantity) 股")
+                                Text(order.state.label).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
             }
-            .navigationTitle(model.currentOrder.map { "\($0.contract.symbol) · Paper" } ?? "Paper 订单")
+            #else
+            NavigationSplitView {
+                List(selection: $model.selectedID) {
+                    if model.canManage {
+                        Button { model.newTicket() } label: { Label("新建 Paper 草稿", systemImage: "plus") }
+                            .disabled(model.isWriting).accessibilityIdentifier("orders.new-draft")
+                    }
+                    ForEach(model.orders) { order in
+                        NavigationLink(value: order.id) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("\(order.side.rawValue) \(order.contract.symbol)").font(.headline)
+                                Text("\(order.quantity) 股 · 限价 \(order.limitPrice) USD").font(.caption)
+                                Text(order.state.label).font(.caption).foregroundStyle(order.state.isUnresolved ? .orange : .secondary)
+                            }.padding(.vertical, 4)
+                        }.accessibilityIdentifier("orders.row.\(order.id.uuidString)")
+                    }
+                }.navigationTitle("订单")
+            } detail: { orderContent }
+            #endif
         }
         .toolbar {
             if presentation.showsDismissAction {
@@ -84,6 +82,7 @@ struct PaperOrdersView: View {
         .task(id: model.selectedID) { await model.loadSelected() }
         #if os(macOS)
         .frame(minWidth: 860, idealWidth: 1000, minHeight: 660)
+        #endif
         .confirmationDialog(model.review?.title ?? "核对 Paper 订单", isPresented: $reviewing,
                             titleVisibility: .visible) {
             if let review = model.review {
@@ -93,20 +92,40 @@ struct PaperOrdersView: View {
             }
             Button("返回", role: .cancel) { model.discardReview() }
         } message: { Text(model.review?.summary ?? "") }
+    }
+
+    private var orderContent: some View {
+        VStack(spacing: 0) {
+            notices
+            if let order = model.currentOrder { orderDetail(order) }
+            else if model.selectedID != nil {
+                ContentUnavailableView("正在读取已有 Paper 草稿", systemImage: "doc.text.magnifyingglass",
+                                       description: Text("读取失败时不会创建替代草稿。"))
+            } else if model.canManage && (contract != nil || model.isDeviceManager) {
+                PaperOrderTicket(model: model, proposal: proposal, contract: contract, side: initialSide, quote: quote)
+            } else { readOnlyPlaceholder }
+        }
+        .navigationTitle(model.currentOrder.map { "\($0.contract.symbol) · Paper" } ?? "Paper 订单")
+        #if os(iOS)
+        .toolbar {
+            if contract == nil && model.selectedID != nil {
+                ToolbarItem(placement: .topBarLeading) { Button("订单列表") { model.newTicket() } }
+            }
+        }
         #endif
     }
 
     private var readOnlyPlaceholder: some View {
         ContentUnavailableView {
             Label("只读订单历史", systemImage: "list.bullet.rectangle")
-        } description: { Text("选择订单查看状态、预览和事件。Paper 订单操作请在有管理权限的 Mac 上进行。") }
+        } description: { Text("选择订单查看状态、预览和事件。iPhone 请先由 Mac 的“交易 → 设备授权”开启 Paper 交易，然后从持仓或搜索选择股票。") }
             .accessibilityIdentifier("orders.read-only")
     }
 
     private var notices: some View {
         VStack(alignment: .leading, spacing: 8) {
             #if os(iOS)
-            Label("此设备只读 · 状态以 Mac 服务端为准", systemImage: "eye")
+            Label(model.canManage ? "已授权 Paper 交易 · Mac Host 执行风控与提交" : "未授权交易 · 请由 Mac 在交易页面授权此 iPhone", systemImage: model.canManage ? "checkmark.shield" : "eye")
                 .accessibilityIdentifier("orders.read-only")
             #endif
             if model.isRefreshing || model.isWriting {
@@ -141,7 +160,7 @@ struct PaperOrdersView: View {
                 LabeledContent("方向", value: order.side == .buy ? "买入 BUY" : "卖出 SELL")
                 LabeledContent("数量", value: "\(order.quantity) 股")
                 LabeledContent("限价", value: "\(order.limitPrice) USD")
-                LabeledContent("合约", value: "STK / SMART / USD")
+                LabeledContent("合约", value: "STK / SMART / USD · \(order.contract.primaryExchange ?? "未提供主交易所") · conId \(order.contract.conID.map(String.init) ?? "未提供")")
                 LabeledContent("类型与有效期", value: "LMT / DAY")
                 LabeledContent("版本", value: String(order.version))
             }
@@ -152,13 +171,21 @@ struct PaperOrdersView: View {
                     LabeledContent("维持保证金变动", value: "\(preview.whatIf.maintenanceMarginChange) \(preview.whatIf.currency)")
                     LabeledContent("佣金估算", value: "\(preview.whatIf.commission) \(preview.whatIf.currency)")
                     LabeledContent("预览有效至") { Text(preview.expiresAt.date, format: .dateTime) }
+                    LabeledContent("订单名义金额", value: preview.risk?.metrics.orderNotional ?? "未提供")
+                    LabeledContent("预计总风险敞口", value: preview.risk?.metrics.projectedGrossExposure ?? "未提供")
+                    LabeledContent("总敞口上限", value: preview.risk?.metrics.projectedGrossExposureLimit ?? "未提供")
+                    LabeledContent("股票集中度 %", value: preview.risk?.metrics.symbolConcentrationPercent ?? "未提供")
+                    LabeledContent("当日已提交金额", value: preview.risk?.metrics.dailySubmittedNotional ?? "未提供")
+                    LabeledContent("报价偏差 %", value: preview.risk?.metrics.quoteDeviationPercent ?? "未提供")
+                    LabeledContent("风控参考价", value: preview.risk?.metrics.referencePrice ?? "未提供")
+                    LabeledContent("风控行情类型", value: preview.risk?.marketDataType ?? "未提供")
+                    LabeledContent("风控评估时间", value: preview.risk?.evaluatedAt.formatted() ?? "未提供")
                     Text("保证金与佣金为服务端返回的预估，最终结果以成交记录为准。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }.accessibilityIdentifier("orders.preview-details")
             }
-            #if os(macOS)
+            if let quote { Section("参考行情（不会填入限价）") { TradeQuoteView(quote: quote) } }
             if model.canManage { macActions(order) }
-            #endif
             Section("事件历史") {
                 if let detail = model.detail, detail.order.id == order.id {
                     ForEach(detail.events) { event in
@@ -181,7 +208,7 @@ struct PaperOrdersView: View {
             flowRow(2, "获取 What-if", complete: order.preview != nil, current: [.draft, .previewing].contains(order.state))
             flowRow(3, "确认 What-if 并授权提交", complete: order.confirmation != nil, current: order.state == .proposed)
             flowRow(4, "提交 Paper 订单", complete: ![.draft, .previewing, .proposed, .confirmed].contains(order.state), current: order.state == .confirmed)
-            Text("Mac 会先获取 What-if；你明确确认一次后，应用会连续完成确认与 Paper 提交。聊天模型无法自行执行。")
+            Text("先获取 What-if；你明确确认一次后，Mac Host 复核权限与风控并完成 Paper 提交。聊天模型无法自行执行。")
                 .font(.footnote).foregroundStyle(.secondary)
         }.accessibilityIdentifier("orders.confirmation-flow")
     }
@@ -201,7 +228,6 @@ struct PaperOrdersView: View {
         }
     }
 
-    #if os(macOS)
     private func macActions(_ order: PaperOrder) -> some View {
         Section("分步操作") {
             if !model.executionReady {
@@ -245,25 +271,26 @@ struct PaperOrdersView: View {
             }
         }
     }
-    #endif
 }
 
-#if os(macOS)
 private struct PaperOrderTicket: View {
     @ObservedObject var model: PaperOrdersModel
     let proposal: PaperOrderProposal?
+    let contract: PaperStockContract?
+    let quote: TradeQuote?
     @OrderViewState private var symbol = ""
     @OrderViewState private var side: PaperOrderSide = .buy
     @OrderViewState private var quantity = ""
     @OrderViewState private var limitPrice = ""
 
-    init(model: PaperOrdersModel, proposal: PaperOrderProposal?) {
+    init(model: PaperOrdersModel, proposal: PaperOrderProposal?, contract: PaperStockContract?, side: PaperOrderSide, quote: TradeQuote?) {
+        self.contract = contract; self.quote = quote
         self.model = model
         self.proposal = proposal
-        _symbol = OrderViewState(initialValue: proposal?.symbol ?? "")
-        _side = OrderViewState(initialValue: proposal?.side ?? .buy)
+        _symbol = OrderViewState(initialValue: contract?.symbol ?? proposal?.symbol ?? "")
+        _side = OrderViewState(initialValue: proposal?.side ?? side)
         _quantity = OrderViewState(initialValue: proposal?.quantity.map(String.init) ?? "")
-        _limitPrice = OrderViewState(initialValue: proposal?.limitPrice ?? "")
+        _limitPrice = OrderViewState(initialValue: contract.map { PaperQuickTicket(contract: $0, side: side).limitPrice } ?? proposal?.limitPrice ?? "")
     }
 
     private var issues: [String] {
@@ -292,7 +319,12 @@ private struct PaperOrderTicket: View {
                         .foregroundStyle(.orange).accessibilityIdentifier("orders.ticket.from-proposal")
                 }
                 LabeledContent("账户", value: model.accountSelection == nil ? "服务端尚未提供 Paper 配置" : "服务端已配置的 Paper 账户")
-                TextField("股票代码，例如 AAPL", text: $symbol).accessibilityIdentifier("orders.ticket.symbol")
+                if let contract {
+                    LabeledContent("固定合约", value: "\(contract.symbol) · \(contract.primaryExchange ?? "未提供") · conId \(contract.conID.map(String.init) ?? "未提供")")
+                } else {
+                    TextField("股票代码，例如 AAPL", text: $symbol).accessibilityIdentifier("orders.ticket.symbol")
+                }
+                if let quote { TradeQuoteView(quote: quote) }
                 Picker("方向", selection: $side) {
                     Text("买入 BUY").tag(PaperOrderSide.buy)
                     Text("卖出 SELL").tag(PaperOrderSide.sell)
@@ -306,8 +338,13 @@ private struct PaperOrderTicket: View {
                         ForEach(issues, id: \.self) { Label($0, systemImage: "exclamationmark.circle") }
                     }.font(.caption).foregroundStyle(.orange).accessibilityIdentifier("orders.ticket.issues")
                 }
-                Button("创建草稿") {
-                    Task { await model.createDraft(symbol: symbol, side: side, quantity: quantity, limitPrice: limitPrice) }
+                Button(contract == nil ? "创建草稿" : "创建草稿并获取 What-if") {
+                    Task {
+                        if let contract {
+                            await model.createDraft(contract: contract, side: side, quantity: quantity, limitPrice: limitPrice)
+                            if model.actionError == nil { await model.previewCurrentOrder() }
+                        } else { await model.createDraft(symbol: symbol, side: side, quantity: quantity, limitPrice: limitPrice) }
+                    }
                 }.disabled(!model.canCreateDraft || !issues.isEmpty).accessibilityIdentifier("orders.ticket.create")
                 Text("创建后获取 What-if；核对合约、保证金和佣金并确认一次，应用会继续提交。")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -315,4 +352,3 @@ private struct PaperOrderTicket: View {
         }.formStyle(.grouped)
     }
 }
-#endif

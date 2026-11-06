@@ -48,6 +48,16 @@ class PaperOrderStore:
                     payload TEXT NOT NULL, created_at TEXT NOT NULL)""",
                 """CREATE UNIQUE INDEX IF NOT EXISTS paper_one_active_intent ON paper_orders(user_id, intent_key)
                     WHERE state IN ('submitting','unknown','accepted','working','partial','cancel_pending')""",
+                """CREATE TABLE IF NOT EXISTS paper_device_grants (
+                    device_id TEXT PRIMARY KEY, granted_by TEXT NOT NULL,
+                    granted_at TEXT NOT NULL, revoked_at TEXT)""",
+                """CREATE TABLE IF NOT EXISTS paper_reservations (
+                    order_id TEXT PRIMARY KEY REFERENCES paper_orders(id),
+                    account_selection TEXT NOT NULL, notional TEXT NOT NULL,
+                    created_at TEXT NOT NULL)""",
+                """CREATE TABLE IF NOT EXISTS paper_submission_guard (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    order_id TEXT NOT NULL REFERENCES paper_orders(id))""",
             ):
                 db.execute(statement)
             if row is None:

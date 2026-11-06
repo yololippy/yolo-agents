@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import YoloAgentsSDK
 
@@ -18,6 +17,13 @@ public struct PaperOrderDraftRequest: Encodable, Equatable, Sendable {
         }
         self.clientRequestID = clientRequestID; self.accountSelection = accountSelection
         contract = try PaperStockContract(symbol: symbol); self.side = side; self.quantity = quantity; self.limitPrice = limitPrice
+    }
+    public init(clientRequestID: UUID, accountSelection: PaperAccountSelection, contract: PaperStockContract,
+                side: PaperOrderSide, quantity: Int, limitPrice: String) throws {
+        guard contract.conID != nil, contract.primaryExchange != nil, (1...100_000).contains(quantity),
+              PaperOrder.validLimitPrice(limitPrice) else { throw PaperOrderValidationError.invalidInput }
+        self.clientRequestID = clientRequestID; self.accountSelection = accountSelection; self.contract = contract
+        self.side = side; self.quantity = quantity; self.limitPrice = limitPrice
     }
     enum CodingKeys: String, CodingKey {
         case contract, side, quantity, tif
@@ -85,13 +91,15 @@ public struct PaperOrderCancelRequest: Encodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey { case version; case clientRequestID = "client_request_id", contentHash = "content_hash", userAction = "user_action" }
 }
 
-/// Intentionally absent from iOS builds. The service still reauthenticates every mutation.
+/// The Host reauthenticates and checks the product-specific grant for every mutation.
 public struct PaperOrderWriter: Sendable {
     private let client: APIClient
-    public init(connection: PairedConnection, transport: any HTTPTransport = URLSessionTransport()) throws {
+    public init(connection: PairedConnection, authorization: TradeDeviceAuthorization? = nil, transport: any HTTPTransport = URLSessionTransport()) throws {
         guard connection.agentID == nil || connection.agentID == YoloTradeProduct.agentID else { throw ClientError.agentIdentityMismatch }
-        guard connection.pairing.device.platform == .macos, connection.pairing.device.revokedAt == nil,
-              connection.pairing.device.permissions.contains("devices:manage") else { throw PaperOrderValidationError.permissionDenied }
+        let device = connection.pairing.device
+        let manager = device.platform == .macos && device.permissions.contains("devices:manage")
+        let phone = device.platform == .ios && authorization?.deviceID == device.id && authorization?.permitsPhonePaper == true
+        guard device.revokedAt == nil, manager || phone else { throw PaperOrderValidationError.permissionDenied }
         client = APIClient(endpoint: connection.endpoint, token: connection.pairing.token, transport: transport)
     }
     public func createDraft(_ request: PaperOrderDraftRequest) async throws -> PaperOrder {
@@ -114,4 +122,3 @@ public struct PaperOrderWriter: Sendable {
         return response.order
     }
 }
-#endif

@@ -4,13 +4,19 @@
 
 | 方法与路径 | 请求 | 响应 |
 | --- | --- | --- |
+| `GET /v1/positions` | 已配对设备；无查询参数 | `{positions,count,as_of}`；目标账户的脱敏持仓、价格、市值和损益 |
+| `GET /v1/instruments/search?q=...` | 已配对设备；1–64 字符 | `{instruments,count,as_of}`；最多 16 个 USD 股票精确候选 |
+| `GET /v1/instruments/{con_id}/quote` | 已配对设备；无查询参数 | `{quote}`；精确合约的参考行情，不自动填写限价 |
+| `GET /v1/paper-trading/authorization` | 已配对设备 | `{authorization:{device_id,paper_trading_enabled,authorization_revision}}` |
+| `GET /v1/paper-trading/devices` | Mac 管理凭据 | 已配对 iPhone 及各自 Paper 交易授权状态和修订 |
+| `POST /v1/paper-trading/devices/{id}` | Mac 管理凭据；`{enabled:boolean}` | 授予或撤销该 iPhone 的产品私有 Paper 交易权限并生成新修订 |
 | `GET /v1/orders` | 已配对设备；无查询参数 | `{orders:[order]}`；最多最近 100 条脱敏订单 |
 | `GET /v1/orders/{id}` | 已配对设备；无查询参数 | `{order,events:[{seq,type,state,error_code,created_at}]}`；最多 500 条订单事件 |
-| `POST /v1/orders` | Mac 管理凭据；草稿请求，见下文 | 201 `{order}`；相同请求重试返回原响应 |
-| `POST /v1/orders/{id}/preview` | Mac；`{client_request_id,version,content_hash}` | `{order}`；硬风控＋qualify＋what-if，成功为 proposed |
-| `POST /v1/orders/{id}/confirm` | Mac；绑定版本、hash、preview、期限和明确动作 | `{order}`；confirmed，不自动提交 |
-| `POST /v1/orders/{id}/submit` | 同一确认 Mac；绑定 confirmation_id 与明确动作 | `{order}`；先落库 submitting，再调用券商一次 |
-| `POST /v1/orders/{id}/cancel` | Mac；绑定版本、hash 和明确撤单动作 | `{order}`；先落库 cancel_pending，只撤本单 |
+| `POST /v1/orders` | Mac 管理设备或已授权 iPhone；草稿请求，见下文 | 201 `{order}`；相同请求重试返回原响应 |
+| `POST /v1/orders/{id}/preview` | 同上；`{client_request_id,version,content_hash}` | `{order}`；硬风控＋qualify＋what-if，成功为 proposed |
+| `POST /v1/orders/{id}/confirm` | 同上；绑定版本、hash、preview、期限和明确动作 | `{order}`；confirmed，不自动提交 |
+| `POST /v1/orders/{id}/submit` | 同一确认设备；绑定 confirmation_id 与明确动作 | `{order}`；先落库 submitting，再调用券商一次 |
+| `POST /v1/orders/{id}/cancel` | Mac 管理设备或已授权 iPhone；绑定版本、hash 和明确撤单动作 | `{order}`；先落库 cancel_pending，只撤本单 |
 
 仅允许股票 `STK`、`SMART`、`USD`、`LMT`、`DAY`，不含盘外、修改、批量取消、定时单或 Live。数量为 JSON 整数 1–100000，拒绝 bool/小数；限价为正十进制**字符串**，不超过 1000000，至多四位小数，不接受指数、NaN/Infinity 或浮点价格。范围是输入边界，不替代券商资金、合约最小变动价位和交易权限检查。
 
@@ -20,7 +26,7 @@
 {
   "client_request_id": "b651793e-0e7e-41c8-a628-b602313d1561",
   "account_selection": "服务端 broker.configuration.config_id 的 64 位小写十六进制值",
-  "contract": {"symbol":"AAPL","sec_type":"STK","exchange":"SMART","currency":"USD"},
+  "contract": {"con_id":265598,"symbol":"AAPL","primary_exchange":"NASDAQ","sec_type":"STK","exchange":"SMART","currency":"USD"},
   "side": "BUY",
   "quantity": 2,
   "limit_price": "10.00",
@@ -28,6 +34,8 @@
   "tif": "DAY"
 }
 ```
+
+直接快速单必须携带搜索结果中的正整数 `con_id` 和 `primary_exchange`；What-if、提交前行情与最终券商调用都逐项核验同一合约身份，不能只凭 symbol 重新选择。为兼容已有聊天草稿，Mac 仍可读取和处理旧的 symbol-only 记录；iPhone 新建或操作快速单时必须使用精确合约。
 
 account_selection 是当前配置目标的不透明 ID，不接受账户号，不把请求当作账户授权。服务端核对配置为 paper、目标存在且 ID 完全匹配；没有配置目标时不能创建草稿。草稿不要求连接可执行，但预览、确认、提交、撤单必须再次核验完整门面快照：paper、execution_enabled=true、read_only=false、connected/data_complete/account_verified/permissions_verified/environment_verified=true，health_stale=false，config_id 和 session_id 有效。门面缺失或任何值未知均拒绝，Live 无执行路径。
 
@@ -45,11 +53,11 @@ submit  = {client_request_id,version,content_hash,confirmation_id,user_action:"s
 cancel  = {client_request_id,version,content_hash,user_action:"cancel_paper_order"}
 ```
 
-每次操作使用自己的 UUID client_request_id。确认记录唯一绑定 order/version、hash、preview、有效期、服务端用户与配对设备及明确动作；submit 必须来自同一确认设备。读取 JSON 后和实际调用门面前重新认证，撤销设备不能继续操作。这里的动作字段是客户端操作契约，不能用模型声称“用户批准”替代；聊天工具未注册这些入口，也不持有设备凭据。
+每次操作使用自己的 UUID client_request_id。确认记录唯一绑定 order/version、hash、preview、有效期、服务端用户与配对设备及明确动作；submit 必须来自同一确认设备。Mac 管理设备对 iPhone 的 Paper 授权独立持久化，授权或撤销不修改共享设备权限；每次变更都会生成新的不透明 `authorization_revision`，iPhone 确认内部绑定该修订，因此撤销后重新授权也不能复用旧确认。读取 JSON 后和实际调用门面前重新认证并重新检查产品授权，撤销设备不能继续操作。这里的动作字段是客户端操作契约，不能用模型声称“用户批准”替代；直接快速单链路不调用模型，聊天工具也未注册确认和提交入口。
 
 同一个 client_request_id 的操作、内容、设备和用户相同时重放原 HTTP 状态与响应；不同内容或设备返回 409 idempotency_conflict。在途重复请求返回 202 和当前订单，绝不再次外呼。同一确认版本不能再次提交。所有订单意图、不可变版本、确认、请求、错误码和状态事件保存在独立 `paper-orders.sqlite3`，不把官方模型状态或聊天表当作订单账本。请求只保存正文 hash，拒绝原始错误、账户号或凭据进入日志/公开视图。已识别请求的领域错误也记入请求和事件；无有效身份或无法解析的 HTTP/JSON 在订单领域之前拒绝。
 
-调用 submit 前先原子保存请求和 submitting，commit 后重新检查门槛、期限、身份，再通过 lifecycle 调用一次。超时、断开、无效回报及无法判断是否已提交时保留 unknown，绝不以异常推断“未发单”。unknown 或其他活动状态会阻止相同经济意图重新创建/提交，即使换 client_request_id 或配置 ID 也不会绕过；这是跨配置目标的保守阻断，需先对旧单取得确定对账结果。已提交、在途和不确定请求没有自动重试路径。
+调用 submit 前先原子保存请求、账户级提交锁、持久额度预留和 submitting，commit 后重新检查门槛、期限、身份，再通过 lifecycle 调用一次。任一时刻同一账户只有一笔最终提交可以越过该门禁；预留同时计入提交前敞口和当日额度，明确失败时释放。超时、断开、无效回报及无法判断是否已提交时保留 unknown，并保留阻断直到对账收敛，绝不以异常推断“未发单”。unknown 或其他活动状态会阻止相同经济意图重新创建/提交，即使换 client_request_id 或配置 ID 也不会绕过。已提交、在途和不确定请求没有自动重试路径。
 
 启动后的首次订单访问在 Host 单实例锁内恢复账本：未完成 submitting/cancel_pending 转 unknown，未完成 previewing 回到 draft；未完成请求保存恢复结果，不重放券商调用。schema 0（空库）升级到 1，未来版本拒绝启动，不降级成可执行状态。GET 列表/详情返回持久化状态，并可从 lifecycle 的 `orders_snapshot()` **只读缓存**同步已知 orderRef 且 config_id/session_id 完全对应的回报，不发起新的 SDK 请求；无变化不重复记事件。客户端不能上传券商回报。主动对账也可由受信 lifecycle 调用 `PaperOrderService.apply_broker_update(order_ref, normalized_result)`，必须先匹配目标账户、orderRef、客户端归属和 broker order ID。
 

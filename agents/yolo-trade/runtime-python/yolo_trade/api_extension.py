@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 from uuid import UUID, uuid5
+from urllib.parse import parse_qs, urlsplit
 
 from yolo_agents.api import APIError, identifier, text_field
 from yolo_agents.agent_runtime import (
@@ -22,6 +23,7 @@ from .paper_order_store import PaperOrderStore
 from .paper_order_broker import BrokerBoundaryError, snapshot
 from .paper_orders import OrderError, PaperOrderService
 from .risk_policy import DEFAULT_RISK_POLICY, RiskPolicy
+from .trading_reads import public_read
 
 
 def read_order_json(handler):
@@ -554,6 +556,75 @@ class TradingAPIExtension:
         return {"trade_execution_enabled": enabled, "broker": broker, "components": components}
 
     def route(self, handler, method, path, query, caller):
+        if path == "/v1/paper-trading/authorization" or path.startswith("/v1/paper-trading/devices"):
+            try:
+                orders = self.orders(handler)
+                current = handler.reauthorize("chat:read" if method == "GET" else "chat:write")
+                if query or urlsplit(handler.path).query:
+                    raise OrderError("invalid_order", 400)
+                if path == "/v1/paper-trading/authorization" and method == "GET":
+                    handler.send_json(200, {"authorization": orders.device_authorization(current)})
+                    return True
+                current = self.order_admin(handler)
+                if path == "/v1/paper-trading/devices" and method == "GET":
+                    devices = []
+                    for device in handler.server.auth.devices(current):
+                        if device["platform"] != "ios":
+                            continue
+                        devices.append({**orders.device_authorization(device), "device_name": device["name"],
+                                        "revoked_at": device.get("revoked_at")})
+                    handler.send_json(200, {"devices": devices})
+                    return True
+                parts = path.split("/")
+                if len(parts) == 5 and method == "POST":
+                    data = read_order_json(handler)
+                    if set(data) != {"enabled"} or type(data["enabled"]) is not bool:
+                        raise OrderError("invalid_order", 400)
+                    device_id = identifier(parts[4])
+                    target = next((device for device in handler.server.auth.devices(current) if device["id"] == device_id), None)
+                    if target is None:
+                        raise OrderError("invalid_order", 400)
+                    current = self.order_admin(handler)
+                    handler.send_json(200, {"authorization": orders.set_device_grant(current, target, data["enabled"])})
+                    return True
+                raise OrderError("invalid_order", 400)
+            except OrderError as exc:
+                raise APIError(exc.status, exc.code, exc.message) from None
+        if path == "/v1/positions" or path.startswith("/v1/instruments"):
+            url = urlsplit(handler.path)
+            lengths = handler.headers.get_all("Content-Length", [])
+            if (method != "GET" or handler.headers.get("Transfer-Encoding") or lengths not in ([], ["0"])
+                    or url.path != path):
+                raise APIError(400, "invalid_input", "交易数据读取只接受无请求体的 GET。")
+            try:
+                raw_query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+            except ValueError:
+                raise APIError(400, "invalid_input", "交易数据查询参数无效。") from None
+            handler.reauthorize("chat:read")
+            parts = path.split("/")
+            try:
+                if path == "/v1/positions" and not url.query:
+                    kind, result, expected_id = "positions", self.broker.positions_detail(), None
+                elif path == "/v1/instruments/search" and set(raw_query) == {"q"} and len(raw_query["q"]) == 1:
+                    q = raw_query["q"][0]
+                    if not 1 <= len(q) <= 64 or q != q.strip() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .&'/-]*", q) is None:
+                        raise APIError(400, "invalid_input", "股票搜索条件无效。")
+                    kind, result, expected_id = "search", self.broker.search_instruments(q), None
+                elif len(parts) == 5 and parts[4] == "quote" and not url.query and re.fullmatch(r"[1-9][0-9]{0,9}", parts[3]):
+                    expected_id = int(parts[3])
+                    if expected_id > 2147483647:
+                        raise APIError(400, "invalid_input", "合约 ID 无效。")
+                    kind, result = "quote", self.broker.instrument_quote(expected_id)
+                else:
+                    raise APIError(400, "invalid_input", "交易数据路径或查询参数无效。")
+                response = public_read(kind, result, expected_id=expected_id)
+                handler.reauthorize("chat:read")
+                handler.send_json(200, response)
+                return True
+            except APIError:
+                raise
+            except Exception:
+                raise APIError(409, "trading_data_unavailable", "券商数据不可用或未通过校验，请稍后重试。") from None
         if path == "/v1/admin/full-test/simulator-session" and method == "POST":
             if query or handler.read_json():
                 raise APIError(400, "invalid_input", "Simulator 验收会话只接受空 JSON 对象。")
@@ -593,10 +664,8 @@ class TradingAPIExtension:
             return True
         if path == "/v1/orders" or path.startswith("/v1/orders/"):
             parts = path.split("/")
-            if method != "GET":
-                caller = self.order_admin(handler)
             try:
-                if query:
+                if query or urlsplit(handler.path).query:
                     raise OrderError("invalid_order", 400)
                 user_id = handler.server.auth.server_id  # v1 has one local owner, shared across devices.
                 if path == "/v1/orders" and method == "GET":
@@ -607,13 +676,13 @@ class TradingAPIExtension:
                     return True
                 if method == "POST" and (path == "/v1/orders" or (len(parts) == 5 and parts[4] in ("preview", "confirm", "submit", "cancel"))):
                     data = read_order_json(handler)
-                    caller = self.order_admin(handler)
+                    caller = handler.reauthorize("chat:write")
                     if data.get("environment") == "live":
                         raise OrderError("paper_only", 403)
                     action = "create" if path == "/v1/orders" else parts[4]
                     status, result = self.orders(handler).operate(action, data, caller, user_id,
                         order_id=identifier(parts[3]) if action != "create" else None,
-                        authorize=lambda: self.order_admin(handler))
+                        authorize=lambda: handler.reauthorize("chat:write"))
                     handler.send_json(status, result)
                     return True
                 raise APIError(403, "trade_execution_disabled", "不开放订单修改、批量撤单、定时单或 Live 操作。")

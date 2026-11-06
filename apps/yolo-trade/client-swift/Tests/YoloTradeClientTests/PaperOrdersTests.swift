@@ -5,6 +5,7 @@ import YoloAgentsUI
 @testable import YoloTradeClient
 
 private let ordersServerID = "40000000-0000-4000-8000-000000000004"
+private let ordersDeviceID = UUID(uuidString: "50000000-0000-4000-8000-000000000005")!
 private let ordersID = UUID(uuidString: "10000000-0000-4000-8000-000000000001")!
 private let ordersConfig = String(repeating: "a", count: 64)
 private let ordersHash = String(repeating: "b", count: 64)
@@ -13,10 +14,10 @@ private let ordersExpiry = "2030-01-01T00:00:00.123456Z"
 
 private func ordersConnection(platform: DevicePlatform = .macos, privileged: Bool = true) throws -> PairedConnection {
     let body: [String: Any] = [
-        "device": ["id": UUID().uuidString, "name": "Fixture", "platform": platform.rawValue,
+        "device": ["id": ordersDeviceID.uuidString, "name": "Fixture", "platform": platform.rawValue,
                    "permissions": privileged && platform == .macos ? ["devices:manage", "chat:read"] : ["chat:read"],
                    "created_at": "2026-10-28T00:00:00Z", "revoked_at": NSNull()],
-        "token": "fixture-paper-token", "server_id": ordersServerID, "api_version": 1,
+        "token": platform == .ios ? "fixture-paper-token-ios" : "fixture-paper-token", "server_id": ordersServerID, "api_version": 1,
     ]
     let pairing = try WireJSON.decoder().decode(PairingResponse.self, from: JSONSerialization.data(withJSONObject: body))
     return PairedConnection(endpoint: try ServiceEndpoint("https://paper.example.test"), pairing: pairing)
@@ -59,12 +60,31 @@ private actor OrdersHTTP: HTTPTransport {
     private var revision = 0
     private var timeoutAction: String?
     private var corruptAction: String?
+    private var corruptField = "id"
     private var protectedSession: String?
     private var healthAgent: String?
+    private var phoneAuthorized = false
+    private var phoneRevision: String?
+    private var rotateRevisionAfterConfirm = false
+    private var grantDeviceID = ordersDeviceID
+    func authorizePhone(_ authorized: Bool = true) { phoneAuthorized = authorized; phoneRevision = authorized ? UUID().uuidString : nil }
+    func rotatePhoneRevisionAfterConfirmation() { rotateRevisionAfterConfirm = true }
+    func wrongGrantDevice() { grantDeviceID = UUID() }
+    func changeBinding(_ field: String) {
+        switch field {
+        case "content_hash": order?[field] = String(repeating: "c", count: 64)
+        case "version": order?[field] = 9
+        default:
+            var preview = order?["preview"] as? [String: Any] ?? [:]
+            preview[field] = field == "id" ? UUID().uuidString : "2029-01-01T00:00:00Z"
+            order?["preview"] = preview
+        }
+        tick()
+    }
     private(set) var requests: [URLRequest] = []
     init(state: String? = nil) { order = state.map { ordersFixture(state: $0) } }
     func failAfter(_ action: String) { timeoutAction = action }
-    func corruptResponse(_ action: String) { corruptAction = action }
+    func corruptResponse(_ action: String, field: String = "id") { corruptAction = action; corruptField = field }
     func changeProtectedSession() { protectedSession = "different-session" }
     func changeHealthAgent(_ value: String) { healthAgent = value }
     func removeGate(_ key: String) { broker.removeValue(forKey: key) }
@@ -100,6 +120,12 @@ private actor OrdersHTTP: HTTPTransport {
                 if let protectedSession { protected["session_id"] = protectedSession }
                 return try response(["broker": protected])
             }
+            if path == "/v1/paper-trading/authorization" {
+                let phone = request.value(forHTTPHeaderField: "Authorization")?.hasSuffix("-ios") == true
+                return try response(["authorization": ["device_id": grantDeviceID.uuidString,
+                    "paper_trading_enabled": phone ? phoneAuthorized : true,
+                    "authorization_revision": phone ? (phoneRevision as Any? ?? NSNull()) : NSNull()]])
+            }
             if path == "/v1/orders" { return try response(["orders": order.map { [$0] } ?? []]) }
             guard let order else { throw URLError(.resourceUnavailable) }
             return try response(["order": order, "events": [["seq": revision + 1, "type": "order.updated",
@@ -111,13 +137,25 @@ private actor OrdersHTTP: HTTPTransport {
         switch action {
         case "orders":
             order = ordersFixture()
-            order?["client_request_id"] = body["client_request_id"]
+            order?["client_request_id"] = body["client_request_id"]; order?["contract"] = body["contract"]
+            order?["side"] = body["side"]; order?["quantity"] = body["quantity"]
+            if let limit = body["limit_price"] as? String { order?["limit_price"] = NSDecimalNumber(string: limit).stringValue }
         case "preview":
-            let originalID = order?["client_request_id"]
-            order = ordersFixture(state: "proposed"); order?["client_request_id"] = originalID
+            let original = order; let contract = order?["contract"]
+            order = ordersFixture(state: "proposed")
+            for key in ["client_request_id", "contract", "quantity", "side", "limit_price"] { order?[key] = original?[key] }
+            order?["content_hash"] = String(repeating: "d", count: 64)
+            if let exact = contract as? [String: Any], exact["con_id"] != nil {
+                var preview = order?["preview"] as? [String: Any] ?? [:]
+                preview["qualified_contract"] = exact; order?["preview"] = preview
+            }
         case "confirm":
-            let originalID = order?["client_request_id"]
-            order = ordersFixture(state: "confirmed"); order?["client_request_id"] = originalID
+            let original = order
+            order = ordersFixture(state: "confirmed")
+            for key in ["client_request_id", "contract", "quantity", "side", "limit_price", "preview", "content_hash"] { order?[key] = original?[key] }
+            var confirmation = order?["confirmation"] as? [String: Any] ?? [:]
+            confirmation["content_hash"] = original?["content_hash"]; order?["confirmation"] = confirmation
+            if rotateRevisionAfterConfirm { phoneRevision = UUID().uuidString }
         case "submit": order?["state"] = timeoutAction == action ? "unknown" : "accepted"
         case "cancel": order?["state"] = "cancel_pending"
         default: throw URLError(.badURL)
@@ -125,7 +163,12 @@ private actor OrdersHTTP: HTTPTransport {
         tick()
         if timeoutAction == action { throw URLError(.timedOut) }
         var reply = try #require(order)
-        if corruptAction == action { reply["id"] = UUID().uuidString }
+        if corruptAction == action {
+            if corruptField == "content_hash" { reply[corruptField] = String(repeating: "c", count: 64) }
+            else if corruptField == "preview" {
+                var preview = reply["preview"] as? [String: Any] ?? [:]; preview["id"] = UUID().uuidString; reply["preview"] = preview
+            } else { reply["id"] = UUID().uuidString }
+        }
         return try response(["order": reply])
     }
     private func response(_ value: [String: Any]) throws -> HTTPResult {
@@ -396,4 +439,142 @@ private actor OrdersHTTP: HTTPTransport {
     #else
     #expect(feature.presentation == .modal)
     #endif
+}
+
+@Test @MainActor func authorizedPhoneUsesExistingStateMachineAndRequiresExplicitReview() async throws {
+    let http = OrdersHTTP()
+    await http.authorizePhone()
+    let model = try ordersModel(http, platform: .ios)
+    await model.refresh()
+    #expect(model.canManage && model.executionReady && !model.isDeviceManager)
+    let contract = try PaperStockContract(symbol: "AAPL", conID: 265598, primaryExchange: "NASDAQ")
+    await model.createDraft(contract: contract, side: .buy, quantity: "2", limitPrice: "")
+    #expect(await http.posts.isEmpty)
+    await model.createDraft(contract: contract, side: .buy, quantity: "2", limitPrice: "100.1250")
+    await model.previewCurrentOrder()
+    #expect(model.currentOrder?.contract == contract)
+    #expect(await http.actions == ["orders", "preview"])
+    await model.prepareCompleteSubmission()
+    let review = try #require(model.review)
+    #expect(review.summary.contains("NASDAQ"))
+    #expect(await http.actions == ["orders", "preview"])
+    await model.performReviewedAction(review.id)
+    #expect(model.currentOrder?.state == .accepted)
+    #expect(await http.actions == ["orders", "preview", "confirm", "submit"])
+}
+
+@Test @MainActor func phoneGrantChangesAndWrongDevicePreventConfirmation() async throws {
+    for kind in ["revoked", "revision", "device"] {
+        let http = OrdersHTTP(state: "proposed")
+        await http.authorizePhone()
+        let model = try ordersModel(http, platform: .ios)
+        await model.refresh(); await selectOrder(model)
+        model.reviewConfirmation()
+        let review = try #require(model.review)
+        switch kind {
+        case "revoked": await http.authorizePhone(false)
+        case "revision": await http.authorizePhone(false); await http.authorizePhone()
+        default: await http.wrongGrantDevice()
+        }
+        await model.performReviewedAction(review.id)
+        #expect(model.actionError != nil)
+        #expect(await http.posts.isEmpty)
+    }
+}
+
+@Test @MainActor func everyPreviewBindingChangeStopsReviewedConfirmation() async throws {
+    for field in ["version", "content_hash", "id", "expires_at"] {
+        let http = OrdersHTTP(state: "proposed")
+        let model = try ordersModel(http)
+        await model.refresh(); await selectOrder(model)
+        model.reviewConfirmation()
+        let review = try #require(model.review)
+        await http.changeBinding(field)
+        await model.performReviewedAction(review.id)
+        #expect(model.actionError != nil)
+        #expect(await http.posts.isEmpty)
+    }
+}
+
+@Test @MainActor func phoneUnknownOutcomeNeverResendsAfterRefreshOrReopen() async throws {
+    let http = OrdersHTTP(state: "proposed")
+    await http.authorizePhone()
+    let model = try ordersModel(http, platform: .ios)
+    await model.refresh(); await selectOrder(model)
+    await model.prepareCompleteSubmission()
+    let review = try #require(model.review)
+    await http.failAfter("submit")
+    await model.performReviewedAction(review.id)
+    await model.refresh(); await model.refresh()
+    await model.prepareCompleteSubmission()
+    await model.performReviewedAction(review.id)
+    #expect(model.currentOrder?.state == .unknown && model.uncertainty != nil)
+    #expect(await http.actions == ["confirm", "submit"])
+    let reopened = try ordersModel(http, platform: .ios)
+    await reopened.refresh(); await selectOrder(reopened)
+    #expect(!reopened.canSubmit(try #require(reopened.currentOrder), now: ordersNow))
+    #expect(await http.actions == ["confirm", "submit"])
+}
+
+@Test @MainActor func changedConfirmationResponseNeverContinuesToSubmission() async throws {
+    for field in ["content_hash", "preview"] {
+        let http = OrdersHTTP(state: "proposed")
+        let model = try ordersModel(http)
+        await model.refresh(); await selectOrder(model)
+        await model.prepareCompleteSubmission()
+        let review = try #require(model.review)
+        await http.corruptResponse("confirm", field: field)
+        await model.performReviewedAction(review.id)
+        #expect(model.uncertainty != nil && model.actionError != nil)
+        #expect(await http.actions == ["confirm"])
+        await model.refresh()
+        #expect(!model.canSubmit(try #require(model.currentOrder), now: ordersNow))
+        #expect(await http.actions == ["confirm"])
+    }
+}
+
+@Test @MainActor func realServerPriceNormalizationAndNewPreviewHashRemainUsable() async throws {
+    let http = OrdersHTTP()
+    let model = try ordersModel(http)
+    await model.refresh()
+    await model.createDraft(symbol: "AAPL", side: .buy, quantity: "2", limitPrice: "100.1250")
+    #expect(model.currentOrder?.limitPrice == "100.125" && model.uncertainty == nil)
+    let oldHash = model.currentOrder?.contentHash
+    await model.previewCurrentOrder()
+    let order = try #require(model.currentOrder)
+    #expect(order.contentHash != oldHash && model.canConfirm(order, now: ordersNow))
+    let actions = await http.actions
+    #expect(model.uncertainty == nil && actions == ["orders", "preview"])
+}
+
+@Test @MainActor func phoneRevisionChangePreventsReviewedSubmission() async throws {
+    let http = OrdersHTTP(state: "proposed")
+    await http.authorizePhone()
+    let model = try ordersModel(http, platform: .ios)
+    await model.refresh(); await selectOrder(model)
+    model.reviewConfirmation()
+    await model.performReviewedAction(try #require(model.review).id)
+    model.reviewSubmission()
+    let review = try #require(model.review)
+    await http.authorizePhone(false); await http.authorizePhone()
+    await model.performReviewedAction(review.id)
+    #expect(model.actionError != nil)
+    #expect(await http.actions == ["confirm"])
+    #expect(!model.canSubmit(try #require(model.currentOrder), now: ordersNow))
+}
+
+@Test @MainActor func phoneRevisionChangeBetweenConfirmAndSubmitStopsContinuation() async throws {
+    let http = OrdersHTTP(state: "proposed")
+    await http.authorizePhone()
+    let model = try ordersModel(http, platform: .ios)
+    await model.refresh(); await selectOrder(model)
+    await model.prepareCompleteSubmission()
+    let review = try #require(model.review)
+    await http.rotatePhoneRevisionAfterConfirmation()
+    await model.performReviewedAction(review.id)
+    #expect(model.actionError != nil && model.uncertainty != nil)
+    #expect(await http.actions == ["confirm"])
+    await model.refresh()
+    await model.performReviewedAction(review.id)
+    #expect(await http.actions == ["confirm"])
 }

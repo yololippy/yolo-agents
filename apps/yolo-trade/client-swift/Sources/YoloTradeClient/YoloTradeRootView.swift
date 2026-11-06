@@ -4,18 +4,18 @@ import YoloAgentsSDK
 
 public struct YoloTradeRootView: View {
     public init() {}
-    static func paperOrdersPage(connection: PairedConnection) -> PaperOrdersView {
+    static func paperOrdersPage(connection: PairedConnection) -> TradeView {
         #if os(iOS)
-        PaperOrdersView(connection: connection, presentation: .page)
+        TradeView(connection: connection, presentation: .page)
         #else
-        PaperOrdersView(connection: connection)
+        TradeView(connection: connection)
         #endif
     }
 
     public var body: some View {
         YoloAgentsRootView(identity: YoloTradeProduct.identity, features: [
-            ChatFeature(id: "chat.paper-orders", title: "Paper 订单", compactTitle: "订单",
-                        systemImage: "list.bullet.rectangle") {
+            ChatFeature(id: "chat.paper-orders", title: "交易", compactTitle: "交易",
+                        systemImage: "chart.line.uptrend.xyaxis") {
                 Self.paperOrdersPage(connection: $0)
             },
         ], messageAccessory: ChatMessageAccessory { message, connection in

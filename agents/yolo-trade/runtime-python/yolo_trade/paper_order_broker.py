@@ -9,6 +9,12 @@ from typing import Protocol
 
 
 class PaperOrderBroker(Protocol):
+    def search_instruments(self, query: str) -> dict:
+        """Return at most 16 account-redacted USD STK identities, paced at 1s."""
+
+    def instrument_quote(self, con_id: int) -> dict:
+        """Read a qualified USD STK by exact IBKR conId, never a symbol guess."""
+
     def market_quote(self, symbol: str) -> dict:
         """Return an account-redacted, entitlement-labelled top-of-book quote."""
 
@@ -32,7 +38,8 @@ class PaperOrderBroker(Protocol):
         """
 
     def preview_paper_order(self, intent: dict, *, order_ref: str, context: dict) -> dict:
-        """Return qualified_contract (con_id/symbol/sec_type/exchange/currency),
+        """Return qualified_contract (con_id/symbol/sec_type/exchange/currency;
+        primary_exchange is also mandatory when supplied in the intent),
         and what_if (complete/accepted/currency/initial_margin_change/
         maintenance_margin_change/commission). Monetary values are decimal text.
         This qualifies exactly one contract and runs what-if, never transmits.
