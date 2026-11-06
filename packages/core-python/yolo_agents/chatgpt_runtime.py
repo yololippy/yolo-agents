@@ -297,6 +297,54 @@ class ChatGPTRuntime(PydanticRuntime):
         if model is not None and model not in {item['id'] for item in self.list_models()['models']}:
             raise ValueError('Model is not in the current ChatGPT catalog')
 
+    def acceptance_probe(self):
+        """Run one provider request with no product tools, memory, skills, or saved chat."""
+        from .guardrails import check_text
+
+        with self._activity():
+            try:
+                catalog = self._catalog_unlocked()
+                models = catalog.get('models') if isinstance(catalog, dict) else None
+                selected = catalog.get('default_model') if isinstance(catalog, dict) else None
+                available = {item.get('id') for item in models or [] if isinstance(item, dict)}
+                if catalog.get('auth', {}).get('status') != 'authenticated' or selected not in available:
+                    raise RuntimeConfigurationError('ChatGPT 模型目录尚未就绪。')
+                validate_model_id(selected)
+                model = self._model_instance(selected)
+                agent = self._backend.Agent(
+                    model,
+                    output_type=str,
+                    retries={'tools': 0, 'output': 0},
+                    instructions=(
+                        '这是 Yolo Agents 安装验收探针。不得调用任何工具；'
+                        '只用一句简短文本确认模型服务可用，不得输出凭据或账户信息。'
+                    ),
+                )
+                result = agent.run_sync(
+                    '请回复：验收探针已完成。',
+                    timeout=45,
+                    model_settings={'max_tokens': 64},
+                    usage_limits=self._backend.UsageLimits(
+                        request_limit=1, tool_calls_limit=0, total_tokens_limit=2048,
+                    ),
+                )
+                output = getattr(result, 'output', None)
+                if not isinstance(output, str) or not output.strip():
+                    raise RuntimeExecutionError('模型验收探针没有返回文本。')
+                check_text(output)
+                return {
+                    'status': 'passed',
+                    'model': selected,
+                    'business_tools_enabled': False,
+                    'conversation_saved': False,
+                }
+            except (RuntimeConfigurationError, RuntimeExecutionError):
+                raise
+            except Exception as exc:
+                raise RuntimeExecutionError(
+                    f'模型验收探针失败（{type(exc).__name__}）。'
+                ) from None
+
     def _load(self, conversation_id, user_id):
         state = super()._load(conversation_id, user_id)
         principal = self.account.principal()

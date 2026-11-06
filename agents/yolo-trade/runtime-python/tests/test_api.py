@@ -145,6 +145,26 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(body["auth"]["status"], "not_required")
         self.assertEqual(body["models"][0]["id"], "demo-local")
 
+    def test_full_test_model_probe_requires_macos_admin_and_never_exposes_output(self):
+        self.app.runtime.acceptance_probe = lambda: {
+            "status": "passed", "model": "fixture-model",
+            "business_tools_enabled": False, "conversation_saved": False,
+        }
+        self.assertEqual(self.request("POST", "/v1/admin/full-test/model-probe", {}, None)[0], 401)
+        status, body = self.request(
+            "POST", "/v1/admin/full-test/model-probe", {}, self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["probe"], {
+            "status": "passed", "model": "fixture-model",
+            "business_tools_enabled": False, "conversation_saved": False,
+        })
+        self.assertNotIn("output", body["probe"])
+        self.assertEqual(
+            self.request("POST", "/v1/admin/full-test/model-probe", {"prompt": "x"}, self.token)[0],
+            400,
+        )
+
     def test_image_upload_message_runtime_output_events_and_authenticated_download(self):
         media_id = str(uuid4())
         self.assertEqual(self.media_request(

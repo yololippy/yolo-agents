@@ -314,6 +314,18 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         # this switch controls only the unsupported image_generation output tool.
         self.assertFalse(self.runtime._supports_image_output('gpt-6.1-sol'))
 
+    def test_acceptance_probe_uses_no_product_tools_memory_skills_or_saved_conversation(self):
+        result = self.runtime.acceptance_probe()
+        agent = self.backend.agents[-1]
+        self.assertEqual(result, {
+            'status': 'passed', 'model': 'model-a',
+            'business_tools_enabled': False, 'conversation_saved': False,
+        })
+        self.assertNotIn('tools', agent.options)
+        self.assertNotIn('capabilities', agent.options)
+        self.assertEqual(agent.calls[-1][1]['usage_limits'].kwargs['tool_calls_limit'], 0)
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+
     def test_model_change_uses_fresh_official_state_with_visible_product_context(self):
         history = self.user('first')
         self.assertEqual(''.join(self.runtime.stream_reply(history, self.cid)), '真实适配测试回复')

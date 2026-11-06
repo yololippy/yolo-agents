@@ -7,6 +7,7 @@ import threading
 from uuid import UUID, uuid5
 
 from yolo_agents.api import APIError, identifier
+from yolo_agents.agent_runtime import RuntimeConfigurationError, RuntimeExecutionError
 from .runtime_tools import (
     MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, PAPER_ORDER_TOOL,
     PAPER_ORDERS_TOOL, POSITIONS_TOOL, RuntimeToolContext,
@@ -502,6 +503,28 @@ class TradingAPIExtension:
         return {"trade_execution_enabled": enabled, "broker": broker, "components": components}
 
     def route(self, handler, method, path, query, caller):
+        if path == "/v1/admin/full-test/model-probe" and method == "POST":
+            if query or handler.read_json():
+                raise APIError(400, "invalid_input", "模型验收探针只接受空 JSON 对象。")
+            current = handler.reauthorize("devices:manage")
+            if current["platform"] != "macos":
+                raise APIError(403, "forbidden", "仅已配对的 Mac 管理设备可运行模型验收探针。")
+            probe = getattr(handler.server.service.runtime, "acceptance_probe", None)
+            if not callable(probe):
+                raise APIError(409, "probe_not_available", "当前 Provider 模式不支持模型验收探针。")
+            try:
+                result = probe()
+            except (RuntimeConfigurationError, RuntimeExecutionError, RuntimeError):
+                raise APIError(503, "probe_failed", "模型验收探针未能完成，请检查 Provider 授权和模型目录。") from None
+            if result != {
+                "status": "passed",
+                "model": result.get("model") if isinstance(result, dict) else None,
+                "business_tools_enabled": False,
+                "conversation_saved": False,
+            } or not isinstance(result["model"], str):
+                raise APIError(503, "probe_failed", "模型验收探针返回了无效结果。")
+            handler.send_json(200, {"probe": result})
+            return True
         if path == "/v1/broker/health" and method == "GET":
             handler.send_json(200, {"broker": self.broker_health()})
             return True
