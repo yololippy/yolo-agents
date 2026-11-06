@@ -1,12 +1,15 @@
 """YoloTrade-only additions to the shared Yolo Agents chat API."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
+import secrets
 import threading
+import time
 from uuid import UUID, uuid5
 
-from yolo_agents.api import APIError, identifier
+from yolo_agents.api import APIError, identifier, text_field
 from yolo_agents.agent_runtime import (
     RuntimeConfigurationError, RuntimeExecutionError, RuntimeProviderTimeoutError,
 )
@@ -73,6 +76,52 @@ class TradingAPIExtension:
         self._chat_service = None
         self._auth = None
         self._tool_bound = False
+        self._full_test_grants = {}
+        self._full_test_grant_guard = threading.Lock()
+
+    @staticmethod
+    def _grant_digest(value):
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _issue_simulator_probe_session(self, auth):
+        pairing_code = auth.issue_pairing_code("ios", ttl=300)
+        grant = secrets.token_urlsafe(32)
+        expires_at = time.monotonic() + 300
+        with self._full_test_grant_guard:
+            current = time.monotonic()
+            self._full_test_grants = {
+                key: expiry for key, expiry in self._full_test_grants.items()
+                if expiry > current
+            }
+            self._full_test_grants[self._grant_digest(grant)] = expires_at
+        return {"pairing_code": pairing_code, "grant": grant, "expires_in": 300}
+
+    def _consume_simulator_probe_grant(self, value):
+        if not isinstance(value, str) or not 16 <= len(value) <= 1024:
+            raise APIError(400, "invalid_input", "Simulator 探针授权格式无效。")
+        with self._full_test_grant_guard:
+            expiry = self._full_test_grants.pop(self._grant_digest(value), None)
+        if expiry is None or expiry <= time.monotonic():
+            raise APIError(403, "invalid_probe_grant", "Simulator 探针授权无效、已过期或已使用。")
+
+    def _run_full_test_model_probe(self, service):
+        probe = getattr(service.runtime, "acceptance_probe", None)
+        if not callable(probe):
+            raise APIError(409, "probe_not_available", "当前 Provider 模式不支持模型验收探针。")
+        try:
+            result = probe()
+        except RuntimeProviderTimeoutError:
+            raise APIError(504, "probe_timeout", "模型验收探针超时，已取消本次请求。") from None
+        except (RuntimeConfigurationError, RuntimeExecutionError, RuntimeError):
+            raise APIError(503, "probe_failed", "模型验收探针未能完成，请检查 Provider 授权和模型目录。") from None
+        if result != {
+            "status": "passed",
+            "model": result.get("model") if isinstance(result, dict) else None,
+            "business_tools_enabled": False,
+            "conversation_saved": False,
+        } or not isinstance(result["model"], str):
+            raise APIError(503, "probe_failed", "模型验收探针返回了无效结果。")
+        return result
 
     def bind_chat_service(self, service, auth, *, bind_runtime_tool=True):
         """Bind the local product store after the Host owns its process lock."""
@@ -505,29 +554,39 @@ class TradingAPIExtension:
         return {"trade_execution_enabled": enabled, "broker": broker, "components": components}
 
     def route(self, handler, method, path, query, caller):
+        if path == "/v1/admin/full-test/simulator-session" and method == "POST":
+            if query or handler.read_json():
+                raise APIError(400, "invalid_input", "Simulator 验收会话只接受空 JSON 对象。")
+            current = handler.reauthorize("devices:manage")
+            if current["platform"] != "macos":
+                raise APIError(403, "forbidden", "仅已配对的 Mac 管理设备可创建 Simulator 验收会话。")
+            handler.send_json(201, {
+                "session": self._issue_simulator_probe_session(handler.server.auth),
+            })
+            return True
+        if path == "/v1/full-test/model-probe" and method == "POST":
+            if query:
+                raise APIError(400, "invalid_input", "模型验收探针不接受查询参数。")
+            data = handler.read_json()
+            if set(data) != {"grant"}:
+                raise APIError(400, "invalid_input", "模型验收探针需要单次 Simulator 授权。")
+            current = handler.reauthorize("chat:read")
+            if current["platform"] != "ios":
+                raise APIError(403, "forbidden", "此入口仅允许已配对的 iOS Simulator 设备。")
+            self._consume_simulator_probe_grant(text_field(data, "grant", 1024))
+            handler.send_json(200, {
+                "probe": self._run_full_test_model_probe(handler.server.service),
+            })
+            return True
         if path == "/v1/admin/full-test/model-probe" and method == "POST":
             if query or handler.read_json():
                 raise APIError(400, "invalid_input", "模型验收探针只接受空 JSON 对象。")
             current = handler.reauthorize("devices:manage")
             if current["platform"] != "macos":
                 raise APIError(403, "forbidden", "仅已配对的 Mac 管理设备可运行模型验收探针。")
-            probe = getattr(handler.server.service.runtime, "acceptance_probe", None)
-            if not callable(probe):
-                raise APIError(409, "probe_not_available", "当前 Provider 模式不支持模型验收探针。")
-            try:
-                result = probe()
-            except RuntimeProviderTimeoutError:
-                raise APIError(504, "probe_timeout", "模型验收探针超时，已取消本次请求。") from None
-            except (RuntimeConfigurationError, RuntimeExecutionError, RuntimeError):
-                raise APIError(503, "probe_failed", "模型验收探针未能完成，请检查 Provider 授权和模型目录。") from None
-            if result != {
-                "status": "passed",
-                "model": result.get("model") if isinstance(result, dict) else None,
-                "business_tools_enabled": False,
-                "conversation_saved": False,
-            } or not isinstance(result["model"], str):
-                raise APIError(503, "probe_failed", "模型验收探针返回了无效结果。")
-            handler.send_json(200, {"probe": result})
+            handler.send_json(200, {
+                "probe": self._run_full_test_model_probe(handler.server.service),
+            })
             return True
         if path == "/v1/broker/health" and method == "GET":
             handler.send_json(200, {"broker": self.broker_health()})

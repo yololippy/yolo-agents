@@ -17,6 +17,8 @@
 		C00000000000000000000014 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift */; };
 		C00000000000000000000015 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift */; };
 		C00000000000000000000016 /* YoloAgentsSDK in Frameworks */ = {isa = PBXBuildFile; productRef = C00000000000000000000009 /* YoloAgentsSDK */; };
+		C00000000000000000000018 /* Tests/FullTestSimulatorLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001A /* Tests/FullTestSimulatorLiveTests.swift */; };
+		C00000000000000000000019 /* YoloTradeClient in Frameworks */ = {isa = PBXBuildFile; productRef = C0000000000000000000001B /* YoloTradeClient */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,6 +44,7 @@
 		C00000000000000000000010 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/SDKTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/SDKTests.swift"; sourceTree = "<group>"; };
 		C00000000000000000000011 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift"; sourceTree = "<group>"; };
 		C00000000000000000000012 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift"; sourceTree = "<group>"; };
+		C0000000000000000000001A /* Tests/FullTestSimulatorLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/FullTestSimulatorLiveTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +69,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000016 /* YoloAgentsSDK in Frameworks */,
+				C00000000000000000000019 /* YoloTradeClient in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -102,6 +106,7 @@
 				C00000000000000000000010 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/SDKTests.swift */,
 				C00000000000000000000011 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift */,
 				C00000000000000000000012 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift */,
+				C0000000000000000000001A /* Tests/FullTestSimulatorLiveTests.swift */,
 			);
 			name = Tests;
 			sourceTree = "<group>";
@@ -165,6 +170,7 @@
 			name = YoloTradeIOSSDKTests;
 			packageProductDependencies = (
 				C00000000000000000000009 /* YoloAgentsSDK */,
+				C0000000000000000000001B /* YoloTradeClient */,
 			);
 			productName = YoloTradeIOSSDKTests;
 			productReference = C00000000000000000000003 /* YoloTradeIOSSDKTests.xctest */;
@@ -259,6 +265,7 @@
 				C00000000000000000000013 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/SDKTests.swift in Sources */,
 				C00000000000000000000014 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift in Sources */,
 				C00000000000000000000015 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift in Sources */,
+				C00000000000000000000018 /* Tests/FullTestSimulatorLiveTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -494,6 +501,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A00000000000000000000030 /* XCLocalSwiftPackageReference "../../../packages/sdk-swift" */;
 			productName = YoloAgentsSDK;
+		};
+		C0000000000000000000001B /* YoloTradeClient */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000033 /* XCLocalSwiftPackageReference "../client-swift" */;
+			productName = YoloTradeClient;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

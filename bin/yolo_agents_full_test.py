@@ -45,6 +45,11 @@ from yolo_trade.apple_upgrade import (  # noqa: E402
 )
 from yolo_trade.full_test import FullTestPreflightError, live_preflight  # noqa: E402
 from yolo_trade.host_service import _paths as host_service_paths, install as install_host_service  # noqa: E402
+from test_yolo_trade_ios_simulator import (  # noqa: E402
+    SimulatorSDKTestError,
+    run_hosted_sdk_tests,
+    run_signed_acceptance_probe,
+)
 
 
 @dataclass(frozen=True)
@@ -533,27 +538,18 @@ def execute_live(
     return report, 0 if status in ("passed", "not_run") else 1
 
 
-def run_stored_model_probe(*, run=subprocess.run) -> dict[str, object]:
-    command = [
-        "/usr/bin/xcrun", "swift", "run", "--quiet", "--package-path",
-        str(ROOT / "apps/yolo-trade/client-swift"), "YoloTradeAcceptanceProbe",
-    ]
+def run_stored_model_probe(
+    *, mac_app: Path, host_endpoint: str,
+    probe_runner=run_signed_acceptance_probe,
+) -> dict[str, object]:
     try:
-        result = run(
-            command,
-            cwd=ROOT,
-            env=safe_environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=75,
-            check=False,
+        output = probe_runner(
+            ["--endpoint", host_endpoint], root=ROOT, mac_app=mac_app, timeout=75,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except SimulatorSDKTestError:
         raise RuntimeError("Mac 模型验收探针未能启动或超时。") from None
-    if result.returncode != 0 or len(result.stdout) > 65536:
-        raise RuntimeError("Mac 模型验收探针未通过。")
     try:
-        value = json.loads(result.stdout.decode("utf-8"))
+        value = json.loads(output.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
         raise RuntimeError("Mac 模型验收探针返回格式无效。") from None
     expected = {
@@ -573,18 +569,31 @@ def run_stored_model_probe(*, run=subprocess.run) -> dict[str, object]:
     return {key: value[key] for key in (*expected, "model")}
 
 
+def run_simulator_model_probe(
+    *, derived_data: Path, mac_app: Path, host_endpoint: str,
+) -> dict[str, object]:
+    return run_hosted_sdk_tests(
+        derived_data,
+        production_probe=True,
+        host_endpoint=host_endpoint,
+        mac_app=mac_app,
+    )
+
+
 def execute_acceptance(
     product: str,
     report_dir: Path,
     *,
     live_report: Path | None,
     mac_destination: Path | None,
+    host_endpoint: str | None,
     device: str | None,
     ios_client_online: bool,
     dry_run: bool = False,
     state_reader=candidate_state,
     preflight=live_preflight,
     model_probe=run_stored_model_probe,
+    simulator_probe=run_simulator_model_probe,
 ) -> tuple[dict, int]:
     if product != "yolo-trade":
         raise ValueError(f"unsupported full-test product: {product}")
@@ -597,8 +606,8 @@ def execute_acceptance(
         status, message = "not_run", "dry run"
     else:
         try:
-            if live_report is None or mac_destination is None or device is None:
-                raise LivePhaseBlocked("acceptance 阶段缺少 live 报告、Mac 安装位置或本轮设备。")
+            if live_report is None or mac_destination is None or device is None or not host_endpoint:
+                raise LivePhaseBlocked("acceptance 阶段缺少 live 报告、Mac 安装位置、本机 Host 地址或本轮设备。")
             live = _passing_phase_report(live_report, "live")
             _matching_candidate(live, current, "live")
         except LivePhaseBlocked as error:
@@ -614,11 +623,25 @@ def execute_acceptance(
                     "error": type(error).__name__,
                 })
             try:
-                probe = model_probe()
+                probe = model_probe(mac_app=mac_destination, host_endpoint=host_endpoint)
                 checks.append({"name": "mac-provider-model", "status": "passed", "details": probe})
             except Exception as error:
                 checks.append({
                     "name": "mac-provider-model", "status": "failed",
+                    "error": type(error).__name__,
+                })
+            try:
+                probe = simulator_probe(
+                    derived_data=report_dir / "derived-ios-simulator-acceptance",
+                    mac_app=mac_destination,
+                    host_endpoint=host_endpoint,
+                )
+                checks.append({
+                    "name": "ios-simulator-provider-model", "status": "passed", "details": probe,
+                })
+            except Exception as error:
+                checks.append({
+                    "name": "ios-simulator-provider-model", "status": "failed",
                     "error": type(error).__name__,
                 })
             checks.append({
@@ -669,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device")
     parser.add_argument("--live-report", type=Path)
     parser.add_argument("--ios-client-online", action="store_true")
+    parser.add_argument("--host-endpoint")
     args = parser.parse_args(argv)
     report_dir = create_report_dir(args.report_dir)
     try:
@@ -693,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
                     upgrade_report=args.upgrade_report,
                     mac_candidate=args.mac_candidate_app,
                     mac_destination=args.mac_destination,
+                    host_endpoint=args.host_endpoint,
                     mac_backup_root=args.mac_backup_root,
                     ios_candidate=args.ios_candidate_app,
                     ios_rollback=args.ios_rollback_app,

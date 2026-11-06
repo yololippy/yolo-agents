@@ -179,6 +179,44 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], "probe_timeout")
         self.assertNotIn("fixture", json.dumps(body))
 
+    def test_simulator_model_probe_requires_mac_issued_single_use_session(self):
+        self.app.runtime.acceptance_probe = lambda: {
+            "status": "passed", "model": "fixture-model",
+            "business_tools_enabled": False, "conversation_saved": False,
+        }
+        _, paired = self.request("POST", "/v1/devices/pair", {
+            "pairing_code": self.auth.issue_pairing_code("ios"),
+            "device_name": "Full Test Simulator", "platform": "ios",
+        })
+        ios_token = paired["token"]
+        self.assertEqual(
+            self.request("POST", "/v1/admin/full-test/simulator-session", {}, ios_token)[0], 403,
+        )
+        status, body = self.request(
+            "POST", "/v1/admin/full-test/simulator-session", {}, self.token,
+        )
+        self.assertEqual(status, 201)
+        session = body["session"]
+        self.assertEqual(session["expires_in"], 300)
+        self.assertNotEqual(session["pairing_code"], session["grant"])
+        self.assertEqual(
+            self.request("POST", "/v1/full-test/model-probe", {"grant": session["grant"]}, self.token)[0],
+            403,
+        )
+        status, body = self.request(
+            "POST", "/v1/full-test/model-probe", {"grant": session["grant"]}, ios_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["probe"], {
+            "status": "passed", "model": "fixture-model",
+            "business_tools_enabled": False, "conversation_saved": False,
+        })
+        status, body = self.request(
+            "POST", "/v1/full-test/model-probe", {"grant": session["grant"]}, ios_token,
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(body["error"]["code"], "invalid_probe_grant")
+
     def test_image_upload_message_runtime_output_events_and_authenticated_download(self):
         media_id = str(uuid4())
         self.assertEqual(self.media_request(
