@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -87,9 +88,22 @@ class FullTestAlreadyRunning(RuntimeError):
 
 
 @contextmanager
-def full_test_lock(product: str):
-    DEFAULT_REPORT_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = DEFAULT_REPORT_ROOT / f"{product}.lock"
+def full_test_lock(product: str, *, root: Path | None = None):
+    """Coordinate all phases with PR UI acceptance across linked worktrees."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", product):
+        raise FullTestAlreadyRunning("产品锁名称无效。")
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    result = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=ROOT if root is None else root, env=environment, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise FullTestAlreadyRunning("无法确定共享 Git 目录；完整测试保持 blocked。")
+    directory = Path(result.stdout.decode("utf-8").strip()).resolve() / "yolo-agents-pr-gate/locks"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    path = directory / f"{product}-ui.lock"
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         os.fchmod(descriptor, 0o600)
