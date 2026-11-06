@@ -7,7 +7,9 @@ import threading
 from uuid import UUID, uuid5
 
 from yolo_agents.api import APIError, identifier
-from yolo_agents.agent_runtime import RuntimeConfigurationError, RuntimeExecutionError
+from yolo_agents.agent_runtime import (
+    RuntimeConfigurationError, RuntimeExecutionError, RuntimeProviderTimeoutError,
+)
 from .runtime_tools import (
     MARKET_QUOTE_TOOL, OPEN_ORDER_TOOL, OPEN_ORDERS_TOOL, PAPER_ORDER_TOOL,
     PAPER_ORDERS_TOOL, POSITIONS_TOOL, RuntimeToolContext,
@@ -514,6 +516,8 @@ class TradingAPIExtension:
                 raise APIError(409, "probe_not_available", "当前 Provider 模式不支持模型验收探针。")
             try:
                 result = probe()
+            except RuntimeProviderTimeoutError:
+                raise APIError(504, "probe_timeout", "模型验收探针超时，已取消本次请求。") from None
             except (RuntimeConfigurationError, RuntimeExecutionError, RuntimeError):
                 raise APIError(503, "probe_failed", "模型验收探针未能完成，请检查 Provider 授权和模型目录。") from None
             if result != {

@@ -42,6 +42,10 @@ class RuntimeConnectionError(RuntimeExecutionError):
     """The cached provider connection failed and was discarded for the next run."""
 
 
+class RuntimeProviderTimeoutError(RuntimeExecutionError):
+    """A provider request exceeded its hard deadline and was cancelled."""
+
+
 class RuntimeGuardrailError(RuntimeExecutionError):
     """The credential guard blocked a request, tool call, or response."""
 

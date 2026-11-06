@@ -21,7 +21,7 @@ import httpx2
 
 from .agent_runtime import (
     LoginRequiredError, PydanticRuntime, RuntimeCapabilities, RuntimeConfigurationError,
-    RuntimeExecutionError, RuntimeStateError, _scope,
+    RuntimeExecutionError, RuntimeProviderTimeoutError, RuntimeStateError, _scope,
 )
 from .chatgpt_auth import AccountManager, _claims
 from .codex_runtime import CodexBusyError
@@ -320,14 +320,20 @@ class ChatGPTRuntime(PydanticRuntime):
                         '只用一句简短文本确认模型服务可用，不得输出凭据或账户信息。'
                     ),
                 )
-                result = agent.run_sync(
-                    '请回复：验收探针已完成。',
-                    timeout=45,
-                    model_settings={'max_tokens': 64},
-                    usage_limits=self._backend.UsageLimits(
-                        request_limit=1, tool_calls_limit=0, total_tokens_limit=2048,
-                    ),
-                )
+                async def request():
+                    return await agent.run(
+                        '请回复：验收探针已完成。',
+                        timeout=45,
+                        model_settings={'max_tokens': 64},
+                        usage_limits=self._backend.UsageLimits(
+                            request_limit=1, tool_calls_limit=0, total_tokens_limit=2048,
+                        ),
+                    )
+
+                try:
+                    result = asyncio.run(asyncio.wait_for(request(), timeout=45))
+                except TimeoutError:
+                    raise RuntimeProviderTimeoutError('模型验收探针超过 45 秒硬超时。') from None
                 output = getattr(result, 'output', None)
                 if not isinstance(output, str) or not output.strip():
                     raise RuntimeExecutionError('模型验收探针没有返回文本。')

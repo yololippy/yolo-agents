@@ -137,6 +137,10 @@ def fake_backend():
             self.calls.append((prompt, kwargs))
             return SimpleNamespace(output="验收探针已完成。")
 
+        async def run(self, prompt, **kwargs):
+            self.calls.append((prompt, kwargs))
+            return SimpleNamespace(output="验收探针已完成。")
+
     def component(*args, **kwargs):
         value = SimpleNamespace(args=args, kwargs=kwargs)
         backend.components.append(value)
