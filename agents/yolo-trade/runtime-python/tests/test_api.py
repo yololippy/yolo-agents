@@ -165,6 +165,20 @@ class HTTPTests(unittest.TestCase):
             400,
         )
 
+    def test_full_test_model_probe_timeout_is_bounded_and_explicit(self):
+        from yolo_agents.agent_runtime import RuntimeProviderTimeoutError
+
+        def timeout():
+            raise RuntimeProviderTimeoutError("fixture")
+
+        self.app.runtime.acceptance_probe = timeout
+        status, body = self.request(
+            "POST", "/v1/admin/full-test/model-probe", {}, self.token,
+        )
+        self.assertEqual(status, 504)
+        self.assertEqual(body["error"]["code"], "probe_timeout")
+        self.assertNotIn("fixture", json.dumps(body))
+
     def test_image_upload_message_runtime_output_events_and_authenticated_download(self):
         media_id = str(uuid4())
         self.assertEqual(self.media_request(

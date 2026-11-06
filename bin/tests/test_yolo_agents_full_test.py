@@ -317,6 +317,20 @@ class FullTestRunnerTests(unittest.TestCase):
         self.assertEqual(report["status"], "blocked")
         probe.assert_called_once()
 
+    def test_stored_model_probe_has_a_bounded_outer_timeout(self):
+        payload = {
+            "status": "passed", "agent_id": "yolo-trade",
+            "provider_authenticated": True, "model_catalog_available": True,
+            "mac_client_online": True, "model_roundtrip_passed": True,
+            "business_tools_enabled": False, "conversation_saved": False,
+            "model": "fixture-model",
+        }
+        run = Mock(return_value=Mock(
+            returncode=0, stdout=__import__("json").dumps(payload).encode(), stderr=b"",
+        ))
+        self.assertEqual(full_test.run_stored_model_probe(run=run)["status"], "passed")
+        self.assertEqual(run.call_args.kwargs["timeout"], 75)
+
     def test_full_test_lock_rejects_a_concurrent_phase_for_same_product(self):
         with full_test.full_test_lock("fixture-product"):
             with self.assertRaises(full_test.FullTestAlreadyRunning):

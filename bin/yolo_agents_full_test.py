@@ -545,7 +545,7 @@ def run_stored_model_probe(*, run=subprocess.run) -> dict[str, object]:
             env=safe_environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=180,
+            timeout=75,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):

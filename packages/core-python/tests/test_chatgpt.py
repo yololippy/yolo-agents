@@ -21,7 +21,9 @@ from uuid import uuid4
 
 from pydantic_ai.providers.openai_chatgpt import OpenAIChatGPTCredentials
 
-from yolo_agents.agent_runtime import LoginRequiredError, RuntimeExecutionError, RuntimeStateError
+from yolo_agents.agent_runtime import (
+    LoginRequiredError, RuntimeExecutionError, RuntimeProviderTimeoutError, RuntimeStateError,
+)
 from yolo_agents.chatgpt_auth import AccountManager, CredentialStore
 from yolo_agents.chatgpt_runtime import ChatGPTRuntime
 from yolo_agents.codex_runtime import CodexBusyError
@@ -324,6 +326,37 @@ class ChatGPTRuntimeTests(unittest.TestCase):
         self.assertNotIn('tools', agent.options)
         self.assertNotIn('capabilities', agent.options)
         self.assertEqual(agent.calls[-1][1]['usage_limits'].kwargs['tool_calls_limit'], 0)
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+
+    def test_acceptance_probe_hard_timeout_cancels_and_releases_activity(self):
+        cancelled = threading.Event()
+        backend = self.backend
+
+        class HangingAgent:
+            def __init__(self, model, **kwargs):
+                self.model, self.options, self.calls = model, kwargs, []
+                backend.agents.append(self)
+
+            async def run(self, prompt, **kwargs):
+                self.calls.append((prompt, kwargs))
+                try:
+                    await asyncio.sleep(60)
+                finally:
+                    cancelled.set()
+
+        self.runtime._backend.Agent = HangingAgent
+        real_wait_for = asyncio.wait_for
+
+        async def short_wait_for(awaitable, timeout):
+            self.assertEqual(timeout, 45)
+            return await real_wait_for(awaitable, timeout=.01)
+
+        with patch("yolo_agents.chatgpt_runtime.asyncio.wait_for", side_effect=short_wait_for):
+            with self.assertRaises(RuntimeProviderTimeoutError):
+                self.runtime.acceptance_probe()
+        self.assertTrue(cancelled.wait(1))
+        self.assertEqual(self.runtime._active, 0)
+        self.assertEqual(self.runtime.list_models()["default_model"], "model-a")
         self.assertIsNone(self.store.get_agent_state(self.cid))
 
     def test_model_change_uses_fresh_official_state_with_visible_product_context(self):
