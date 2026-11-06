@@ -303,7 +303,8 @@ class UIWorkflow:
             runtime = max(available, key=lambda item: tuple(int(part) for part in item["version"].split(".")))
             supported = {item["identifier"] for item in runtime["supportedDeviceTypes"]}
             def version(value):
-                return tuple(int(part) for part in value.split("."))
+                parts = tuple(int(part) for part in value.split("."))
+                return parts + (0,) * max(0, 3 - len(parts))
             runtime_version = version(runtime["version"])
             phones = [item for item in types if item.get("productFamily") == "iPhone"
                       and item["identifier"] in supported
