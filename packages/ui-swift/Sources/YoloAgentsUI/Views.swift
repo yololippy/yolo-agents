@@ -378,6 +378,7 @@ private struct ChatShell: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier(ConversationRowAccessibility.identifier(for: conversation.id))
         .contextMenu { conversationActions(conversation) }
     }
 
@@ -447,6 +448,7 @@ private struct ChatShell: View {
                                 }
                             }
                         }
+                        .accessibilityIdentifier(ConversationRowAccessibility.identifier(for: conversation.id))
                         .contextMenu {
                             Button { copyConversationID(conversation.id) } label: {
                                 Label("复制会话 ID", systemImage: "doc.on.doc")

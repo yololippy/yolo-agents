@@ -65,16 +65,15 @@ final class PRConversationUITests: XCTestCase {
         }
         let conversationTitle = "PR UI " + runID
         // Select the dedicated temporary conversation through the ordinary sidebar/list.
-        #if os(macOS)
-        let conversation = try macConversationRow(app: app, title: conversationTitle, timeout: 60)
-        #else
-        let conversation = app.staticTexts[conversationTitle].firstMatch
-        guard conversation.waitForExistence(timeout: 60) else { throw Failure.missingConversation }
-        #endif
+        let conversation = try conversationRow(app: app, timeout: 60)
         activate(conversation)
         let editor = app.textViews["chat.composer"].firstMatch
         guard editor.waitForExistence(timeout: 60) else { throw Failure.missingEditor }
-        let conversationHash = try copyConversationHash(app: app, title: conversationTitle)
+        // The title is a display assertion only, never a click or context-menu target.
+        guard app.staticTexts[conversationTitle].firstMatch.waitForExistence(timeout: 30) else {
+            throw Failure.missingConversation
+        }
+        let conversationHash = try copyConversationHash(app: app)
         let macToken = "MACUI" + runID
         let iosToken = "IOSUI" + runID
         let macPrompt = prompt(macToken)
@@ -146,33 +145,36 @@ final class PRConversationUITests: XCTestCase {
         }
     }
 
-    #if os(macOS)
-    private func macConversationRow(app: XCUIApplication, title: String, timeout: TimeInterval) throws -> XCUIElement {
-        // SwiftUI exposes the combined title/date/badge on the row itself,
-        // without a StaticText child. Match the full title (including run UUID)
-        // on native rows/cells; a detail-pane StaticText is never a candidate.
-        let label = NSPredicate(format: "label CONTAINS %@", title)
-        let rowQueries = [
-            app.outlineRows.matching(label),
-            app.tableRows.matching(label),
-            app.cells.matching(label),
-        ]
-        let available = NSPredicate { _, _ in rowQueries.contains { $0.count > 0 } }
-        guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: available, object: nil)],
-                            timeout: timeout) == .completed else {
+    private func conversationRow(app: XCUIApplication, timeout: TimeInterval) throws -> XCUIElement {
+        // The temporary Host contains exactly one conversation. SwiftUI may
+        // propagate its ID to multiple AX nodes, so uniqueness is by ID rather
+        // than node count. Neither role nor title participates in selection.
+        let rows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat.conversation-row."))
+        var candidate: XCUIElement?
+        var ambiguous = false
+        let ready = NSPredicate { _, _ in
+            let elements = rows.allElementsBoundByIndex
+            let identifiers = Set(elements.map { $0.identifier })
+            if identifiers.count > 1 {
+                ambiguous = true
+                return true
+            }
+            candidate = elements.first { $0.isHittable }
+            return candidate != nil
+        }
+        let result = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: nil)],
+                                    timeout: timeout)
+        if ambiguous { throw Failure.ambiguousConversation }
+        guard result == .completed, let candidate else {
             throw Failure.missingConversation
         }
-        for rows in rowQueries where rows.count > 0 {
-            guard rows.count == 1 else { throw Failure.ambiguousConversation }
-            return rows.element(boundBy: 0)
-        }
-        throw Failure.missingConversation
+        return candidate
     }
-    #endif
 
-    private func copyConversationHash(app: XCUIApplication, title: String) throws -> String {
+    private func copyConversationHash(app: XCUIApplication) throws -> String {
         #if os(macOS)
-        let conversation = try macConversationRow(app: app, title: title, timeout: 30)
+        let conversation = try conversationRow(app: app, timeout: 30)
         conversation.rightClick()
         let copy = app.menuItems["复制会话 ID"].firstMatch
         guard copy.waitForExistence(timeout: 10) else { throw Failure.missingConversationMenu }
