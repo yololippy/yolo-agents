@@ -1,0 +1,4 @@
+#!/bin/zsh
+set -euo pipefail
+repo_root="${0:A:h:h}"
+exec /usr/bin/env python3 "$repo_root/bin/yolo_agents_pr_runner.py" "$@"

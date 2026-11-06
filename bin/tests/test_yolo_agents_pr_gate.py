@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("yolo_agents_pr_gate", Path(__file__).resolve().parents[1] / "yolo_agents_pr_gate.py")
 gate = importlib.util.module_from_spec(SPEC)
@@ -156,6 +156,18 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in report["checks"]], ["failed", "failed", "passed"])
         self.assertEqual(report["checks"][1]["reason"], "timeout")
         self.assertIn("still executed", (self.run_dir / report["checks"][2]["log"]).read_text())
+
+    def test_controller_interrupt_stops_only_the_active_check_process_group(self):
+        output = Path(self.temporary.name) / "output"
+        (output / "logs").mkdir(parents=True)
+        process = Mock(pid=123456)
+        process.wait.side_effect = [KeyboardInterrupt(), 0]
+        check = gate.Check("owned", (sys.executable, "-c", "pass"), 10)
+        with patch.object(gate.subprocess, "Popen", return_value=process), patch.object(gate.os, "killpg") as kill:
+            with self.assertRaises(KeyboardInterrupt):
+                gate.execute_check(check, self.root, output)
+        kill.assert_called_once_with(process.pid, gate.signal.SIGINT)
+        self.assertEqual(process.wait.call_count, 2)
 
     def test_dry_run_is_not_a_passing_report(self):
         manifest, key = self.prepare()

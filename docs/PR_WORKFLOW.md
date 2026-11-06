@@ -1,6 +1,6 @@
 # PR 后置测试与合并
 
-开发顺序固定为：`功能分支 → commit → push → PR → 并行测试 → 双端真实 UI 对话与同步 → rebase merge`。commit 保存开发进度，测试决定 PR 能否合并。
+开发顺序固定为：`功能分支 → commit → push → PR → runner 自动并行测试 → 双端真实 UI 对话与同步 → 人工授权后 rebase merge`。commit 保存开发进度，测试决定 PR 能否合并；runner 永不修改代码或合并。
 
 ## 开发与提交
 
@@ -12,9 +12,11 @@
 
 ## 冻结待测版本
 
-创建 PR 后，主会话立即从官方 GitHub API 读取 PR 元数据。记录仓库、PR 编号、产品、head/base 分支及完整 SHA、open/draft 状态。元数据只包含版本标识，不包含认证信息。
+PR 创建或更新后，本机 runner 每 120 秒使用 GitHub 官方公开 REST API 检查一次受信任 PR。仅接受同仓库、非 fork、受信任作者、目标为 `master`、open 非 draft 且使用规定分支前缀的 PR；其他请求拒绝执行。元数据只包含版本标识，不包含认证信息或宿主连接凭据。
 
-使用 `bin/yolo-agents-pr-gate` 准备测试运行。入口校验远端仓库、分支、版本与干净工作树，为 P0、Mac 和 Simulator 创建同一 head 的独立 detached worktree、构建目录和私有报告目录。准备阶段由主会话执行；开发 checkout 不承担测试中的修改或清理。
+每个 PR 的私有 ledger 最多记录两轮。runner 在创建任何测试资源前原子预留轮次；同一 head 不重复执行，head 更新、runner 重启或中断都不会退还次数。第一轮未通过时只等待修复后的新 head；第二轮结束后无论结果和后续 push 均停止，不存在 reset、retry、force 或提高上限的配置。
+
+runner 使用 `bin/yolo-agents-pr-gate` 准备测试运行。入口校验远端仓库、分支、版本与干净工作树，为 P0、Mac 和 Simulator 创建同一 head 的独立 detached worktree、构建目录和私有报告目录。开发 checkout 不承担测试中的修改或清理。
 
 元数据文件只保留八个字段：`repository`、`pr_number`、`base_ref`、`base_sha`、`head_ref`、`head_sha`、`state`、`draft`。SHA 为官方 API 当前返回的完整 40 位小写值；`state` 必须为 `open`，`draft` 为 `false`。通过 Git SSH 获取 `origin/master` 和该 PR 的 `refs/pull/<编号>/head`，不复制浏览器或宿主的认证信息。
 
@@ -29,11 +31,11 @@ prepare 返回本轮 `run_dir` 和 `run_id`，后续始终使用这两个值。�
 
 当前真实 UI 验收实现面向 YoloTrade；没有相应产品验收能力时必须报告 `blocked`，不能静默改测另一产品或把共享测试当成该产品验收。
 
-## 并行测试
+## 自动并行测试
 
-主会话创建或复用最多三个左侧栏可见的独立测试会话。不得用当前会话内部的临时子 Agent 代替。
+`bin/yolo-agents-pr-runner scan --config <私有配置>` 是唯一测试调度入口；LaunchAgent 每 120 秒启动一次，跨运行使用全局文件锁防止重复消费。`status` 只读取 ledger，不启动测试。配置只允许仓库、受信任作者、现有 checkout、Python、产品、产品凭据目录、私有状态目录和可选 PR 编号列表，不允许配置测试轮数。
 
-用户已选择所有直属开发、测试会话使用 Full Access（`danger-full-access`、`approval_policy=never`）。按 [协作技能](../.agents/skills/yolo-agents-coordination/SKILL.md) 显式配置每次启动/恢复的权限，并核对准确 worktree；应用创建工具没有权限参数时，用等待初始化的侧栏会话配合官方 CLI `exec resume`，不能只在任务文字中声明权限。
+runner 为每轮创建独立 source worktree，再以三个受管子进程并行运行固定检查组。总截止时间为 30 分钟；执行期间定期重新读取官方 PR 元数据，head、base、状态或 draft 变化会只中断本轮拥有的进程并记为 `superseded`，该轮仍计数。SIGINT/SIGTERM 同样只清理 runner 自己的进程、临时 Host、App、Simulator 和 worktree，不终止正式服务。
 
 | 组 | 主要检查 |
 | --- | --- |
@@ -41,9 +43,9 @@ prepare 返回本轮 `run_dir` 和 `run_id`，后续始终使用这两个值。�
 | Mac | Swift SDK、共享 UI、目标产品客户端测试与独立 Mac 候选构建 |
 | Simulator | 独立 Simulator 候选构建与 hosted SDK 测试 |
 
-每组读取相同的运行标识、head SHA、base SHA 和产品，并写入自己的报告。测试会话只运行与报告，不能改代码、提交、push、继续派发或重试业务请求；固定入口可以执行只读 Git 命令核对版本。所有构建与日志使用本运行专属目录。
+每组读取相同的运行标识、head SHA、base SHA 和产品，并写入自己的签名报告。runner 必须验证三个报告的签名、身份、完整检查清单、退出状态与日志哈希全部通过后，才启动 UI 验收；任何一组失败都不运行 UI，也不生成可合并结论。所有构建与日志使用本运行专属目录。
 
-三个测试会话分别调用一条命令；`--root` 指向主会话已冻结的开发 worktree，入口从 manifest 选择该组自己的测试 worktree：
+runner 并行调用以下三条命令；`--root` 指向本轮冻结的 source worktree，入口从 manifest 选择该组自己的测试 worktree：
 
 ```sh
 bin/yolo-agents-pr-gate --root <开发worktree> run-group --run-dir <run_dir> --group p0
@@ -55,7 +57,7 @@ bin/yolo-agents-pr-gate --root <开发worktree> run-group --run-dir <run_dir> --
 
 ## 实际 App 对话与同步
 
-三个组完成后，主会话运行 `bin/test_yolo_trade_pr_ui.py`。该入口启动真实候选 Mac App 和一次性 iOS Simulator App，由 XCUITest 操作可见的会话、输入框和发送按钮，并核对双方的真实助手回复。
+三个组通过后，runner 自动运行 `bin/test_yolo_trade_pr_ui.py`。该入口启动真实候选 Mac App 和一次性 iOS Simulator App，由 XCUITest 操作可见的会话、输入框和发送按钮，并核对双方的真实助手回复。
 
 ```sh
 <现有venv的python> bin/test_yolo_trade_pr_ui.py \
@@ -76,7 +78,7 @@ Mac 和 Simulator 分别使用自己的临时配对身份，共用测试会话�
 
 ## 汇总与合并
 
-主会话从官方 GitHub API 重新取得当前 PR 和 master 元数据，再调用门禁汇总。所有必需报告都必须对应本运行的同一产品、head/base，并且实际执行结果为 `passed`。报告缺失、重复、版本不符、工作树污染、失败、受阻、跳过或 dry run 都拒绝放行。
+runner 从官方 GitHub API 重新取得当前 PR 和 master 元数据，再调用门禁汇总。所有必需报告都必须对应本运行的同一产品、head/base，并且实际执行结果为 `passed`。报告缺失、重复、版本不符、工作树污染、失败、受阻、跳过或 dry run 都拒绝放行。
 
 ```sh
 bin/yolo-agents-pr-gate summary --run-dir <run_dir> \
@@ -87,6 +89,6 @@ bin/yolo-agents-pr-gate summary --run-dir <run_dir> \
 
 head 或 master 在测试期间变化时，本轮结果失效。重新冻结新版本、准备新的运行并测试，不能只替换报告中的 SHA，也不能沿用旧结果。
 
-汇总允许合并后，主会话还需核对 PR 无冲突、没有未满足的 GitHub 门禁或要求修改的 review，并确认用户已授权合并。使用 GitHub 官方接口的 `rebase` 方法，传入预期 head SHA；再次核对 base 后立即执行。GitHub 若因并发更新或保护规则拒绝，重新读取状态，不绕过门禁、强推或降级为 squash/merge commit。
+汇总允许合并后，runner 只记录 `merge_ready=true` 并停止。主会话仍需核对 PR 无冲突、没有未满足的 GitHub 门禁或要求修改的 review，并确认用户已授权合并。使用 GitHub 官方接口的 `rebase` 方法，传入预期 head SHA；再次核对 base 后立即执行。GitHub 若因并发更新或保护规则拒绝，重新读取状态，不绕过门禁、强推或降级为 squash/merge commit。
 
-PR 后置测试是交付门禁，不是周期性任务，也不会自动安装后台服务。用户明确要求的完整安装、升级、回滚和真机流程仍使用 [完整测试技能](../.agents/skills/yolo-agents-full-test/SKILL.md)。
+PR runner 是本机交付门禁服务，只监测配置中受信任的仓库与 PR，不执行产品周期任务。用户明确要求的完整安装、升级、回滚和真机流程仍使用 [完整测试技能](../.agents/skills/yolo-agents-full-test/SKILL.md)。
