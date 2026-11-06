@@ -84,10 +84,11 @@ class PRUIGateTests(unittest.TestCase):
                 if command[2:4] == ["list", "devicetypes"]:
                     return json.dumps({"devicetypes": phones}).encode()
                 if command[2] == "create":
-                    return b"40000000-0000-4000-8000-000000000004\n"
+                    return b"ABCDEF00-0000-4000-8000-000000000004\n"
                 return b""
             workflow = ui.UIWorkflow(self.options(directory), Path(directory), execute=execute)
             workflow.create_simulator()
+            self.assertEqual(workflow.device, "ABCDEF00-0000-4000-8000-000000000004")
             created = next(command for command in calls if command[2] == "create")
             self.assertEqual(created[4:], ["phone-supported", runtime["identifier"]])
             for supported in [[], [{"identifier": "uninstalled-phone"}]]:
@@ -128,6 +129,8 @@ class PRUIGateTests(unittest.TestCase):
                 workflow = FakeWorkflow(fail=failure)
                 report = self.gate(directory, workflow)
                 self.assertEqual(report["status"], "failed")
+                self.assertEqual(next(check["stage"] for check in report["checks"]
+                                      if check.get("reason") == "fixture_failure"), failure)
                 self.assertEqual(workflow.calls[-2:], ["cleanup", "revision"])
                 if failure != "mac_verify":
                     self.assertNotIn("mac_verify", workflow.calls)
