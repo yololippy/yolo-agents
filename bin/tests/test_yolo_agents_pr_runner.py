@@ -210,6 +210,39 @@ class RunnerTests(unittest.TestCase):
         self.assertLess(events.index("spawn-ui"), events.index("summary"))
         self.assertEqual(events[-1], "cleanup")
 
+    def test_failed_signed_group_blocks_ui_and_reports_the_group(self):
+        source = Path(self.temporary.name) / "source-failure"
+        source.mkdir()
+        run_dir = Path(self.temporary.name) / "run-failure"
+        for name in ("p0", "mac", "simulator"):
+            (run_dir / name).mkdir(parents=True)
+        events = []
+
+        class Gate:
+            GROUPS = ("p0", "mac", "simulator")
+            def prepare(self, *_args): return {"run_dir": str(run_dir)}
+            def load_manifest(self, *_args): return ({"run_id": "1" * 32}, b"key")
+            def read_json(self, path): return {"status": "failed", "path": str(path)}
+            def validate_group(self, _report, group, *_args):
+                events.append("validate-" + group)
+                if group == "p0": raise RuntimeError("private fixture detail")
+            def cleanup(self, *_args): events.append("cleanup")
+
+        class Process:
+            returncode = 0
+            def poll(self): return self.returncode
+            def wait(self, timeout=None): return self.returncode
+
+        engine = runner.Engine(FakeGitHub(candidate()))
+        engine._source = Mock(return_value=source)
+        engine._spawn = lambda *_args: Process()
+        with patch.object(runner, "load_gate", return_value=Gate()), patch.object(runner, "git", return_value=""):
+            result = engine.run(self.config, candidate(), Path(self.temporary.name) / "attempt-failure")
+        self.assertEqual(result["reason"], "p0_failed")
+        self.assertFalse(result["merge_ready"])
+        self.assertNotIn("spawn-ui", events)
+        self.assertEqual(events[-1], "cleanup")
+
     def test_metadata_change_is_superseded_before_execution_continues(self):
         github = FakeGitHub(candidate("c" * 40))
         engine = runner.Engine(github)
