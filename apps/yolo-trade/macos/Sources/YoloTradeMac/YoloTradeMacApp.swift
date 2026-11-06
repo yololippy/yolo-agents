@@ -10,10 +10,10 @@ struct YoloTradeMacApp: App {
             // Hosted SDK tests must not restore production pairing or cached chat.
             Color.clear
         } else {
-            YoloTradeRootView()
+            YoloTradeAppEntryView()
         }
         #else
-        YoloTradeRootView()
+        YoloTradeAppEntryView()
         #endif
     }
     var body: some Scene {

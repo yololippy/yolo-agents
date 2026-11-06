@@ -19,6 +19,8 @@
 		C00000000000000000000016 /* YoloAgentsSDK in Frameworks */ = {isa = PBXBuildFile; productRef = C00000000000000000000009 /* YoloAgentsSDK */; };
 		C00000000000000000000018 /* Tests/FullTestSimulatorLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001A /* Tests/FullTestSimulatorLiveTests.swift */; };
 		C00000000000000000000019 /* YoloTradeClient in Frameworks */ = {isa = PBXBuildFile; productRef = C0000000000000000000001B /* YoloTradeClient */; };
+		D0000000000000000000006B /* PRConversationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000001; };
+		D000000000000000000000CF /* PRConversationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000001; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -29,6 +31,8 @@
 			remoteGlobalIDString = A00000000000000000000004;
 			remoteInfo = YoloTradeIOS;
 		};
+		D0000000000000000000006E = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001; proxyType = 1; remoteGlobalIDString = A00000000000000000000005; remoteInfo = YoloTradeMac; };
+		D000000000000000000000D2 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001; proxyType = 1; remoteGlobalIDString = A00000000000000000000004; remoteInfo = YoloTradeIOS; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +49,9 @@
 		C00000000000000000000011 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift"; sourceTree = "<group>"; };
 		C00000000000000000000012 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift"; sourceTree = "<group>"; };
 		C0000000000000000000001A /* Tests/FullTestSimulatorLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/FullTestSimulatorLiveTests.swift; sourceTree = "<group>"; };
+		D00000000000000000000001 /* Tests/PRConversationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/PRConversationUITests.swift; sourceTree = "<group>"; };
+		D0000000000000000000006C /* YoloTradeMacPRUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YoloTradeMacPRUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D000000000000000000000D0 /* YoloTradeIOSPRUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YoloTradeIOSPRUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +80,8 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D00000000000000000000069 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		D000000000000000000000CD = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -93,6 +102,8 @@
 		A00000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				D000000000000000000000D0 /* YoloTradeIOSPRUITests.xctest */,
+				D0000000000000000000006C /* YoloTradeMacPRUITests.xctest */,
 				A00000000000000000000009 /* YoloTradeIOS.app */,
 				A0000000000000000000000A /* YoloTradeMac.app */,
 				C00000000000000000000003 /* YoloTradeIOSSDKTests.xctest */,
@@ -103,6 +114,7 @@
 		C00000000000000000000002 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				D00000000000000000000001 /* Tests/PRConversationUITests.swift */,
 				C00000000000000000000010 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/SDKTests.swift */,
 				C00000000000000000000011 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/LiveServiceTests.swift */,
 				C00000000000000000000012 /* ../../../packages/sdk-swift/Tests/YoloAgentsSDKTests/KeychainTests.swift */,
@@ -176,6 +188,28 @@
 			productReference = C00000000000000000000003 /* YoloTradeIOSSDKTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		D00000000000000000000064 /* YoloTradeMacPRUITests */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = D00000000000000000000065;
+            buildPhases = (D00000000000000000000068, D00000000000000000000069, D0000000000000000000006A);
+            buildRules = ();
+            dependencies = (D0000000000000000000006D);
+            name = YoloTradeMacPRUITests;
+            productName = YoloTradeMacPRUITests;
+            productReference = D0000000000000000000006C;
+            productType = "com.apple.product-type.bundle.ui-testing";
+        };
+		D000000000000000000000C8 /* YoloTradeIOSPRUITests */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = D000000000000000000000C9;
+            buildPhases = (D000000000000000000000CC, D000000000000000000000CD, D000000000000000000000CE);
+            buildRules = ();
+            dependencies = (D000000000000000000000D1);
+            name = YoloTradeIOSPRUITests;
+            productName = YoloTradeIOSPRUITests;
+            productReference = D000000000000000000000D0;
+            productType = "com.apple.product-type.bundle.ui-testing";
+        };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -185,6 +219,8 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
+					D000000000000000000000C8 = {TestTargetID = A00000000000000000000004; };
+					D00000000000000000000064 = {TestTargetID = A00000000000000000000005; };
 					C00000000000000000000001 = {
 						TestTargetID = A00000000000000000000004;
 					};
@@ -208,6 +244,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				D000000000000000000000C8 /* YoloTradeIOSPRUITests */,
+				D00000000000000000000064 /* YoloTradeMacPRUITests */,
 				A00000000000000000000004 /* YoloTradeIOS */,
 				A00000000000000000000005 /* YoloTradeMac */,
 				C00000000000000000000001 /* YoloTradeIOSSDKTests */,
@@ -239,6 +277,8 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0000000000000000000006A = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		D000000000000000000000CE = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -269,6 +309,8 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D00000000000000000000068 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D0000000000000000000006B /* PRConversationUITests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		D000000000000000000000CC = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D000000000000000000000CF /* PRConversationUITests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -277,6 +319,8 @@
 			target = A00000000000000000000004 /* YoloTradeIOS */;
 			targetProxy = C00000000000000000000017 /* PBXContainerItemProxy */;
 		};
+		D0000000000000000000006D = {isa = PBXTargetDependency; target = A00000000000000000000005; targetProxy = D0000000000000000000006E; };
+		D000000000000000000000D1 = {isa = PBXTargetDependency; target = A00000000000000000000004; targetProxy = D000000000000000000000D2; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -320,7 +364,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -343,7 +387,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -364,7 +408,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -383,7 +427,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -434,6 +478,52 @@
 			};
 			name = Release;
 		};
+		D00000000000000000000066 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic;
+                DEVELOPMENT_TEAM = 5BQ2U68A8X;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX).mac.pruitests";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                TEST_TARGET_NAME = YoloTradeMac;
+                SWIFT_VERSION = 6.0;
+                SDKROOT = macosx;
+                SUPPORTED_PLATFORMS = macosx;
+                MACOSX_DEPLOYMENT_TARGET = 14.0;
+            }; name = Debug; };
+		D00000000000000000000067 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic;
+                DEVELOPMENT_TEAM = 5BQ2U68A8X;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX).mac.pruitests";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                TEST_TARGET_NAME = YoloTradeMac;
+                SWIFT_VERSION = 6.0;
+                SDKROOT = macosx;
+                SUPPORTED_PLATFORMS = macosx;
+                MACOSX_DEPLOYMENT_TARGET = 14.0;
+            }; name = Release; };
+		D000000000000000000000CA /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic;
+                DEVELOPMENT_TEAM = 5BQ2U68A8X;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX).ios.pruitests";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                TEST_TARGET_NAME = YoloTradeIOS;
+                SWIFT_VERSION = 6.0;
+                SDKROOT = iphoneos;
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+            }; name = Debug; };
+		D000000000000000000000CB /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic;
+                DEVELOPMENT_TEAM = 5BQ2U68A8X;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = "$(YOLO_TRADE_BUNDLE_IDENTIFIER)$(PR_TEST_BUNDLE_SUFFIX).ios.pruitests";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                TEST_TARGET_NAME = YoloTradeIOS;
+                SWIFT_VERSION = 6.0;
+                SDKROOT = iphoneos;
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+            }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -473,6 +563,8 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		D00000000000000000000065 = {isa = XCConfigurationList; buildConfigurations = (D00000000000000000000066, D00000000000000000000067); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		D000000000000000000000C9 = {isa = XCConfigurationList; buildConfigurations = (D000000000000000000000CA, D000000000000000000000CB); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */

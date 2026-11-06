@@ -9,10 +9,10 @@ struct YoloTradeIOSApp: App {
         if ProcessInfo.processInfo.environment["YOLO_AGENTS_RUNNING_SDK_TESTS"] == "1" {
             Color.clear
         } else {
-            YoloTradeRootView()
+            YoloTradeAppEntryView()
         }
         #else
-        YoloTradeRootView()
+        YoloTradeAppEntryView()
         #endif
     }
 
