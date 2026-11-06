@@ -8,7 +8,7 @@
 - JSON 编码 UTF-8，字段使用 snake_case，ID 为 UUID，时间为 UTC ISO8601。版本是 URL `/v1` 及健康/配对响应的 `api_version: 1`。
 - 除健康检查与首次配对外，每个请求携带 `Authorization: Bearer <device_token>`。令牌在客户端 Keychain 保存，后端只存 SHA-256；无浏览器全局 CORS 放行。
 - 服务启动时本机控制台显示两个一次性配对码，分别绑定 `macos` / `ios`，有效十分钟。代码必须与请求平台一致；设备自报平台不能提升配对码授权。
-- 两端都有 `chat:read`、`chat:write`；Mac 配对码另授 `devices:manage`。Paper 订单操作同时要求服务端配对记录为 macos 且具有 devices:manage，iPhone 只读脱敏订单；Live、自动预授权和定时交易接口关闭。
+- 两端都有 `chat:read`、`chat:write`；Mac 配对码另授 `devices:manage`。YoloTrade 的 Paper 写操作允许有效 Mac 管理设备，或由 Mac 通过产品私有授权单独启用的已配对 iPhone；授权状态不提升共享设备权限。每笔订单仍需发起设备明确确认，券商调用只在 Mac Host 执行。Live、自动预授权和定时交易接口关闭。
 - 健康响应明确 `agent_mode: demo`、`pydantic`、`codex` 或 `chatgpt`，并包含 `agent_id`、`app_name`。演示模式不调用云端模型；Codex 模式复用 Codex 受管登录，chatgpt 模式使用本 Agent 的独立 SIWC 授权；设备均不获取 OpenAI token。
 
 ## HTTP 接口
@@ -25,6 +25,12 @@
 | `POST /v1/codex/account/login` | Mac 管理凭据；空 JSON `{}` | `{login_id,auth_url}`；启动 Codex 托管浏览器登录 |
 | `POST /v1/codex/account/logout` | Mac 管理凭据；空 JSON `{}` | `{account:{status,email,plan_type}}`；退出后重新读取实际状态 |
 | `GET /v1/broker/health` | 已配对设备 | `{broker}`；配置摘要、连接/对账状态及固定只读限制，不含账户标识或凭据 |
+| `GET /v1/positions` | 已配对设备 | `{positions,count,as_of}`；YoloTrade 目标账户的脱敏持仓，不含账户标识 |
+| `GET /v1/instruments/search?q=...` | 已配对设备 | `{instruments,count,as_of}`；YoloTrade IBKR 股票候选，最多 16 条 |
+| `GET /v1/instruments/{con_id}/quote` | 已配对设备 | `{quote}`；精确合约的参考行情，不构成限价输入 |
+| `GET /v1/paper-trading/authorization` | 已配对设备 | `{authorization:{device_id,paper_trading_enabled,authorization_revision}}`；Mac 或无授权时修订可为 null |
+| `GET /v1/paper-trading/devices` | Mac 管理凭据 | 已配对 iPhone 的产品私有 Paper 授权列表及不透明修订 |
+| `POST /v1/paper-trading/devices/{id}` | Mac 管理凭据；`{enabled:boolean}` | 授予或撤销该 iPhone 的产品私有 Paper 权限，并返回新授权修订 |
 | `POST /v1/devices/pair` | `{pairing_code, device_name, platform}` | 201 `{device, token, server_id, api_version}` |
 | `GET /v1/devices` | Mac 管理凭据 | `{devices:[device]}` |
 | `DELETE /v1/devices/{id}` | 自己或 Mac 管理凭据 | `{device}`；撤销后既有凭据无效 |
@@ -144,4 +150,4 @@ PydanticAI 路径把已验证图片作为官方 `BinaryContent` 传给模型。�
 
 ## YoloTrade 扩展
 
-Paper 订单是 YoloTrade 私有接口，见 [Paper 订单协议](../../agents/yolo-trade/PAPER_ORDERS.md)。
+持仓、IBKR 股票搜索、精确合约行情、iPhone Paper 授权与订单均为 YoloTrade 私有接口，见 [Paper 订单协议](../../agents/yolo-trade/PAPER_ORDERS.md)。快速下单不调用模型；客户端确认后仍由 Mac Host 完成提交前复核和唯一券商调用。

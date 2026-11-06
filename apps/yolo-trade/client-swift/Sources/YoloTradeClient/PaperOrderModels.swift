@@ -10,7 +10,7 @@ public enum PaperOrderValidationError: Error, LocalizedError, Equatable, Sendabl
         case .executionUnavailable: "Paper 执行门槛尚未全部就绪，请刷新服务状态。"
         case .invalidState: "订单状态或绑定内容已变化，请重新读取订单。"
         case .expired: "预览或确认已过期，请重新创建草稿。"
-        case .permissionDenied: "仅有效的 Mac 管理设备可操作 Paper 订单。"
+        case .permissionDenied: "此设备尚未获得 Paper 交易权限，请在 Mac 的交易页面授权已配对的 iPhone。"
         }
     }
 }
@@ -99,33 +99,47 @@ public struct OrderExpiry: Codable, Equatable, Sendable {
 public enum PaperOrderSide: String, Codable, CaseIterable, Sendable { case buy = "BUY", sell = "SELL" }
 public struct PaperStockContract: Codable, Equatable, Sendable {
     public let symbol: String
+    public let conID: Int?
+    public let primaryExchange: String?
     public let secType: String
     public let exchange: String
     public let currency: String
     public init(symbol: String) throws {
         let normalized = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard normalized.range(of: #"^[A-Z][A-Z0-9.]{0,14}$"#, options: .regularExpression) != nil else { throw PaperOrderValidationError.invalidInput }
-        self.symbol = normalized; secType = "STK"; exchange = "SMART"; currency = "USD"
+        self.symbol = normalized; conID = nil; primaryExchange = nil; secType = "STK"; exchange = "SMART"; currency = "USD"
     }
-    enum CodingKeys: String, CodingKey { case symbol, exchange, currency; case secType = "sec_type" }
+    public init(symbol: String, conID: Int, primaryExchange: String) throws {
+        let base = try Self(symbol: symbol)
+        guard conID > 0, !primaryExchange.isEmpty,
+              primaryExchange.range(of: #"^[A-Z0-9.]{1,32}$"#, options: .regularExpression) != nil else { throw PaperOrderValidationError.invalidInput }
+        self.symbol = base.symbol; self.conID = conID; self.primaryExchange = primaryExchange
+        secType = base.secType; exchange = base.exchange; currency = base.currency
+    }
+    enum CodingKeys: String, CodingKey { case symbol, exchange, currency; case secType = "sec_type", conID = "con_id", primaryExchange = "primary_exchange" }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let symbol = try values.decode(String.self, forKey: .symbol)
         guard try values.decode(String.self, forKey: .secType) == "STK",
               try values.decode(String.self, forKey: .exchange) == "SMART",
               try values.decode(String.self, forKey: .currency) == "USD" else { throw PaperOrderValidationError.invalidInput }
-        try self.init(symbol: symbol)
+        let conID = try values.decodeIfPresent(Int.self, forKey: .conID)
+        let primary = try values.decodeIfPresent(String.self, forKey: .primaryExchange)
+        if let conID, let primary { try self.init(symbol: symbol, conID: conID, primaryExchange: primary) }
+        else if conID == nil && primary == nil { try self.init(symbol: symbol) }
+        else { throw PaperOrderValidationError.invalidInput }
     }
 }
 public struct QualifiedPaperContract: Codable, Equatable, Sendable {
+    public let primaryExchange: String?
     public let conID: Int
     public let symbol: String
     public let secType: String
     public let exchange: String
     public let currency: String
-    enum CodingKeys: String, CodingKey { case symbol, exchange, currency; case conID = "con_id", secType = "sec_type" }
+    enum CodingKeys: String, CodingKey { case symbol, exchange, currency; case conID = "con_id", secType = "sec_type", primaryExchange = "primary_exchange" }
     public func matches(_ contract: PaperStockContract) -> Bool {
-        conID > 0 && symbol == contract.symbol && secType == contract.secType && exchange == contract.exchange && currency == contract.currency
+        (contract.conID == nil || contract.conID == conID) && (contract.primaryExchange == nil || contract.primaryExchange == primaryExchange) && conID > 0 && symbol == contract.symbol && secType == contract.secType && exchange == contract.exchange && currency == contract.currency
     }
 }
 public struct PaperWhatIf: Codable, Equatable, Sendable {
@@ -150,8 +164,9 @@ public struct PaperOrderPreview: Codable, Equatable, Sendable {
     public let id: UUID
     public let qualifiedContract: QualifiedPaperContract
     public let whatIf: PaperWhatIf
+    public let risk: PaperRiskReport?
     public let expiresAt: OrderExpiry
-    enum CodingKeys: String, CodingKey { case id; case qualifiedContract = "qualified_contract", whatIf = "what_if", expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case id; case qualifiedContract = "qualified_contract", whatIf = "what_if", expiresAt = "expires_at", risk }
 }
 public struct PaperOrderConfirmation: Codable, Equatable, Sendable {
     public let id: UUID
@@ -257,5 +272,31 @@ extension PaperHealth {
             broker.connected == true && broker.executionEnabled == true && broker.environmentVerified == true &&
             broker.accountVerified == true && broker.permissionsVerified == true && broker.dataComplete == true &&
             broker.healthStale == false && broker.sessionID?.isEmpty == false
+    }
+}
+
+public struct PaperRiskReport: Codable, Equatable, Sendable {
+    public let status: String
+    public let evaluatedAt: Date
+    public let marketDataType: String
+    public let monetaryLimitsApplied: Bool
+    public let metrics: PaperRiskMetrics
+    enum CodingKeys: String, CodingKey {
+        case status, metrics
+        case evaluatedAt = "evaluated_at", marketDataType = "market_data_type", monetaryLimitsApplied = "monetary_limits_applied"
+    }
+}
+public struct PaperRiskMetrics: Codable, Equatable, Sendable {
+    public let orderNotional: String
+    public let projectedGrossExposure: String
+    public let projectedGrossExposureLimit: String
+    public let symbolConcentrationPercent: String
+    public let dailySubmittedNotional: String
+    public let quoteDeviationPercent: String
+    public let referencePrice: String
+    enum CodingKeys: String, CodingKey {
+        case orderNotional = "order_notional_usd", projectedGrossExposure = "projected_gross_exposure_usd"
+        case projectedGrossExposureLimit = "projected_gross_exposure_limit_usd", symbolConcentrationPercent = "symbol_concentration_percent"
+        case dailySubmittedNotional = "daily_submitted_notional_usd", quoteDeviationPercent = "quote_deviation_percent", referencePrice = "reference_price"
     }
 }

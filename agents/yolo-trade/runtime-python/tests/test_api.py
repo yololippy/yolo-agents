@@ -1273,7 +1273,8 @@ class PaperOrderAPITests(unittest.TestCase):
         for index, patch_fields in enumerate(({"status": "unknown", "filled_quantity": 2}, {"order_ref": str(uuid4())},
                                              {"status": "Filled"}, {"filled_quantity": True})):
             with self.subTest(fields=patch_fields):
-                # Distinct economic intent so each uncertain result remains blocked.
+                # Reconcile each ambiguous result before testing a new outcome;
+                # account-wide uncertainty now blocks even a distinct intent.
                 data = self.draft_data()
                 data["limit_price"] = str(10 + index)
                 draft = self.create(data)
@@ -1283,6 +1284,8 @@ class PaperOrderAPITests(unittest.TestCase):
                 result = self.action(order, "submit")[1]["order"]
                 self.assertEqual(result["state"], "unknown")
                 self.assertEqual(result["filled_quantity"], 0)
+                self.extension._orders.apply_broker_update(order["id"], {
+                    "order_ref": order["id"], "status": "cancelled", "broker_order_id": "123", "filled_quantity": 0})
 
     def test_owner_loop_cached_updates_match_context_and_persist_without_duplicate_events(self):
         order = self.action(self.confirmed(), "submit")[1]["order"]

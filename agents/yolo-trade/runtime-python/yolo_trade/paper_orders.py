@@ -29,7 +29,7 @@ class OrderError(Exception):
             "broker_not_ready": "券商账户、权限、连接或完整数据未满足要求。",
             "account_selection_mismatch": "账户选择与服务端配置目标不一致。",
             "version_conflict": "订单版本或内容已变化，请重新读取并预览。",
-            "confirmation_required": "需要同一 Mac 对当前预览作出明确确认。",
+            "confirmation_required": "需要同一已授权设备对当前预览作出明确确认。",
             "confirmation_expired": "预览或确认已过期，请重新创建并预览订单。",
             "intent_in_flight": "相同订单意图已有未结束或结果不明的请求，禁止再次提交。",
             "idempotency_conflict": "请求标识已被其他内容、设备或操作使用。",
@@ -37,6 +37,7 @@ class OrderError(Exception):
             "preview_failed": "合约或 what-if 预览未完整通过；未提交订单。",
             "broker_outcome_unknown": "券商操作结果不明；禁止自动重发，请先对账。",
             "permission_revoked": "设备权限已失效，未发起本次券商操作。",
+            "submission_in_progress": "账户已有正在提交或结果不明的订单，请先等待或对账。",
             "order_not_found": "订单不存在。",
             "risk_policy_unavailable": "风控策略未配置，禁止预览或提交订单。",
             "risk_data_unavailable": "账户、持仓、挂单或行情风控数据不可用。",
@@ -110,7 +111,13 @@ def exact(data, fields):
 def intent_from(data):
     exact(data, {"client_request_id", "account_selection", "contract", "side", "quantity", "limit_price", "tif", "order_type"})
     contract = data["contract"]
-    exact(contract, {"symbol", "sec_type", "exchange", "currency"})
+    fields = {"symbol", "sec_type", "exchange", "currency"}
+    if not isinstance(contract, dict) or set(contract) not in (fields, fields | {"con_id", "primary_exchange"}):
+        raise OrderError("invalid_order", 400)
+    if "con_id" in contract and (type(contract["con_id"]) is not int or not 0 < contract["con_id"] <= 2147483647
+            or not isinstance(contract["primary_exchange"], str)
+            or re.fullmatch(r"[A-Z][A-Z0-9.]{0,23}", contract["primary_exchange"]) is None):
+        raise OrderError("invalid_order", 400)
     if (contract["sec_type"] != "STK" or contract["exchange"] != "SMART" or contract["currency"] != "USD"
             or not isinstance(contract["symbol"], str) or re.fullmatch(r"[A-Z][A-Z0-9.]{0,14}", contract["symbol"]) is None
             or data["side"] not in ("BUY", "SELL") or data["tif"] != "DAY" or data["order_type"] != "LMT"
@@ -152,6 +159,57 @@ class PaperOrderService:
         if (caller.get("platform") != "macos" or caller.get("revoked_at")
                 or "devices:manage" not in caller.get("permissions", ())):
             raise OrderError("permission_revoked", 403)
+
+    def require_trader(self, caller):
+        authorization = self.device_authorization(caller)
+        if not authorization["paper_trading_enabled"]:
+            raise OrderError("permission_revoked", 403)
+        return authorization["authorization_revision"]
+
+    def device_authorization(self, caller):
+        revision, enabled = None, False
+        if caller.get("platform") == "macos":
+            try:
+                self.require_mac(caller)
+                enabled = True
+            except OrderError:
+                pass
+        elif caller.get("platform") == "ios":
+            with self.store.read_only() as db:
+                grant = db.execute("SELECT granted_at,revoked_at FROM paper_device_grants WHERE device_id=?",
+                                   (caller.get("id"),)).fetchone()
+            if grant is not None:
+                revision = grant["granted_at"]
+                enabled = not caller.get("revoked_at") and grant["revoked_at"] is None
+        return {"device_id": caller.get("id"), "paper_trading_enabled": enabled,
+                "authorization_revision": revision}
+
+    def _require_confirmation_authorization(self, caller, confirmation):
+        if caller["platform"] == "ios":
+            revision = self.require_trader(caller)
+            if not revision or confirmation.get("authorization_revision") != revision:
+                raise OrderError("permission_revoked", 403)
+
+    def set_device_grant(self, caller, target, enabled):
+        self.require_mac(caller)
+        if target.get("platform") != "ios" or target.get("revoked_at") or type(enabled) is not bool:
+            raise OrderError("invalid_order", 400)
+        device_id = uuid_text(target.get("id"))
+        with self.store.transaction() as db:
+            previous = db.execute("SELECT granted_at FROM paper_device_grants WHERE device_id=?", (device_id,)).fetchone()
+            revision_time = self.clock().astimezone(timezone.utc)
+            if previous:
+                # Every mutation gets a distinct revision even with a frozen or
+                # backwards-moving wall clock. Clients treat the text as opaque.
+                revision_time = max(revision_time, datetime.fromisoformat(
+                    previous["granted_at"].replace("Z", "+00:00")) + timedelta(microseconds=1))
+            revision = revision_time.isoformat().replace("+00:00", "Z")
+            db.execute("INSERT INTO paper_device_grants VALUES (?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET "
+                       "granted_by=excluded.granted_by,granted_at=excluded.granted_at,revoked_at=excluded.revoked_at",
+                       (device_id, caller["id"], revision, None if enabled else self.now()))
+            self.store.event(db, None, "device.paper_grant_changed", self.now(),
+                             payload={"device_id": device_id, "granted_by": caller["id"], "enabled": enabled})
+        return {"device_id": device_id, "paper_trading_enabled": enabled, "authorization_revision": revision}
 
     def _context(self, selection):
         try:
@@ -196,6 +254,11 @@ class PaperOrderService:
     def recover_interrupted(self):
         """Call once after the Host owns its single-instance lock. Never replay."""
         with self.store.transaction() as db:
+            # Clear terminal reservations left by older Hosts before recovery.
+            db.execute("DELETE FROM paper_reservations WHERE order_id IN "
+                       "(SELECT id FROM paper_orders WHERE state IN ('filled','rejected','cancelled'))")
+            db.execute("DELETE FROM paper_submission_guard WHERE order_id IN "
+                       "(SELECT id FROM paper_orders WHERE state IN ('filled','rejected','cancelled'))")
             rows = db.execute("SELECT * FROM paper_orders WHERE state IN "
                               "('submitting','accepted','working','partial','cancel_pending','previewing')").fetchall()
             for saved in rows:
@@ -244,8 +307,7 @@ class PaperOrderService:
                             or set(preview) not in (allowed_preview_keys, allowed_preview_keys | {"risk"})):
                         raise ValueError()
                     contract, context = preview["qualified_contract"], preview["context"]
-                    if (not isinstance(contract, dict) or set(contract) != {
-                            "con_id", "symbol", "sec_type", "exchange", "currency"}
+                    if (not isinstance(contract, dict) or set(contract) != set(intent["contract"]) | {"con_id"}
                             or type(contract["con_id"]) is not int or contract["con_id"] <= 0
                             or any(contract.get(key) != value for key, value in intent["contract"].items())
                             or not isinstance(context, dict) or set(context) != {"config_id", "session_id"}
@@ -302,9 +364,12 @@ class PaperOrderService:
         with self.store.transaction() as db:
             rows = db.execute(
                 "SELECT DISTINCT o.id,o.intent FROM paper_orders o "
-                "JOIN paper_events e ON e.order_id=o.id "
-                "WHERE e.type='order.submitting' AND substr(e.created_at,1,10)=? AND o.id<>?",
-                (day, order_id),
+                "LEFT JOIN paper_events e ON e.order_id=o.id "
+                "LEFT JOIN paper_reservations r ON r.order_id=o.id "
+                "WHERE ((e.type='order.submitting' AND substr(e.created_at,1,10)=? "
+                "AND o.state NOT IN ('draft','proposed','confirmed','previewing')) "
+                "OR substr(r.created_at,1,10)=?) AND o.id<>?",
+                (day, day, order_id),
             ).fetchall()
         try:
             for row in rows:
@@ -316,6 +381,31 @@ class PaperOrderService:
             raise OrderError("risk_data_invalid") from None
         return format(total.normalize(), "f")
 
+    def _reserved_facts(self, facts, order_id):
+        # Broker snapshots can lag an acknowledgement. Count durable reservations
+        # missing from the current open-order view, including ambiguous outcomes.
+        from copy import deepcopy
+        facts = deepcopy(facts)
+        orders = facts["open_orders"]["orders"]
+        broker_ids = {(row.get("broker_order_id"), row.get("order_ref")) for row in orders}
+        with self.store.read_only() as db:
+            rows = db.execute("SELECT o.* FROM paper_orders o JOIN paper_reservations r ON r.order_id=o.id "
+                              "WHERE o.id<>? AND o.state NOT IN ('filled','rejected','cancelled')", (order_id,)).fetchall()
+        for row in rows:
+            if row["broker_order_id"] and (row["broker_order_id"], row["id"]) in broker_ids:
+                continue
+            intent = json.loads(row["intent"])
+            orders.append({"symbol": intent["contract"]["symbol"], "side": intent["side"],
+                           "remaining_quantity": str(intent["quantity"]), "limit_price": intent["limit_price"]})
+        return facts
+
+    @staticmethod
+    def _release_submission(db, row, *, failed=False):
+        if failed or row["state"] != "unknown":
+            db.execute("DELETE FROM paper_submission_guard WHERE order_id=?", (row["id"],))
+        if failed or row["state"] in TERMINAL:
+            db.execute("DELETE FROM paper_reservations WHERE order_id=?", (row["id"],))
+
     def _assess_risk(self, intent, order_id, context):
         if not isinstance(self.risk_policy, RiskPolicy):
             raise OrderError("risk_policy_unavailable")
@@ -323,7 +413,7 @@ class PaperOrderService:
         if not callable(read):
             raise OrderError("risk_data_unavailable")
         try:
-            facts = read(intent)
+            facts = self._reserved_facts(read(intent), order_id)
             return self.risk_policy.assess(
                 intent,
                 facts,
@@ -345,7 +435,11 @@ class PaperOrderService:
                              {"action": action, **assessment})
 
     def operate(self, action, data, caller, user_id, *, order_id=None, authorize=None):
-        self.require_mac(caller)
+        self.require_trader(caller)
+        if caller.get("platform") == "ios" and not callable(authorize):
+            raise OrderError("permission_revoked", 403)
+        if authorize is not None:
+            self._reauthorize(authorize, caller)
         if not isinstance(data, dict):
             raise OrderError("invalid_order", 400)
         request_id = uuid_text(data.get("client_request_id"))
@@ -369,6 +463,8 @@ class PaperOrderService:
                     self._reauthorize(authorize, caller)
                 if action == "create":
                     intent = intent_from(data)
+                    if caller["platform"] == "ios" and "con_id" not in intent["contract"]:
+                        raise OrderError("invalid_order", 400)
                     self._draft_target(intent["account_selection"])
                     row = {"id": str(uuid4()), "user_id": user_id, "client_request_id": request_id, "intent": encoded(intent),
                            # Conservatively block the same economic intent across
@@ -386,6 +482,8 @@ class PaperOrderService:
                 row = self._get(db, order_id, user_id)
                 db.execute("UPDATE paper_requests SET order_id=? WHERE id=?", (order_id, request_id))
                 intent = json.loads(row["intent"])
+                if caller["platform"] == "ios" and "con_id" not in intent["contract"]:
+                    raise OrderError("invalid_order", 400)
                 if action == "preview":
                     exact(data, {"client_request_id", "version", "content_hash"})
                     self._version(row, data)
@@ -411,6 +509,8 @@ class PaperOrderService:
                     confirmation = {"id": str(uuid4()), "version": row["version"], "content_hash": row["content_hash"],
                                     "preview_id": preview["id"], "device_id": caller["id"], "user_id": user_id,
                                     "user_action": data["user_action"], "expires_at": preview["expires_at"], "created_at": self.now()}
+                    if caller["platform"] == "ios":
+                        confirmation["authorization_revision"] = self.require_trader(caller)
                     db.execute("INSERT INTO paper_confirmations VALUES (?,?,?,?,?,?,?,?,?,?)",
                                (confirmation["id"], row["id"], row["version"], row["content_hash"], preview["id"], caller["id"],
                                 user_id, data["user_action"], preview["expires_at"], self.now()))
@@ -432,10 +532,17 @@ class PaperOrderService:
                         raise OrderError("confirmation_required")
                     if self._expired(confirmation["expires_at"]):
                         raise OrderError("confirmation_expired")
+                    self._require_confirmation_authorization(caller, confirmation)
                     context = self._context(intent["account_selection"])
                     if context != preview["context"]:
                         raise OrderError("version_conflict")
                     self._unique_intent(db, row)
+                    if (db.execute("SELECT 1 FROM paper_submission_guard").fetchone()
+                            or db.execute("SELECT 1 FROM paper_orders WHERE state IN ('submitting','unknown') LIMIT 1").fetchone()):
+                        raise OrderError("submission_in_progress")
+                    db.execute("INSERT INTO paper_submission_guard VALUES (1,?)", (row["id"],))
+                    db.execute("INSERT INTO paper_reservations VALUES (?,?,?,?)", (row["id"],
+                               intent["account_selection"], str(Decimal(intent["limit_price"]) * intent["quantity"]), self.now()))
                     row.update(state="submitting", error_code=None)
                 elif action == "cancel":
                     exact(data, {"client_request_id", "version", "content_hash", "user_action"})
@@ -467,6 +574,8 @@ class PaperOrderService:
                 self._reauthorize(authorize, caller)
             if action == "submit" and self._expired(confirmation["expires_at"]):
                 raise OrderError("confirmation_expired")
+            if action == "submit":
+                self._require_confirmation_authorization(caller, confirmation)
             if action in ("preview", "submit"):
                 risk = self._assess_risk(intent, row["id"], context)
                 self._record_risk_check(row["id"], user_id, request_id, action, risk)
@@ -476,8 +585,16 @@ class PaperOrderService:
                 row.update(state=row["state"] if row["state"] in TERMINAL else {"preview": "draft", "submit": "confirmed", "cancel": "unknown"}[action],
                            error_code=error.code, updated_at=self.now())
                 self.store.save(db, row)
+                if action == "submit":
+                    self._release_submission(db, row, failed=True)
                 return self._failure(db, request_id, row, error)
         try:
+            if authorize is not None:
+                self._reauthorize(authorize, caller)
+            if action == "submit" and self._expired(confirmation["expires_at"]):
+                raise OrderError("confirmation_expired")
+            if action == "submit":
+                self._require_confirmation_authorization(caller, confirmation)
             if action == "preview":
                 result = self.broker.preview_paper_order(intent, order_ref=row["id"], context=context)
                 preview = self._preview_result(result, intent, context, risk)
@@ -506,13 +623,14 @@ class PaperOrderService:
                 "order_id_unavailable", "preview_required", "stale_broker_context",
                 "unresolved_order",
             }
-            if action == "submit" and code in pre_submit:
-                public_code = "intent_in_flight" if code == "unresolved_order" else "broker_not_ready"
+            if action == "submit" and (code in pre_submit or isinstance(exc, OrderError)):
+                public_code = exc.code if isinstance(exc, OrderError) else "intent_in_flight" if code == "unresolved_order" else "broker_not_ready"
                 with self.store.transaction() as db:
                     row = self._get(db, row["id"], user_id)
                     row.update(state="confirmed", error_code=public_code, updated_at=self.now())
                     self.store.save(db, row)
-                    return self._failure(db, request_id, row, OrderError(public_code))
+                    self._release_submission(db, row, failed=True)
+                    return self._failure(db, request_id, row, OrderError(public_code, exc.status if isinstance(exc, OrderError) else 409))
             result = {"order_ref": row["id"], "status": "unknown"}
         with self.store.transaction() as db:
             row = self._get(db, row["id"], user_id)
@@ -525,14 +643,15 @@ class PaperOrderService:
             else:
                 self._merge_result(row, result)
                 self.store.save(db, row)
+                self._release_submission(db, row)
             self.store.event(db, row, "order." + row["state"], self.now(), request_id, error_code=row["error_code"])
             return self._finish(db, request_id, row)
 
     def _reauthorize(self, authorize, original):
         try:
             current = authorize()
-            self.require_mac(current)
-            if current["id"] != original["id"]:
+            self.require_trader(current)
+            if current["id"] != original["id"] or current["platform"] != original["platform"]:
                 raise OrderError("permission_revoked", 403)
         except Exception:
             raise OrderError("permission_revoked", 403) from None
@@ -631,6 +750,7 @@ class PaperOrderService:
             if tuple(row[key] for key in keys) == before:
                 return public_order(dict(saved))
             self.store.save(db, row)
+            self._release_submission(db, row)
             self.store.event(db, row, "order." + row["state"], self.now(), error_code=row["error_code"])
             return public_order(row)
 
@@ -667,4 +787,5 @@ class PaperOrderService:
                 self._merge_result(row, result)
                 if tuple(row[key] for key in keys) != before:
                     self.store.save(db, row)
+                    self._release_submission(db, row)
                     self.store.event(db, row, "order." + row["state"], self.now(), error_code=row["error_code"])

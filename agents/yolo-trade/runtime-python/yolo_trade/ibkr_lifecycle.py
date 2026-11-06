@@ -249,7 +249,7 @@ class IBKRBrokerLifecycle:
             if method in ("submit_paper_order", "cancel_paper_order"):
                 return {"order_ref": kwargs["order_ref"], "status": "unknown",
                         "broker_order_id": kwargs.get("broker_order_id"), "filled_quantity": 0}
-            if method in ("market_quote", "positions_detail", "open_orders_detail", "risk_snapshot"):
+            if method in ("market_quote", "positions_detail", "open_orders_detail", "risk_snapshot", "search_instruments", "instrument_quote"):
                 raise IBKROperationError("broker_read_timeout", "券商只读查询超时。") from None
             raise IBKROperationError("preview_timeout", "预览超时，不能提交订单。") from None
 
@@ -261,6 +261,12 @@ class IBKRBrokerLifecycle:
 
     def positions_detail(self, *, timeout=5.0):
         return self._call("positions_detail", (), {}, timeout)
+
+    def search_instruments(self, query, *, timeout=5.0):
+        return self._call("search_instruments", (query,), {}, timeout)
+
+    def instrument_quote(self, con_id, *, timeout=5.0):
+        return self._call("instrument_quote", (con_id,), {}, timeout)
 
     def open_orders_detail(self, *, broker_order_id=None, timeout=5.0):
         return self._call("open_orders_detail", (), {"broker_order_id": broker_order_id}, timeout)

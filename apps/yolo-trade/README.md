@@ -37,11 +37,12 @@ xcode/Configuration/          品牌、Bundle ID、版本与 entitlement
 
 ## Paper 订单
 
-YoloTrade 私有根视图通过通用 `ChatFeature` 注入“Paper 订单”：
+YoloTrade 私有根视图通过通用 `ChatFeature` 注入“交易”页面：
 
-- iOS 在底部玻璃功能坞进入，只读查看订单、详情和事件。
-- macOS 可以创建草稿、执行 What-if、确认、提交和单笔撤单。
-- iOS 编译不包含 Writer 和写请求类型。
+- macOS 与 iOS 都可查看脱敏持仓、IBKR 股票搜索、参考行情、订单详情和事件。
+- 从持仓或搜索结果进入快速票据时固定 `con_id` 和主交易所；数量与限价由用户输入，参考行情不会自动填入限价。
+- Mac 管理设备可在页面中单独授权或撤销已配对 iPhone 的 Paper 交易权限。未授权 iPhone 保持只读；授权 iPhone 可创建、What-if、确认、提交和单笔撤单。
+- 快速单绕过 AI，但继续复用同一订单账本、硬风控、明确确认、幂等与 unknown 不重发门禁；实际券商调用始终由 Mac Host 发起。
 - 账户只使用服务端健康响应中的不透明 `config_id`，不提供账户号输入。
 
 `PaperOrdersModel` 将创建、预览、确认、提交和撤单拆成独立动作。每次写操作使用独立 UUID，并绑定最新订单版本、content hash、预览或确认 ID。执行前重新读取健康和订单；超时或无效响应显示待核对，不自动重试。
