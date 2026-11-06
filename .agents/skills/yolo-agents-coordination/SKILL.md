@@ -54,7 +54,7 @@ Full Access 只改变执行环境权限，不扩大任务范围：普通开发�
 
 - 三个主会话拥有相同的 Git 能力，可以处理当前用户任务授权范围内的任意仓库文件，不按产品目录或共享层限制 commit 权限。
 - 三个主会话执行 commit 时都应使用提交工作流，按精确路径暂存、检查 cached diff，并保留其他会话的未提交内容；不得仅因工作树中存在其他改动就一并提交。
-- 本仓库的 commit 不运行测试或构建。代码与对应测试放进同一 PR，先提交并创建 PR，再按 [PR 后置测试](../../../docs/PR_WORKFLOW.md) 派发独立测试会话；本仓库规则优先于通用提交技能中的测试时机。
+- 本仓库的 commit 不运行测试或构建。代码与对应测试放进同一 PR，先提交并创建 PR，再进入 [PR 测试 Skill](../yolo-agents-pr-test/SKILL.md)；本仓库规则优先于通用提交技能中的测试时机。
 - push、历史重写及其他外部或破坏性 Git 操作仍需用户明确授权。普通开发会话不得执行 Git 操作。
 
 ## 派发与集成
@@ -68,9 +68,9 @@ Full Access 只改变执行环境权限，不扩大任务范围：普通开发�
 
 ## PR 自动测试
 
-PR 创建或更新后，由已安装的本机确定性 runner 自动准备准确 head/base 的隔离 worktree，并行运行 P0、Mac、Simulator，再执行双端真实 UI 对话与同步。不得让主会话、左侧栏测试会话或内部临时 Agent 承担测试触发、等待、重试和汇总调度；它们只读取 runner 的脱敏状态和失败证据。
+PR 创建或更新后的测试统一读取 [yolo-agents-pr-test](../yolo-agents-pr-test/SKILL.md)，由本机确定性 runner 执行；阶段依赖、轮次限制、隔离、清理、报告与授权合并规则只在该 Skill 维护，不派发测试会话承担调度。
 
-每个 PR 最多两轮，runner 在执行前持久预留次数；同一 head 不重复，换 head、进程重启或中断不重置。第一轮失败后由开发会话根据证据修复并 push 一次，runner 自动执行第二轮；第二轮失败后停止，不提供 reset、force 或第三轮入口。runner 不修代码、不执行 Git 提交、push 或合并。合并只使用 rebase，不 squash；合并授权必须来自用户，不从普通开发或 commit 请求推断。完整命令和报告契约以 [PR 流程](../../../docs/PR_WORKFLOW.md) 为准。
+安装、升级、真实 Mac/iPhone 与产品功能验收读取 [yolo-agents-full-test](../yolo-agents-full-test/SKILL.md)，不作为 PR 测试入口。
 
 项目依赖可以直接安装，Python 优先使用仓库 `.venv`。安装完整 Xcode、券商客户端或远程网络软件时再请用户操作；不得绕过系统或服务访问限制。
 

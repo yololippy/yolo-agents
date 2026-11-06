@@ -95,17 +95,14 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 - 所有代码修改从最新 `origin/master` 创建独立功能分支：`feat/`、`fix/`、`refactor/`、`test/` 或 `docs/`；不得直接修改、提交或 push 到 `master`，不使用 `codex/` 分支前缀。
 - 开发 commit 只做范围审查、精确暂存和差异格式检查，不运行测试配对门禁、测试或构建。执行时机以本节为准，通用 commit-workflow 也必须服从本仓库的后置测试策略。用户单独要求某项测试时照常执行。
 - 获得本轮 push/PR 授权后，先 commit、push 并创建 PR，再启动测试；不得把创建 PR 作为测试完成后的步骤。功能和测试代码必须进入同一个 PR，不要求每个开发 commit 同时包含二者。
-- PR 创建或更新后，由本机确定性 runner 按 [PR 流程](docs/PR_WORKFLOW.md) 自动读取官方 GitHub 元数据、冻结准确的 head/base、准备独立 worktree，并行运行 P0、Mac 和 Simulator，随后执行双端真实 App UI 对话和同步验收。执行和重试调度不依赖主会话、测试会话或内部临时 Agent；只构建、SDK 测试或命令行模型探针不能冒充双端 UI 验收。
-- runner 只执行与报告，不修改代码、不提交、不 push、不合并。每个 PR 最多消费两轮测试，次数在每轮启动前持久预留，换 head、进程重启或中断均不退还或清零；同一 head 不重复执行。第一轮失败后只等待一次修复 push，第二轮仍失败即停止，后续 push 也不得自动或手工开启第三轮。
-- 同产品的真实验收使用跨 worktree 的运行锁。候选 App、Keychain service、缓存和对话数据按测试运行隔离；模型执行层禁用业务工具、Skills 和记忆；不替换正式 App、不重启正式 Host、不操作真实 iPhone。
-- 合并前重新读取 GitHub PR 与 master 的实际状态，要求同一轮的所有必需组和双端 UI 验收均为 `passed`，head/base 未变化、工作树未污染、PR 无冲突且无未满足的 GitHub 门禁。runner 永不合并；已有本轮合并授权时才由主会话使用 `rebase and merge` 合入，保留每个 commit，不 squash、不创建 merge commit；没有合并授权时只报告就绪。
-- 任一缺失报告、`failed`、`blocked`、`not_run`、超时、跳过或 dry run 都不能放行合并。PR 后置测试与用户单独触发的完整安装/升级/真机测试是两个入口，不能互相冒充。
+- PR 创建或更新后的测试统一读取 [yolo-agents-pr-test](.agents/skills/yolo-agents-pr-test/SKILL.md)，由本机确定性 runner 执行；该 Skill 是阶段依赖、轮次账本、隔离、报告、清理与合并门禁规则的唯一来源。
+- “PR 测试”“PR 门禁”“运行这个 PR 的测试”“测试当前 PR”等明确 PR 语境路由至上述 Skill；安装、升级与真实 Mac/iPhone 功能验收使用独立的完整测试入口。
 
 ## 功能与测试同改
 
 - 每个新功能、可观察行为变化和缺陷修复必须在同一个 PR 中新增或修改对应的自动化测试代码；只运行既有测试、只补文档、只给手工步骤或事后承诺补测均不算完成。测试必须直接覆盖本次行为以及重要的失败关闭、边界或回归场景，不得用无关测试文件、空测试或放宽断言通过门禁。
 - 测试跟随代码职责放置：共享 Python、Swift Package、产品 Python 运行时和产品 Swift 客户端分别修改各自测试目录。`apps/<agent>/ios` 与 `macos` 入口只做装配；如需新增可测试行为，先下沉到对应 `client-swift` 并在那里写测试。跨多个职责范围的功能必须为每个受影响范围分别补测试。
-- 创建 PR 后运行 `bin/check-feature-tests --base <base-sha> --head <head-sha>`，检查整个 PR 差异中的生产代码与同范围、未删除的测试代码；不检查暂存区，不作为 commit 门禁。配对通过不能替代测试语义审查和具体测试。
+- PR 全差异的功能/测试配对由 [PR 测试 Skill](.agents/skills/yolo-agents-pr-test/SKILL.md) 规定执行；配对通过不能替代测试语义审查和具体测试。
 - 如果某项行为缺少自动化验证能力，应在本 PR 中补齐基础设施；无法补齐时将 PR 门禁标为 `blocked` 并报告原因，不能自行豁免或以真机手工验收放行合并。
 
 ## 安装后的功能验收
@@ -115,5 +112,5 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 
 ## 完整测试入口
 
-- 完整测试是用户明确触发的独立后置流程，不是每次功能开发、修复、review 或 commit 的自动步骤。用户明确要求“完整测试”或调用 `$yolo-agents-full-test` 时，读取 [.agents/skills/yolo-agents-full-test/SKILL.md](.agents/skills/yolo-agents-full-test/SKILL.md) 并按目标产品执行。
-- 开发 commit 不运行测试；PR 后置测试按上方独立流程执行。不得把完整测试规则解释为每次改动都要安装真实设备。完整测试发现问题时默认完成其余互不依赖的检查并报告，不自动修改产品代码，除非用户另行要求修复。
+- 完整测试是用户明确触发的安装、升级、真实 Mac/iPhone 与产品功能验收流程，不是每次开发、修复、review 或 commit 的自动步骤。用户明确要求该流程或调用 `$yolo-agents-full-test` 时，读取 [yolo-agents-full-test](.agents/skills/yolo-agents-full-test/SKILL.md) 并按目标产品执行。
+- PR 测试按 [yolo-agents-pr-test](.agents/skills/yolo-agents-pr-test/SKILL.md) 执行，不进入完整安装与真机验收；两个入口不能互相替代。

@@ -1,11 +1,13 @@
 ---
 name: yolo-agents-full-test
-description: "执行 yolo-agents 的独立完整测试，包括自动化回归、升级替换、真实 Mac/iPhone 安装和产品功能验收。只在用户明确要求完整测试时使用；不用于普通开发后的相关测试、单项测试或代码审查。"
+description: "执行 yolo-agents 的安装、升级、真实 Mac/iPhone 与产品功能验收。只在用户明确要求此类完整测试时使用；不用于 PR 测试、PR 门禁、普通开发后的相关测试、单项测试或代码审查。"
 ---
 
 # Yolo Agents 完整测试
 
-这是用户明确触发的后置流程。普通功能开发、修复、review、构建或 commit 不自动进入本流程。
+本 Skill 只负责用户明确触发的安装、升级、真实 Mac/iPhone 与产品功能验收；自动化回归和构建是该流程的安装前置检查。普通功能开发、修复、review、构建或 commit 不自动进入本流程。
+
+PR 测试与 PR 门禁统一使用 [yolo-agents-pr-test](../yolo-agents-pr-test/SKILL.md)。本流程不执行或替代 PR 门禁，也不以 PR 通过替代真实安装后的功能验收。
 
 ## 开始条件
 

@@ -63,7 +63,7 @@ PYTHONPATH=packages/core-python:agents/yolo-trade/runtime-python \
 
 ## 测试
 
-开发 commit 不运行测试或构建；推送并创建 PR 后，由独立测试会话检查准确的 head/base，通过后使用 rebase merge。入口、隔离方式和双端真实 UI 验收见 [PR 后置测试流程](docs/PR_WORKFLOW.md)。下面的命令用于对应测试组或用户单独要求的检查，不作为 commit 门禁。
+开发 commit 不运行测试或构建；推送并创建 PR 后的 runner 门禁与授权合并规则统一见 [PR 测试 Skill](.agents/skills/yolo-agents-pr-test/SKILL.md)。下面的命令用于对应测试组或用户单独要求的检查，不作为 commit 门禁。
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=packages/core-python \
@@ -89,7 +89,7 @@ swift test --package-path apps/yolo-beni/client-swift
 - [架构与安全边界](docs/ARCHITECTURE.md)
 - [当前状态与路线图](docs/ROADMAP.md)
 - [开发与多会话协作规则](AGENTS.md)
-- [PR 后置测试与 rebase 合并](docs/PR_WORKFLOW.md)
+- [PR 测试与合并门禁](.agents/skills/yolo-agents-pr-test/SKILL.md)
 - [通信协议 v1](packages/protocol/COMMUNICATION_V1.md)
 - [共享 Python Runtime](packages/core-python/README.md)
 - [YoloTrade Runtime 与 IBKR](agents/yolo-trade/README.md)
