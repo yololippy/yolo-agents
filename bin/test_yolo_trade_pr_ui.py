@@ -316,7 +316,9 @@ class UIWorkflow:
         output = self.command(["/usr/bin/xcrun", "simctl", "create", "YoloTrade PR UI " + self.options.run_id,
                                phone["identifier"], runtime["identifier"]], 60)
         try:
-            self.device = str(UUID(output.decode().strip()))
+            # simctl accepts either case, but Xcode destination matching requires
+            # the uppercase CoreSimulator identifier.
+            self.device = str(UUID(output.decode().strip())).upper()
         except (UnicodeError, ValueError):
             raise UIError("simulator_creation_failed") from None
         self.command(["/usr/bin/xcrun", "simctl", "boot", self.device], 60)
@@ -500,6 +502,7 @@ def run_ui_gate(options: Options, *, workflow_factory: Callable = UIWorkflow,
               "product": options.product, "status": "not_run", "checks": []}
     checks = {name: {"name": name, "status": "not_run"} for name in CHECK_NAMES}
     active = CHECK_NAMES[0]
+    stage = "lock"
     lock_factory = lock_factory or product_ui_lock
     try:
         # This is acquired before any run directory, Host, Simulator or App exists.
@@ -509,28 +512,37 @@ def run_ui_gate(options: Options, *, workflow_factory: Callable = UIWorkflow,
                 workflow = workflow_factory(options, Path(temporary))
                 verified_initial_revision = False
                 try:
+                    stage = "revision"
                     workflow.check_revision()
                     verified_initial_revision = True
+                    stage = "preflight"
                     workflow.preflight()
+                    stage = "simulator"
                     workflow.create_simulator()
+                    stage = "build_macos"
                     workflow.build("macos")
+                    stage = "build_ios"
                     workflow.build("ios")
+                    stage = "host"
                     workflow.start_host()
+                    stage = "mac_send"
                     workflow.phase("mac_send")
                     checks[active]["status"] = "passed"
                     active = CHECK_NAMES[1]
+                    stage = "ios_sync_send"
                     workflow.phase("ios_sync_send")
                     checks[active]["status"] = "passed"
                     active = CHECK_NAMES[2]
+                    stage = "mac_verify"
                     workflow.phase("mac_verify")
                     checks[active]["status"] = "passed"
                     report["status"] = "passed"
                 except UIError as error:
                     report["status"] = error.status
-                    checks[active].update(status=error.status, reason=error.reason)
+                    checks[active].update(status=error.status, reason=error.reason, stage=stage)
                 except (OSError, ValueError, KeyError, TypeError, KeyboardInterrupt):
                     report["status"] = "failed"
-                    checks[active].update(status="failed", reason="ui_workflow_failed")
+                    checks[active].update(status="failed", reason="ui_workflow_failed", stage=stage)
                 finally:
                     try:
                         cleaned = workflow.cleanup()
@@ -547,10 +559,10 @@ def run_ui_gate(options: Options, *, workflow_factory: Callable = UIWorkflow,
                             checks["revision"] = {"name": "revision", "status": "failed", "reason": "revision_or_worktree_changed"}
     except UIError as error:
         report["status"] = error.status
-        checks[active].update(status=error.status, reason=error.reason)
+        checks[active].update(status=error.status, reason=error.reason, stage=stage)
     except (OSError, ValueError, KeyError, TypeError, KeyboardInterrupt):
         report["status"] = "failed"
-        checks[active].update(status="failed", reason="ui_workflow_failed")
+        checks[active].update(status="failed", reason="ui_workflow_failed", stage=stage)
     finally:
         report["checks"] = list(checks.values())
         if report["status"] == "passed" and any(check["status"] != "passed" for check in report["checks"]):
