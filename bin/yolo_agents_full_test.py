@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,15 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT_ROOT = ROOT / ".agents" / "runtime" / "yolo-agents-full-test"
+sys.path.insert(0, str(ROOT / "packages/core-python"))
+sys.path.insert(0, str(ROOT / "agents/yolo-trade/runtime-python"))
+
+from yolo_trade.upgrade_test import (  # noqa: E402
+    UpgradeTestError,
+    exercise_ios_simulator_upgrade,
+    exercise_macos_upgrade,
+    tree_fingerprint,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,19 @@ class CheckResult:
     duration_seconds: float
     log: str
     command: list[str]
+
+
+@dataclass
+class UpgradeCheckResult:
+    name: str
+    status: str
+    duration_seconds: float
+    log: str
+    baseline: str | None
+    candidate: str | None
+    baseline_fingerprint: str | None
+    candidate_fingerprint: str | None
+    details: dict[str, object]
 
 
 def python_executable() -> str:
@@ -162,15 +185,137 @@ def execute_automated(product: str, report_dir: Path, *, dry_run: bool = False, 
     return report, 0 if report["status"] in ("passed", "not_run") else 1
 
 
+def run_upgrade_check(name: str, baseline: Path | None, candidate: Path | None, workspace: Path,
+                      exercise, *, dry_run: bool = False) -> UpgradeCheckResult:
+    report_dir = workspace.parents[1]
+    log_path = report_dir / "logs" / f"{name}.log"
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    started = time.monotonic()
+    baseline_value = str(baseline.resolve()) if baseline is not None else None
+    candidate_value = str(candidate.resolve()) if candidate is not None else None
+    baseline_fingerprint = None
+    candidate_fingerprint = None
+    details: dict[str, object] = {}
+    if dry_run:
+        status = "not_run"
+        message = "dry run"
+    elif baseline is None:
+        status = "blocked"
+        message = "没有明确提供可靠的旧版基线产物。"
+    elif candidate is None:
+        status = "blocked"
+        message = "没有明确提供候选产物。"
+    elif not baseline.is_dir():
+        status = "blocked"
+        message = "旧版基线产物不存在或不是 App 目录。"
+    elif not candidate.is_dir():
+        status = "blocked"
+        message = "候选产物不存在或不是 App 目录。"
+    else:
+        try:
+            baseline_fingerprint = tree_fingerprint(baseline)
+            candidate_fingerprint = tree_fingerprint(candidate)
+            if baseline_fingerprint == candidate_fingerprint:
+                status = "blocked"
+                message = "旧版基线与候选产物完全相同，不能证明发生过升级。"
+            else:
+                workspace.mkdir(mode=0o700, parents=True, exist_ok=False)
+                details = exercise(baseline, candidate, workspace)
+                status = "passed"
+                message = json.dumps(details, ensure_ascii=False, sort_keys=True)
+        except Exception as error:
+            status = "failed"
+            message = f"{type(error).__name__}: {error}"
+        finally:
+            try:
+                if workspace.exists():
+                    shutil.rmtree(workspace)
+            except OSError as error:
+                status = "failed"
+                message += f"\n清理隔离升级目录失败：{type(error).__name__}"
+    log_path.write_text(message + "\n", encoding="utf-8")
+    log_path.chmod(0o600)
+    return UpgradeCheckResult(
+        name=name,
+        status=status,
+        duration_seconds=round(time.monotonic() - started, 3),
+        log=str(log_path.relative_to(report_dir)),
+        baseline=baseline_value,
+        candidate=candidate_value,
+        baseline_fingerprint=baseline_fingerprint,
+        candidate_fingerprint=candidate_fingerprint,
+        details=details,
+    )
+
+
+def execute_upgrade(product: str, report_dir: Path, *, baseline_macos: Path | None,
+                    candidate_macos: Path | None, baseline_ios: Path | None,
+                    candidate_ios: Path | None, dry_run: bool = False,
+                    mac_exercise=exercise_macos_upgrade,
+                    ios_exercise=exercise_ios_simulator_upgrade) -> tuple[dict, int]:
+    if product != "yolo-trade":
+        raise ValueError(f"unsupported full-test product: {product}")
+    workspaces = report_dir / "workspaces"
+    results = [
+        run_upgrade_check(
+            "macos-upgrade", baseline_macos, candidate_macos, workspaces / "macos",
+            mac_exercise, dry_run=dry_run,
+        ),
+        run_upgrade_check(
+            "ios-simulator-upgrade", baseline_ios, candidate_ios, workspaces / "ios",
+            ios_exercise, dry_run=dry_run,
+        ),
+    ]
+    statuses = {item.status for item in results}
+    if statuses == {"not_run"}:
+        status = "not_run"
+    elif "failed" in statuses:
+        status = "failed"
+    elif "blocked" in statuses:
+        status = "blocked"
+    else:
+        status = "passed"
+    report = {
+        "schema_version": 1,
+        "product": product,
+        "phase": "upgrade",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate": candidate_state() if not dry_run else {
+            "revision": "dry-run", "dirty": None, "difference_fingerprint": None,
+        },
+        "status": status,
+        "checks": [asdict(item) for item in results],
+    }
+    destination = report_dir / "report.json"
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination.chmod(0o600)
+    return report, 0 if status in ("passed", "not_run") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("automated",))
+    parser.add_argument("phase", choices=("automated", "upgrade"))
     parser.add_argument("--product", choices=("yolo-trade",), required=True)
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--baseline-macos-app", type=Path)
+    parser.add_argument("--candidate-macos-app", type=Path)
+    parser.add_argument("--baseline-ios-app", type=Path)
+    parser.add_argument("--candidate-ios-app", type=Path)
     args = parser.parse_args(argv)
     report_dir = create_report_dir(args.report_dir)
-    report, code = execute_automated(args.product, report_dir, dry_run=args.dry_run)
+    if args.phase == "automated":
+        report, code = execute_automated(args.product, report_dir, dry_run=args.dry_run)
+    else:
+        report, code = execute_upgrade(
+            args.product,
+            report_dir,
+            baseline_macos=args.baseline_macos_app,
+            candidate_macos=args.candidate_macos_app,
+            baseline_ios=args.baseline_ios_app,
+            candidate_ios=args.candidate_ios_app,
+            dry_run=args.dry_run,
+        )
     print(json.dumps({"status": report["status"], "report": str(report_dir / "report.json")}, ensure_ascii=False))
     return code
 

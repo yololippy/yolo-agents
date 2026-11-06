@@ -19,7 +19,7 @@ description: "执行 yolo-agents 的独立完整测试，包括自动化回归�
 按以下阶段顺序执行。已有固定脚本时优先调用固定脚本，并把命令、产物和结果写入本轮报告：
 
 1. `automated`：运行 `bin/yolo-agents-full-test automated --product <产品 ID>`，执行共享层与目标产品的单元、契约、集成测试和 Apple 构建。
-2. `upgrade`：使用明确提供的旧版基线与当前候选产物，在隔离目录和模拟器执行升级替换测试。没有可靠旧版基线时将本阶段标为受阻，不得以当前版本的两份副本冒充升级。
+2. `upgrade`：使用明确提供的旧版基线与当前候选产物，运行 `bin/yolo-agents-full-test upgrade --product <产品 ID> --baseline-macos-app <旧版 Mac.app> --candidate-macos-app <候选 Mac.app> --baseline-ios-app <旧版 Simulator.app> --candidate-ios-app <候选 Simulator.app>`，在隔离目录和一次性 Simulator 执行升级替换测试。没有可靠旧版基线时仍运行入口并将本阶段标为受阻，不得以当前版本的两份副本冒充升级。
 3. `live`：只有前两个阶段的必需检查通过后，升级真实 Mac 和 iPhone。Mac 必须整包替换并保留可恢复备份；iOS Bundle ID 不一致属于身份迁移，停止普通覆盖安装。
 4. `acceptance`：完成安装后的真实功能验收。包含 AI 的产品必须使用产品自己的授权完成无业务副作用的真实模型往返。
 
