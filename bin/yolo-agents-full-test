@@ -1,0 +1,11 @@
+#!/bin/zsh
+set -euo pipefail
+
+script_dir=${0:A:h}
+repo_root=${script_dir:h}
+python_bin="$repo_root/.venv/bin/python"
+if [[ ! -x "$python_bin" ]]; then
+  python_bin=/usr/bin/python3
+fi
+
+exec "$python_bin" "$repo_root/bin/yolo_agents_full_test.py" "$@"
