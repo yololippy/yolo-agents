@@ -79,11 +79,12 @@ YoloTrade 使用本机 IB Gateway + TWS API + 私有 Python 适配层。Gateway 
 
 首批执行范围固定为 Paper、美股 `STK/SMART/USD`、普通 BUY/SELL、正整数数量、`LMT/DAY`、不含盘前盘后。Live 没有执行路径。
 
-执行流程为：
+AI 辅助草稿与直接快速下单是两个入口；快速下单不调用模型。两条路径在程序预检后共用同一套订单账本、What-if、确认和执行门禁：
 
 ```text
-结构化草稿 → 程序预检 → AI 审核 → 用户确认
-→ 提交前复核 → 单次提交 → 状态跟踪与对账
+AI 路径：结构化草稿 → 程序预检 → AI 审核 ┐
+直接路径：精确合约 + 手填限价 → 程序预检 ──┴→ What-if → 用户明确确认
+→ Mac Host 提交前复核 → 单次提交 → 状态跟踪与对账
 ```
 
 关键约束：
@@ -93,7 +94,7 @@ YoloTrade 使用本机 IB Gateway + TWS API + 私有 Python 适配层。Gateway 
 - 意图、版本、确认和幂等请求先落库，再调用券商。
 - 提交超时不能解释为未成交；未知订单不自动重发。
 - 外部订单默认只同步和计入占用，不自动绑定、修改或撤销。
-- iOS 只读；创建、确认、提交和撤单仅允许有效 Mac 管理设备。
+- Mac 管理设备可以单独授权或撤销已配对 iPhone 的 Paper 交易权限；未授权 iPhone 仍可只读。每次操作都重新认证，确认与提交绑定同一设备；券商调用只由 Mac Host 执行。
 
 订单契约见 [Paper 订单](../agents/yolo-trade/PAPER_ORDERS.md)，Gateway 运维见 [自动恢复手册](../agents/yolo-trade/IBKR_GATEWAY_AUTOMATION.md)。
 

@@ -68,7 +68,7 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 ### YoloTrade 持久运行基线
 
 - 当前用户长期选择为：YoloTrade 保持 **Paper 环境、`read_only=false`、`execution_enabled=true`**。后续部署、升级、重启、修复和配置迁移必须保留该能力；除非用户明确要求关闭 Paper 执行或改回只读，不得静默降级、覆盖或要求用户重复确认这一产品级偏好。
-- 上述偏好只授权启用 Paper 下单能力，不构成任一具体订单的确认、提交或重发授权。每笔订单仍须遵守现有 Mac 明确确认、提交前复核、硬风控、幂等和 unknown 不自动重发门禁；不得据此开放 Live 执行或自动交易。
+- 上述偏好只授权启用 Paper 下单能力，不构成任一具体订单的确认、提交或重发授权。Mac 管理设备可以为已配对 iPhone 单独授予或撤销 YoloTrade 私有的 Paper 交易权限；每笔订单仍须由发起设备明确确认，并经过 Mac Host 的提交前复核、硬风控、账户级串行、幂等和 unknown 不自动重发门禁。Mac Host 是唯一券商执行端；不得据此开放 Live 执行或自动交易。
 - 目标 Paper 账户必须由当前官方 Gateway 返回并唯一核验，账户标识只保存在 YoloTrade 私有且权限受限的本机配置中；账户号、用户名和密码不得写入版本控制文件。Gateway 登录凭据继续只保存在产品专用 Keychain 项中。
 - 运维改动必须保留当前常驻基线：8765 Host 由 LaunchAgent 管理，Gateway 每日自动重启时间为 Asia/Shanghai 07:30，Supervisor 被动检查本地监听并分别报告本地接口、IBKR 上游和数据就绪；不得恢复为裸 TCP 探测或仅凭 4002 监听宣称券商已连接。
 - `1100`／`2110` 恢复继续遵守维护窗口等待、窗口结束后 15 分钟宽限、单次 Gateway 重启预算和多实例失败关闭。任何修改不得引入循环登录、重复 2FA 或订单自动重发。
