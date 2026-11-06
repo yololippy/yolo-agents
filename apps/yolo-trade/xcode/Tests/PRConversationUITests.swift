@@ -140,8 +140,8 @@ final class PRConversationUITests: XCTestCase {
         // Scope both selection and context-menu invocation to the List's rows.
         // A same-named navigation title in the detail pane is never a candidate.
         let rowQueries = [
-            app.outlines.rows.containing(.staticText, identifier: title),
-            app.tables.rows.containing(.staticText, identifier: title),
+            app.outlines.outlineRows.containing(.staticText, identifier: title),
+            app.tables.tableRows.containing(.staticText, identifier: title),
         ]
         let available = NSPredicate { _, _ in rowQueries.contains { $0.count > 0 } }
         guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: available, object: nil)],
