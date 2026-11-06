@@ -283,10 +283,12 @@ class FullTestRunnerTests(unittest.TestCase):
             report, code = full_test.execute_acceptance(
                 "yolo-trade", report_dir,
                 live_report=live, mac_destination=root / "YoloTrade.app",
+                host_endpoint="http://127.0.0.1:8765",
                 device="private-device", ios_client_online=True,
                 state_reader=lambda: state,
                 preflight=lambda **_kwargs: {"status": "passed"},
                 model_probe=probe,
+                simulator_probe=Mock(return_value={"status": "passed"}),
             )
             saved = (report_dir / "report.json").read_text(encoding="utf-8")
         self.assertEqual(code, 0)
@@ -308,10 +310,12 @@ class FullTestRunnerTests(unittest.TestCase):
             report, code = full_test.execute_acceptance(
                 "yolo-trade", report_dir,
                 live_report=live, mac_destination=root / "YoloTrade.app",
+                host_endpoint="http://127.0.0.1:8765",
                 device="private-device", ios_client_online=False,
                 state_reader=lambda: state,
                 preflight=lambda **_kwargs: {"status": "passed"},
                 model_probe=probe,
+                simulator_probe=Mock(return_value={"status": "passed"}),
             )
         self.assertEqual(code, 1)
         self.assertEqual(report["status"], "blocked")
@@ -325,11 +329,13 @@ class FullTestRunnerTests(unittest.TestCase):
             "business_tools_enabled": False, "conversation_saved": False,
             "model": "fixture-model",
         }
-        run = Mock(return_value=Mock(
-            returncode=0, stdout=__import__("json").dumps(payload).encode(), stderr=b"",
-        ))
-        self.assertEqual(full_test.run_stored_model_probe(run=run)["status"], "passed")
-        self.assertEqual(run.call_args.kwargs["timeout"], 75)
+        runner = Mock(return_value=__import__("json").dumps(payload).encode())
+        self.assertEqual(full_test.run_stored_model_probe(
+            mac_app=Path("/Applications/YoloTrade.app"),
+            host_endpoint="http://127.0.0.1:8765", probe_runner=runner,
+        )["status"], "passed")
+        self.assertEqual(runner.call_args.kwargs["timeout"], 75)
+        self.assertEqual(runner.call_args.args[0], ["--endpoint", "http://127.0.0.1:8765"])
 
     def test_full_test_lock_rejects_a_concurrent_phase_for_same_product(self):
         with full_test.full_test_lock("fixture-product"):
