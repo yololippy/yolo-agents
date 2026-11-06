@@ -11,7 +11,7 @@ private func prEnvironment(run: String = prRun, platform: DevicePlatform = .maco
 }
 private func prConfiguration(_ environment: [String: String] = prEnvironment(),
                              platform: DevicePlatform = .macos) throws -> PRUITestLaunchConfiguration {
-    try #require(PRUITestLaunchConfiguration.parse(
+    try #require(try PRUITestLaunchConfiguration.parse(
         environment: environment, bundleID: "com.yoloagents.yolotrade.prtest." + (environment["YOLO_TRADE_PR_UI_RUN_ID"] ?? ""),
         testBuild: true, debugBuild: true, platform: platform))
 }
@@ -111,7 +111,7 @@ private actor PRBootstrapHTTP: HTTPTransport {
     let repository = ClientRepository(identity: configuration.identity, store: memory)
     let http = PRBootstrapHTTP()
     try await configuration.prepare(repository: repository, transport: http)
-    let saved = try #require(repository.connection())
+    let saved = try #require(try repository.connection())
     try repository.saveState(ClientState(), for: saved)
     try await configuration.prepare(repository: repository, transport: http)
     #expect(await http.requests.map { $0.url?.path } == ["/v1/health", "/v1/devices/pair", "/v1/models", "/v1/health", "/v1/models"])
