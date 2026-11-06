@@ -174,6 +174,32 @@ class PRUIGateTests(unittest.TestCase):
         with self.assertRaises(ui.UIError):
             ui.validate_evidence(ios, session(), "ios_sync_send")
 
+    def test_failed_ui_phase_reports_only_allowlisted_reason_and_deletes_private_result(self):
+        cases = [
+            ('failed: caught error: "missingConversation" fixture-secret', "ui_missing_conversation", "failed"),
+            ('failed: caught error: "missingConversationMenu"', "ui_missing_conversation_menu", "failed"),
+            ('Timed out while enabling automation mode. fixture-secret', "macos_ui_automation_unavailable", "blocked"),
+            ('An unknown failure containing fixture-secret', "ui_test_failed", "failed"),
+        ]
+        for text, reason, status in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                commands = []
+                def execute(command, **_):
+                    commands.append(command)
+                    if "test-without-building" in command:
+                        raise ui.UIError("command_failed")
+                    return json.dumps({"testFailures": [{"failureText": text}]}).encode()
+                workflow = ui.UIWorkflow(self.options(directory), Path(directory), execute=execute)
+                workflow.session = session()
+                workflow.builds = {"macos": Path(directory) / "source.xctestrun"}
+                with patch.object(ui, "configured_xctestrun"), self.assertRaises(ui.UIError) as caught:
+                    workflow.phase("mac_send")
+                self.assertEqual((caught.exception.reason, caught.exception.status), (reason, status))
+                self.assertNotIn("fixture-secret", str(caught.exception))
+                self.assertEqual(len(commands), 2)
+                self.assertIn("summary", commands[-1])
+                self.assertFalse((Path(directory) / "mac_send").exists())
+
     def test_session_requires_private_ephemeral_pairing_and_dedicated_conversation(self):
         original = session()
         for key, value in [("run_id", "wrong"), ("schema_version", True), ("expires_at", "2000-01-01T00:00:00+00:00"),

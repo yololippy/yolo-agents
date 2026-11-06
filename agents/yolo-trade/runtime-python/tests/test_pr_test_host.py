@@ -400,6 +400,76 @@ class PRHostTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(any(event['type'] == 'assistant.delta' for event in body['events']))
 
+    def test_swift_uppercase_message_paths_normalize_to_the_same_stored_conversation(self):
+        before = self.snapshot()
+        # Guarantee alphabetic hex so this regression never depends on random IDs.
+        fixture_id = UUID('abcdefab-cdef-4abc-8def-abcdefabcdef')
+        with patch('yolo_agents.store.uuid4', return_value=fixture_id):
+            session = self.session()
+        self.start(session)
+        manifest = json.loads((self.run_dir / 'session.json').read_text())
+        cid = manifest['test_conversation_id']
+        self.assertEqual(cid, str(fixture_id))
+        uppercase = cid.upper()
+        self.assertNotEqual(uppercase, cid)
+        runtime = session.server.service.runtime
+        store = session.server.service.store
+        with patch.object(runtime, 'stream_reply', wraps=runtime.stream_reply) as stream, \
+                patch.object(DemoRuntime, 'stream_reply', side_effect=AssertionError('demo forbidden')):
+            for index, platform in enumerate(('macos', 'ios'), 1):
+                token = self.pair(session, manifest, platform)
+                path = f'/v1/conversations/{uppercase}/messages'
+                status, page = self.request(session, 'GET', path + '?limit=50', token=token)
+                self.assertEqual(status, 200)
+                self.assertEqual(page['messages'], store.list_messages(cid))
+                prompt = host.test_prompt(self.run_id, platform)
+                # Distinct fixture output proves HTTP returns the provider's text,
+                # rather than manufacturing the MACUI/IOSUI marker from the prompt.
+                self.output = 'Provider fixture response for ' + platform + '.'
+                status, accepted = self.request(session, 'POST', path, {
+                    'content': prompt, 'client_message_id': str(uuid4()).upper(),
+                }, token=token)
+                self.assertEqual(status, 202)
+                self.assertEqual(accepted['message']['conversation_id'], cid)
+                messages = self.wait_reply(session, uppercase, token, index)
+                self.assertEqual(messages[-1]['status'], 'completed')
+                self.assertEqual(messages[-1]['content'], self.output)
+                self.assertEqual(messages, store.list_messages(cid))
+                self.assertTrue(all(message['conversation_id'] == cid for message in messages))
+                self.assertEqual(self.agent_calls[-1][0], prompt)
+        self.assertEqual([call.args[1] for call in stream.call_args_list], [cid, cid])
+        self.assertEqual(len(self.agent_calls), 2)
+        self.assertEqual([item['id'] for item in store.list_conversations()], [cid])
+        self.assertEqual(store.primary_conversation(runtime.primary_owner_scope())['id'], cid)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_message_route_rejects_invalid_uuid_unauthenticated_requests_and_other_methods(self):
+        session = self.session()
+        self.start(session)
+        manifest = json.loads((self.run_dir / 'session.json').read_text())
+        token = self.pair(session, manifest, 'macos')
+        cid = manifest['test_conversation_id']
+        path = f'/v1/conversations/{cid.upper()}/messages'
+        message = {'content': host.test_prompt(self.run_id, 'macos'), 'client_message_id': str(uuid4())}
+        for method, data in (('GET', None), ('POST', message)):
+            status, body = self.request(session, method, path, data)
+            self.assertEqual(status, 401)
+            self.assertEqual(body['error']['code'], 'unauthorized')
+            for invalid, expected_status, expected_code in (
+                    ('-' * 36, 400, 'invalid_identifier'),
+                    ('GBCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF', 404, 'not_found'),
+                    (cid.replace('-', ''), 404, 'not_found')):
+                status, body = self.request(session, method,
+                                           f'/v1/conversations/{invalid}/messages', data, token=token)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(body['error']['code'], expected_code)
+        for method in ('PATCH', 'DELETE'):
+            status, body = self.request(session, method, path, {}, token=token)
+            self.assertEqual(status, 404)
+            self.assertEqual(body['error']['code'], 'not_found')
+        self.assertEqual(self.agent_calls, [])
+        self.assertEqual(session.server.service.store.list_messages(cid), [])
+
     def test_http_rejects_arbitrary_other_run_prompts_management_media_and_browser_origins(self):
         session = self.session()
         self.start(session)

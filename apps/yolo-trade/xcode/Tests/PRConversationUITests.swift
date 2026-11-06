@@ -18,7 +18,18 @@ final class PRConversationUITests: XCTestCase {
     private var app: XCUIApplication?
 
     override func setUpWithError() throws { continueAfterFailure = false }
-    override func tearDownWithError() throws { app?.terminate() }
+    override func tearDownWithError() throws {
+        guard let app else { return }
+        if (testRun?.totalFailureCount ?? 0) > 0 {
+            // Private xcresult diagnostics only; never print the hierarchy or
+            // include it in the sanitized evidence exported to the PR report.
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "pr-ui-hierarchy.txt"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        app.terminate()
+    }
 
     func testConversationRoundTripAndSync() throws {
         let env = ProcessInfo.processInfo.environment
@@ -137,11 +148,14 @@ final class PRConversationUITests: XCTestCase {
 
     #if os(macOS)
     private func macConversationRow(app: XCUIApplication, title: String, timeout: TimeInterval) throws -> XCUIElement {
-        // Scope both selection and context-menu invocation to the List's rows.
-        // A same-named navigation title in the detail pane is never a candidate.
+        // SwiftUI exposes the combined title/date/badge on the row itself,
+        // without a StaticText child. Match the full title (including run UUID)
+        // on native rows/cells; a detail-pane StaticText is never a candidate.
+        let label = NSPredicate(format: "label CONTAINS %@", title)
         let rowQueries = [
-            app.outlines.outlineRows.containing(.staticText, identifier: title),
-            app.tables.tableRows.containing(.staticText, identifier: title),
+            app.outlineRows.matching(label),
+            app.tableRows.matching(label),
+            app.cells.matching(label),
         ]
         let available = NSPredicate { _, _ in rowQueries.contains { $0.count > 0 } }
         guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: available, object: nil)],

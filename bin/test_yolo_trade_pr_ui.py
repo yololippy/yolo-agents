@@ -155,6 +155,34 @@ def validate_summary(summary: dict) -> None:
         raise UIError("ui_test_missing_failed_or_skipped")
 
 
+def ui_failure_reason(summary: dict) -> tuple[str, bool]:
+    """Return only allowlisted diagnostics, never raw XCTest/App output."""
+    failures = summary.get("testFailures", [])
+    if not isinstance(failures, list):
+        return "ui_test_failed", False
+    known = {
+        "configuration": "ui_invalid_configuration",
+        "missingConversation": "ui_missing_conversation",
+        "ambiguousConversation": "ui_ambiguous_conversation",
+        "missingEditor": "ui_missing_editor",
+        "missingConversationMenu": "ui_missing_conversation_menu",
+        "missingSendControl": "ui_missing_send_control",
+        "missingCleanupAcknowledgment": "ui_missing_cleanup_acknowledgment",
+        "missingReply": "ui_missing_reply",
+        "conversationIdentity": "ui_conversation_identity_mismatch",
+    }
+    for failure in failures:
+        text = failure.get("failureText", "") if isinstance(failure, dict) else ""
+        if not isinstance(text, str):
+            continue
+        if "timed out while enabling automation mode" in text.lower():
+            return "macos_ui_automation_unavailable", True
+        match = re.search(r'caught error:\s*"([A-Za-z]+)"', text)
+        if match and match[1] in known:
+            return known[match[1]], False
+    return "ui_test_failed", False
+
+
 def validate_evidence(evidence: dict, session: dict, phase: str) -> None:
     if (type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1 or evidence.get("run_id") != session["run_id"]
             or evidence.get("phase") != phase or not isinstance(evidence.get("flags"), dict)):
@@ -415,6 +443,17 @@ class UIWorkflow:
             evidence = read_evidence(attachments)
             validate_evidence(evidence, self.session, phase)
             return evidence
+        except UIError as error:
+            if error.reason != "command_failed":
+                raise
+            try:
+                summary = json.loads(self.command([
+                    "/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(result), "--compact",
+                ], 30))
+                reason, blocked = ui_failure_reason(summary)
+            except (UIError, OSError, ValueError, TypeError, KeyError, AttributeError):
+                raise error
+            raise UIError(reason, blocked=blocked) from None
         except (OSError, ValueError, TypeError, KeyError):
             raise UIError("ui_result_invalid") from None
         finally:
