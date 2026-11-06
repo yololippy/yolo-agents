@@ -10,7 +10,11 @@ import UIKit
 /// production send button. No HTTP message API, SDK probe or injected reply is used.
 @MainActor
 final class PRConversationUITests: XCTestCase {
-    enum Failure: Error { case configuration, missingControl, missingReply, conversationIdentity }
+    enum Failure: Error {
+        case configuration, missingConversation, ambiguousConversation, missingEditor
+        case missingConversationMenu, missingSendControl, missingCleanupAcknowledgment
+        case missingReply, conversationIdentity
+    }
     private var app: XCUIApplication?
 
     override func setUpWithError() throws { continueAfterFailure = false }
@@ -43,18 +47,22 @@ final class PRConversationUITests: XCTestCase {
         app.launch()
         if phase.hasSuffix("cleanup") {
             guard app.staticTexts["prtest.cleanup.complete"].waitForExistence(timeout: 30) else {
-                throw Failure.missingControl
+                throw Failure.missingCleanupAcknowledgment
             }
             emit(runID: runID, phase: phase, conversationHash: nil, flags: ["cleanup_complete": true])
             return
         }
         let conversationTitle = "PR UI " + runID
         // Select the dedicated temporary conversation through the ordinary sidebar/list.
-        let primary = app.staticTexts[conversationTitle].firstMatch
-        guard primary.waitForExistence(timeout: 60) else { throw Failure.missingControl }
-        activate(primary)
+        #if os(macOS)
+        let conversation = try macConversationRow(app: app, title: conversationTitle, timeout: 60)
+        #else
+        let conversation = app.staticTexts[conversationTitle].firstMatch
+        guard conversation.waitForExistence(timeout: 60) else { throw Failure.missingConversation }
+        #endif
+        activate(conversation)
         let editor = app.textViews["chat.composer"].firstMatch
-        guard editor.waitForExistence(timeout: 60) else { throw Failure.missingControl }
+        guard editor.waitForExistence(timeout: 60) else { throw Failure.missingEditor }
         let conversationHash = try copyConversationHash(app: app, title: conversationTitle)
         let macToken = "MACUI" + runID
         let iosToken = "IOSUI" + runID
@@ -105,7 +113,7 @@ final class PRConversationUITests: XCTestCase {
         let button = app.buttons["chat.send"].firstMatch
         let ready = NSPredicate { _, _ in button.exists && button.isEnabled }
         guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: nil)], timeout: 30) == .completed else {
-            throw Failure.missingControl
+            throw Failure.missingSendControl
         }
         activate(button)
     }
@@ -127,21 +135,41 @@ final class PRConversationUITests: XCTestCase {
         }
     }
 
+    #if os(macOS)
+    private func macConversationRow(app: XCUIApplication, title: String, timeout: TimeInterval) throws -> XCUIElement {
+        // Scope both selection and context-menu invocation to the List's rows.
+        // A same-named navigation title in the detail pane is never a candidate.
+        let rowQueries = [
+            app.outlines.rows.containing(.staticText, identifier: title),
+            app.tables.rows.containing(.staticText, identifier: title),
+        ]
+        let available = NSPredicate { _, _ in rowQueries.contains { $0.count > 0 } }
+        guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: available, object: nil)],
+                            timeout: timeout) == .completed else {
+            throw Failure.missingConversation
+        }
+        for rows in rowQueries where rows.count > 0 {
+            guard rows.count == 1 else { throw Failure.ambiguousConversation }
+            return rows.element(boundBy: 0)
+        }
+        throw Failure.missingConversation
+    }
+    #endif
+
     private func copyConversationHash(app: XCUIApplication, title: String) throws -> String {
         #if os(macOS)
-        let primary = app.staticTexts[title].firstMatch
-        guard primary.waitForExistence(timeout: 30) else { throw Failure.missingControl }
-        primary.rightClick()
+        let conversation = try macConversationRow(app: app, title: title, timeout: 30)
+        conversation.rightClick()
         let copy = app.menuItems["复制会话 ID"].firstMatch
-        guard copy.waitForExistence(timeout: 10) else { throw Failure.missingControl }
+        guard copy.waitForExistence(timeout: 10) else { throw Failure.missingConversationMenu }
         copy.click()
         let value = NSPasteboard.general.string(forType: .string)
         #else
         let menu = app.buttons["chat.conversation-menu"].firstMatch
-        guard menu.waitForExistence(timeout: 30) else { throw Failure.missingControl }
+        guard menu.waitForExistence(timeout: 30) else { throw Failure.missingConversationMenu }
         menu.tap()
         let copy = app.buttons["复制会话 ID"].firstMatch
-        guard copy.waitForExistence(timeout: 10) else { throw Failure.missingControl }
+        guard copy.waitForExistence(timeout: 10) else { throw Failure.missingConversationMenu }
         copy.tap()
         let value = UIPasteboard.general.string
         #endif
