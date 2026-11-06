@@ -288,7 +288,9 @@ class PRHandler(Handler):
             ('GET', '/v1/models'), ('GET', '/v1/conversations'),
             ('GET', '/v1/events'),
         }
-        message_path = re.fullmatch(r'/v1/conversations/[0-9a-f-]{36}/messages', path)
+        # Swift UUID.uuidString uses uppercase hex. Let the normal Handler
+        # validate and normalize either case before looking up the conversation.
+        message_path = re.fullmatch(r'/v1/conversations/[0-9a-fA-F-]{36}/messages', path)
         if (method, path) not in simple and not (message_path and method in ('GET', 'POST')):
             raise APIError(404, 'not_found', '接口不存在。')
         # Host validation also prevents browser-origin DNS rebinding into loopback.
