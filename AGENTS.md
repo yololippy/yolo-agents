@@ -81,7 +81,7 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 - `main-trade` 以 YoloTrade 为主要产品上下文，`main-beni` 以 YoloBeni 为主要产品上下文；这是默认工作重点，不是文件或 Git 权限限制。两者只能调用各自直属的普通开发会话，不得通过跨会话工具调用、发消息、派发、等待、读取或移交给 `main` 或另一个 `main-xxx`。
 - 三个主会话都可以按当前用户授权执行暂存、commit、分支和其他 Git 工作；push、历史重写及其他外部或破坏性操作仍需用户明确授权。提交时必须按精确范围保留其他会话的改动。
 - 其他开发会话只执行直接派发的任务，不继续派发、不联系其他会话、不执行 Git 操作。
-- `agents/`、`apps/`、`packages/` 的产品代码默认由协调者派发给职责匹配的开发会话实施。优先复用合适的活动会话；没有合适的活动会话时创建新的左侧栏独立会话，已归档会话不恢复。用户明确要求某个协调会话直接修改时，以该次指令为准。
+- `agents/`、`apps/`、`packages/` 的产品代码默认由协调者派发给职责匹配的开发会话实施。优先复用合适的活动会话；没有合适的活动会话时创建新的左侧栏独立会话，历史归档会话不恢复。当前任务为迁移 Full Access 而临时卸载并恢复同一会话，按协作技能处理，不属于复用历史归档任务。用户明确要求某个协调会话直接修改时，以该次指令为准。
 - 跨会话分工必须读取 [yolo-agents-coordination](.agents/skills/yolo-agents-coordination/SKILL.md)，按其中的产品路由、共享层单一所有权和文件归属规则执行。
 - 会话 ID 只保存在 Git 忽略的 `.agents/runtime/yolo-agents-coordination/team.local.md`，不写入 Skill 或版本控制文件。
 - 用户已选择本仓库直属开发与测试会话统一使用 Full Access（`sandbox_mode=danger-full-access`、`approval_policy=never`）。主会话在创建、复用或恢复时必须通过受支持接口实际设置并核对，同时使用准确的工作树目录；仅在 prompt 中声明或修改 Skill 不会自动改变运行权限。文件归属、普通会话禁止 Git 写操作、产品凭据隔离和业务授权边界仍有效。
