@@ -64,14 +64,19 @@ class ChatGPTRuntime(PydanticRuntime):
     mode = 'chatgpt'
 
     def __init__(self, model, data_dir, store, *, agent_name, app_name,
-                 runtime_capabilities: RuntimeCapabilities | None = None):
+                 runtime_capabilities: RuntimeCapabilities | None = None,
+                 account_manager: AccountManager | None = None):
         validate_model_id(model)
         # Initialize the official Harness and its independent user stores.
         super().__init__('openai:placeholder', data_dir, store, agent_name=agent_name,
                          runtime_capabilities=runtime_capabilities)
         self.model_name = model
         self.agent_id, self.app_name = agent_name, app_name
-        self.account = AccountManager(Path(data_dir) / 'chatgpt-auth', app_name)
+        # Trusted host composition may borrow its own product account. Never copy
+        # credentials into the temporary runtime or close a borrowed manager.
+        self._owns_account = account_manager is None
+        self.account = (AccountManager(Path(data_dir) / 'chatgpt-auth', app_name)
+                        if account_manager is None else account_manager)
         self._account_guard = threading.RLock()
         self._active = 0
         self._seen_generation = self.account.generation
@@ -297,59 +302,87 @@ class ChatGPTRuntime(PydanticRuntime):
         if model is not None and model not in {item['id'] for item in self.list_models()['models']}:
             raise ValueError('Model is not in the current ChatGPT catalog')
 
-    def acceptance_probe(self):
-        """Run one provider request with no product tools, memory, skills, or saved chat."""
+    def acceptance_reply(self, prompt, *, model=None):
+        """One bounded text request, isolated from Harness and product capabilities.
+
+        This is a trusted Python composition API, never a production HTTP route.
+        It accepts no history, workspace, tools, memory, skills, or dependencies.
+        The normal account activity/refresh lease covers catalog and model use.
+        """
         from .guardrails import check_text
 
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2048:
+            raise RuntimeConfigurationError('验收消息必须是 1 至 2048 字符的文本。')
+        check_text(prompt)
+        validate_model_id(model)
         with self._activity():
             try:
+                if self.account.generation != self._seen_generation:
+                    with self._guard:
+                        self._agents.clear()
+                    self._seen_generation = self.account.generation
                 catalog = self._catalog_unlocked()
                 models = catalog.get('models') if isinstance(catalog, dict) else None
-                selected = catalog.get('default_model') if isinstance(catalog, dict) else None
+                selected = model or (catalog.get('default_model') if isinstance(catalog, dict) else None)
                 available = {item.get('id') for item in models or [] if isinstance(item, dict)}
-                if catalog.get('auth', {}).get('status') != 'authenticated' or selected not in available:
+                if (not isinstance(catalog, dict)
+                        or catalog.get('auth', {}).get('status') != 'authenticated'
+                        or not selected or selected not in available):
                     raise RuntimeConfigurationError('ChatGPT 模型目录尚未就绪。')
                 validate_model_id(selected)
-                model = self._model_instance(selected)
+                instance = self._model_instance(selected)
                 agent = self._backend.Agent(
-                    model,
+                    instance,
                     output_type=str,
                     retries={'tools': 0, 'output': 0},
                     instructions=(
-                        '这是 Yolo Agents 安装验收探针。不得调用任何工具；'
-                        '只用一句简短文本确认模型服务可用，不得输出凭据或账户信息。'
+                        '这是隔离的应用对话验收。只用简短纯文本回复当前消息；'
+                        '没有任何工具、工作区、记忆或 Skills。不得输出凭据或账户信息，'
+                        '不得声称读取文件、查询账户或执行任何业务操作。'
                     ),
                 )
                 async def request():
-                    return await agent.run(
-                        '请回复：验收探针已完成。',
-                        timeout=45,
-                        model_settings={'max_tokens': 64},
-                        usage_limits=self._backend.UsageLimits(
-                            request_limit=1, tool_calls_limit=0, total_tokens_limit=2048,
-                        ),
-                    )
+                    try:
+                        return await agent.run(
+                            prompt,
+                            timeout=45,
+                            model_settings={'max_tokens': 256},
+                            usage_limits=self._backend.UsageLimits(
+                                request_limit=1, tool_calls_limit=0, total_tokens_limit=4096,
+                            ),
+                        )
+                    finally:
+                        # A model made for this one event loop must not leave an
+                        # HTTP client alive after that loop has been closed.
+                        client = getattr(instance, 'client', None)
+                        if client is not None:
+                            await client.close()
 
                 try:
                     result = asyncio.run(asyncio.wait_for(request(), timeout=45))
                 except TimeoutError:
-                    raise RuntimeProviderTimeoutError('模型验收探针超过 45 秒硬超时。') from None
+                    raise RuntimeProviderTimeoutError('模型验收请求超过 45 秒硬超时。') from None
                 output = getattr(result, 'output', None)
-                if not isinstance(output, str) or not output.strip():
-                    raise RuntimeExecutionError('模型验收探针没有返回文本。')
+                if not isinstance(output, str) or not output.strip() or len(output) > 2048:
+                    raise RuntimeExecutionError('模型验收请求没有返回有效的受限文本。')
                 check_text(output)
-                return {
-                    'status': 'passed',
-                    'model': selected,
-                    'business_tools_enabled': False,
-                    'conversation_saved': False,
-                }
+                return {'text': output, 'model': selected}
             except (RuntimeConfigurationError, RuntimeExecutionError):
                 raise
             except Exception as exc:
                 raise RuntimeExecutionError(
-                    f'模型验收探针失败（{type(exc).__name__}）。'
+                    f'模型验收请求失败（{type(exc).__name__}）。'
                 ) from None
+
+    def acceptance_probe(self):
+        """Keep the status-only installation-probe response contract."""
+        reply = self.acceptance_reply('请回复：验收探针已完成。')
+        return {
+            'status': 'passed',
+            'model': reply['model'],
+            'business_tools_enabled': False,
+            'conversation_saved': False,
+        }
 
     def _load(self, conversation_id, user_id):
         state = super()._load(conversation_id, user_id)
@@ -446,7 +479,8 @@ class ChatGPTRuntime(PydanticRuntime):
         with self._account_guard:
             if self._active:
                 raise RuntimeStateError('请先等待所有 ChatGPT 运行结束。')
-            self.account.close()
+            if self._owns_account:
+                self.account.close()
             super().close()
             if self._skills_snapshot:
                 self._skills_snapshot.cleanup()

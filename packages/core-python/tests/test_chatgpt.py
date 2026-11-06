@@ -22,7 +22,8 @@ from uuid import uuid4
 from pydantic_ai.providers.openai_chatgpt import OpenAIChatGPTCredentials
 
 from yolo_agents.agent_runtime import (
-    LoginRequiredError, RuntimeExecutionError, RuntimeProviderTimeoutError, RuntimeStateError,
+    LoginRequiredError, RuntimeConfigurationError, RuntimeExecutionError,
+    RuntimeGuardrailError, RuntimeProviderTimeoutError, RuntimeStateError,
 )
 from yolo_agents.chatgpt_auth import AccountManager, CredentialStore
 from yolo_agents.chatgpt_runtime import ChatGPTRuntime
@@ -330,7 +331,13 @@ class ChatGPTRuntimeTests(unittest.TestCase):
 
     def test_acceptance_probe_hard_timeout_cancels_and_releases_activity(self):
         cancelled = threading.Event()
+        client_closed = threading.Event()
         backend = self.backend
+
+        async def close_client():
+            client_closed.set()
+
+        self.runtime._model_instance = lambda name: SimpleNamespace(client=SimpleNamespace(close=close_client))
 
         class HangingAgent:
             def __init__(self, model, **kwargs):
@@ -355,9 +362,105 @@ class ChatGPTRuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeProviderTimeoutError):
                 self.runtime.acceptance_probe()
         self.assertTrue(cancelled.wait(1))
+        self.assertTrue(client_closed.is_set())
         self.assertEqual(self.runtime._active, 0)
         self.assertEqual(self.runtime.list_models()["default_model"], "model-a")
         self.assertIsNone(self.store.get_agent_state(self.cid))
+
+    def test_acceptance_reply_returns_real_text_without_harness_or_product_capabilities(self):
+        with patch.object(self.runtime, '_prepare_skills') as skills, \
+                patch.object(self.runtime, '_additional_capabilities') as capabilities, \
+                patch.object(self.runtime.account.store, 'lease',
+                             wraps=self.runtime.account.store.lease) as lease:
+            reply = self.runtime.acceptance_reply('A harmless UI test message', model='model-b')
+        self.assertEqual(reply, {'text': '验收探针已完成。', 'model': 'model-b'})
+        agent = self.backend.agents[-1]
+        self.assertEqual(set(agent.options), {'output_type', 'retries', 'instructions'})
+        self.assertIs(agent.options['output_type'], str)
+        self.assertEqual(agent.options['retries'], {'tools': 0, 'output': 0})
+        prompt, options = agent.calls[-1]
+        self.assertEqual(prompt, 'A harmless UI test message')
+        self.assertEqual(set(options), {'timeout', 'model_settings', 'usage_limits'})
+        self.assertEqual(options['usage_limits'].kwargs['request_limit'], 1)
+        self.assertEqual(options['usage_limits'].kwargs['tool_calls_limit'], 0)
+        self.assertEqual(options['timeout'], 45)
+        lease.assert_called_once_with()
+        skills.assert_not_called()
+        capabilities.assert_not_called()
+        # UsageLimits is the sole backend component constructed by this path;
+        # Harness memory/search/persistence capabilities must never be created.
+        self.assertEqual(self.backend.components, [options['usage_limits']])
+        self.assertFalse((self.root / 'users').exists())
+        self.assertFalse((self.root / 'skills').exists())
+        self.assertIsNone(self.store.get_agent_state(self.cid))
+
+    def test_acceptance_reply_borrows_exact_account_and_generation_without_copy_or_close(self):
+        target = self.root / 'isolated'
+        target.mkdir(mode=0o700)
+        account = self.runtime.account
+        account.generation = 7
+        with patch('yolo_agents.agent_runtime._load_pydantic_backend', return_value=self.backend), \
+                patch('yolo_agents.chatgpt_runtime.AccountManager') as factory:
+            isolated = ChatGPTRuntime(None, target, self.store, agent_name='fixture',
+                                     app_name='Fixture', account_manager=account)
+        factory.assert_not_called()
+        self.assertIs(isolated.account, account)
+        self.assertEqual(isolated._seen_generation, 7)
+        self.assertFalse((target / 'chatgpt-auth').exists())
+        isolated._catalog_unlocked = self.runtime._catalog_unlocked
+        isolated._model_instance = self.runtime._model_instance
+        account.generation = 8
+        isolated._agents['stale'] = object()
+        try:
+            isolated.acceptance_reply('A harmless UI check')
+            self.assertEqual(isolated._seen_generation, 8)
+            self.assertEqual(isolated._agents, {})
+        finally:
+            with patch.object(account, 'close') as close:
+                isolated.close()
+            close.assert_not_called()
+        self.assertEqual(account.status()['status'], 'authenticated')
+
+    def test_acceptance_reply_fails_closed_before_provider_on_invalid_prompt_or_catalog(self):
+        for prompt in ('', ' ', 'x' * 2049, None):
+            with self.subTest(prompt=type(prompt).__name__), self.assertRaises(RuntimeConfigurationError):
+                self.runtime.acceptance_reply(prompt)
+        with self.assertRaises(RuntimeConfigurationError):
+            self.runtime.acceptance_reply('hello', model='not-in-catalog')
+        for catalog in ({'models': [], 'default_model': None, 'auth': {'status': 'authenticated'}},
+                        {'models': [{'id': 'model-a'}], 'default_model': 'model-a',
+                         'auth': {'status': 'login_required'}}, None):
+            self.runtime._catalog_unlocked = lambda **kwargs: catalog
+            with self.subTest(catalog=catalog), self.assertRaises(RuntimeConfigurationError):
+                self.runtime.acceptance_reply('hello')
+        self.assertEqual(self.backend.agents, [])
+        self.assertEqual(self.runtime._active, 0)
+
+    def test_acceptance_reply_guards_input_and_output_and_sanitizes_provider_failures(self):
+        with patch('yolo_agents.guardrails.check_text', side_effect=RuntimeGuardrailError('blocked')):
+            with self.assertRaises(RuntimeGuardrailError):
+                self.runtime.acceptance_reply('hello')
+        self.assertEqual(self.backend.agents, [])
+
+        async def output(prompt, **kwargs):
+            return SimpleNamespace(output='x' * 2049)
+
+        with patch.object(self.backend.Agent, 'run', side_effect=output):
+            with self.assertRaises(RuntimeExecutionError):
+                self.runtime.acceptance_reply('hello')
+        with patch('yolo_agents.guardrails.check_text',
+                   side_effect=[None, RuntimeGuardrailError('blocked')]):
+            with self.assertRaises(RuntimeGuardrailError):
+                self.runtime.acceptance_reply('hello')
+
+        async def failure(prompt, **kwargs):
+            raise ValueError('fixture-refresh-secret must never be returned')
+
+        with patch.object(self.backend.Agent, 'run', side_effect=failure):
+            with self.assertRaises(RuntimeExecutionError) as caught:
+                self.runtime.acceptance_reply('hello')
+        self.assertNotIn('fixture-refresh-secret', str(caught.exception))
+        self.assertEqual(self.runtime._active, 0)
 
     def test_model_change_uses_fresh_official_state_with_visible_product_context(self):
         history = self.user('first')
