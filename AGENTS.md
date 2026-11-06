@@ -88,3 +88,13 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 ## 重构要求
 
 调整目录或产品身份时，必须在同一个改动中同步更新导入路径、Package manifest、Xcode 本地 Package 引用、脚本、运行时配置和文档。完成后执行相关 Python 测试、Swift Package 测试与 Xcode 构建，验证无误后才汇报完成。
+
+## 安装后的功能验收
+
+- Mac、iPhone 或其他客户端安装、升级或重新配对后，必须验证目标产品的实际功能可用性，不得仅以构建成功、签名通过、App 可启动、图标出现或设备配对成功作为完成。至少核对 Host 身份与健康、客户端在线与同步、产品所需权限和网络路径；包含 AI 的产品还必须确认对应产品自己的 Provider 账号已授权、模型目录可用，并完成一次不会触发业务副作用的真实模型往返。YoloTrade 还必须确认 Broker 为 `connected_paper`、`ready=true`、`data_complete=true`，且不存在 `submitting`、`unknown`、`cancel_pending` 等未决订单。任一必需功能未通过时必须明确报告安装尚未完成、实际原因和唯一必要的用户操作，不得把“已安装”表述为“已可用”。
+- 为完成上述验收而需要官方网页登录或授权时，在用户已明确授权 Codex 操作浏览器的前提下，Codex 应自行完成当前产品发起的官方账号选择、同意与回调流程，不得仅打开登录页就要求用户接手。只有密码、双重验证、通行密钥、生物识别或系统级确认等必须由用户本人完成的步骤才暂停并精确说明所需操作。浏览器操作必须限于可见的官方登录流程，不得读取、复制、导出或重放 Cookie、OAuth/access/refresh token 或其他宿主登录凭据。
+
+## 完整测试入口
+
+- 完整测试是用户明确触发的独立后置流程，不是每次功能开发、修复、review 或 commit 的自动步骤。用户明确要求“完整测试”或调用 `$yolo-agents-full-test` 时，读取 [.agents/skills/yolo-agents-full-test/SKILL.md](.agents/skills/yolo-agents-full-test/SKILL.md) 并按目标产品执行。
+- 普通开发仍只运行与当前改动相称的测试；不得把“完整测试”规则解释为每次改动都要安装真实设备。完整测试发现问题时默认完成其余互不依赖的检查并报告，不自动修改产品代码，除非用户另行要求修复。

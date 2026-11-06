@@ -1,0 +1,6 @@
+interface:
+  display_name: "Yolo Agents 完整测试"
+  short_description: "完整回归、升级替换、真机安装与功能验收"
+  default_prompt: "使用 $yolo-agents-full-test 对 YoloTrade 执行一次完整测试。"
+policy:
+  allow_implicit_invocation: false
