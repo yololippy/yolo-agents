@@ -301,10 +301,12 @@ class UIWorkflow:
                          and runtime.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
                          and int(runtime["version"].split(".")[0]) >= 26]
             runtime = max(available, key=lambda item: tuple(int(part) for part in item["version"].split(".")))
+            supported = {item["identifier"] for item in runtime["supportedDeviceTypes"]}
             def version(value):
                 return tuple(int(part) for part in value.split("."))
             runtime_version = version(runtime["version"])
             phones = [item for item in types if item.get("productFamily") == "iPhone"
+                      and item["identifier"] in supported
                       and version(item.get("minRuntimeVersionString", "0")) <= runtime_version
                       <= version(item.get("maxRuntimeVersionString", "65535.255.255"))]
             phone = max(phones, key=lambda item: (version(item.get("minRuntimeVersionString", "0")), item["identifier"]))

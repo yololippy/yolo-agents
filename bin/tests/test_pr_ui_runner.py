@@ -68,6 +68,36 @@ class FakeWorkflow:
 
 
 class PRUIGateTests(unittest.TestCase):
+    def test_simulator_type_must_be_supported_by_selected_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = {"isAvailable": True, "version": "27.1",
+                       "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-1",
+                       "supportedDeviceTypes": [{"identifier": "phone-supported"}]}
+            phones = [{"identifier": identifier, "productFamily": "iPhone",
+                       "minRuntimeVersionString": "27.0"}
+                      for identifier in ["phone-supported", "phone-unsupported-later"]]
+            calls = []
+            def execute(command, **_):
+                calls.append(command)
+                if command[2:4] == ["list", "runtimes"]:
+                    return json.dumps({"runtimes": [runtime]}).encode()
+                if command[2:4] == ["list", "devicetypes"]:
+                    return json.dumps({"devicetypes": phones}).encode()
+                if command[2] == "create":
+                    return b"40000000-0000-4000-8000-000000000004\n"
+                return b""
+            workflow = ui.UIWorkflow(self.options(directory), Path(directory), execute=execute)
+            workflow.create_simulator()
+            created = next(command for command in calls if command[2] == "create")
+            self.assertEqual(created[4:], ["phone-supported", runtime["identifier"]])
+            for supported in [[], [{"identifier": "uninstalled-phone"}]]:
+                runtime["supportedDeviceTypes"] = supported
+                calls.clear()
+                with self.assertRaises(ui.UIError) as caught:
+                    workflow.create_simulator()
+                self.assertEqual(caught.exception.status, "blocked")
+                self.assertFalse(any(command[2] == "create" for command in calls))
+
     def options(self, directory):
         return ui.Options(run_dir=Path(directory) / "report", head_sha=HEAD, base_sha=BASE,
                           credentials_data_dir=Path(directory), run_id=RUN_ID, root=Path(directory))
