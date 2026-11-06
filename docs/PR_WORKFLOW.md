@@ -85,10 +85,10 @@ bin/yolo-agents-pr-gate summary --run-dir <run_dir> \
   --metadata <刚重新取得的私有元数据.json> --ui-report <run_dir>/ui/report.json
 ```
 
-汇总要求元数据是在全部检查结束后重新取得、且不超过 120 秒的快照。只允许 `summary.json` 中 `merge_ready=true` 的本轮结果进入合并步骤。收尾由主会话运行 `bin/yolo-agents-pr-gate cleanup --run-dir <run_dir>`；入口只移除本运行创建且仍干净的测试 worktree，保留报告，不强制删除异常改动。
+汇总要求元数据是在全部检查结束后重新取得、且不超过 120 秒的快照。只允许 `summary.json` 中 `merge_ready=true` 的本轮结果进入合并步骤。runner 在每轮成功、失败或中断后统一调用 `bin/yolo-agents-pr-gate cleanup --run-dir <run_dir>`；入口只移除本运行创建且仍干净的测试 worktree 和受管构建目录，保留报告与日志，不强制删除异常改动。
 
 head 或 master 在测试期间变化时，本轮结果失效。重新冻结新版本、准备新的运行并测试，不能只替换报告中的 SHA，也不能沿用旧结果。
 
-汇总允许合并后，runner 只记录 `merge_ready=true` 并停止。主会话仍需核对 PR 无冲突、没有未满足的 GitHub 门禁或要求修改的 review，并确认用户已授权合并。使用 GitHub 官方接口的 `rebase` 方法，传入预期 head SHA；再次核对 base 后立即执行。GitHub 若因并发更新或保护规则拒绝，重新读取状态，不绕过门禁、强推或降级为 squash/merge commit。
+汇总允许合并后，runner 只记录 `merge_ready=true` 并停止。统一收尾会移除本轮三个隔离 worktree 以及各组 `build/` 构建产物，同时保留签名 manifest、检查报告、日志、UI 报告和汇总收据；收尾失败必须记为 `cleanup=incomplete`，不得把残留产物当作可复用缓存。主会话仍需核对 PR 无冲突、没有未满足的 GitHub 门禁或要求修改的 review，并确认用户已授权合并。使用 GitHub 官方接口的 `rebase` 方法，传入预期 head SHA；再次核对 base 后立即执行。GitHub 若因并发更新或保护规则拒绝，重新读取状态，不绕过门禁、强推或降级为 squash/merge commit。
 
 PR runner 是本机交付门禁服务，只监测配置中受信任的仓库与 PR，不执行产品周期任务。用户明确要求的完整安装、升级、回滚和真机流程仍使用 [完整测试技能](../.agents/skills/yolo-agents-full-test/SKILL.md)。

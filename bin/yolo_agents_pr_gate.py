@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -526,18 +527,39 @@ def cleanup(root: Path, run_dir: Path) -> dict:
     run_dir = run_dir.resolve()
     manifest, _ = load_manifest(run_dir, root)
     removed = []
+    build_artifacts_removed = []
     lock_root = Path(manifest["common_dir"]) / "yolo-agents-pr-gate/locks"
     with ExitStack() as stack:
         stack.enter_context(lock(lock_root / "prepare.lock"))
         for group in GROUPS:
             stack.enter_context(lock(lock_root / f"{manifest['run_id']}-{group}.lock"))
+        build_directories = []
         for group in GROUPS:
             worktree = Path(manifest["groups"][group])
             if worktree.exists():
                 assert_snapshot(worktree, manifest["metadata"]["head_sha"])
+            output = run_dir / group
+            build = output / "build"
+            if output.is_symlink() or not output.is_dir():
+                raise GateError("检查组输出目录无效；拒绝清理。")
+            if build.is_symlink() or (build.exists() and not build.is_dir()):
+                raise GateError("构建目录无效；拒绝清理。")
+            build_directories.append((group, build))
+        for group in GROUPS:
+            worktree = Path(manifest["groups"][group])
+            if worktree.exists():
                 git(root, "worktree", "remove", str(worktree))
                 removed.append(group)
-    return {"status": "cleaned", "removed": removed, "reports_retained": str(run_dir)}
+        for group, build in build_directories:
+            if build.exists():
+                shutil.rmtree(build)
+                build_artifacts_removed.append(group)
+    return {
+        "status": "cleaned",
+        "removed": removed,
+        "build_artifacts_removed": build_artifacts_removed,
+        "reports_retained": str(run_dir),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
