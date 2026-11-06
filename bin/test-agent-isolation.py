@@ -44,7 +44,11 @@ class Host:
         self.reader.start()
         try:
             while True:
-                line = lines.get(timeout=15)
+                # Fresh parallel Mac/Simulator builds can temporarily saturate
+                # the machine. The fixture has no business-side deadline, so
+                # wait for readiness without treating scheduler delay as a
+                # product isolation failure.
+                line = lines.get(timeout=60)
                 if line is None:
                     raise RuntimeError("Fixture host exited before becoming ready")
                 if " pairing code " in line:

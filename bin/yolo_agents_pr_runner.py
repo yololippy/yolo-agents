@@ -377,7 +377,10 @@ class Engine:
             manifest, key = gate.load_manifest(run_dir, source)
             for group in gate.GROUPS:
                 report = gate.read_json(run_dir / group / "report.json")
-                gate.validate_group(report, group, manifest, run_dir, key)
+                try:
+                    gate.validate_group(report, group, manifest, run_dir, key)
+                except Exception:
+                    raise RunnerError(f"{group}_failed") from None
             self._current(candidate)
             ui_command = [
                 str(config.python), str(source / "bin/test_yolo_trade_pr_ui.py"),

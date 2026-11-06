@@ -79,7 +79,10 @@ class LifecycleTests(unittest.TestCase):
         return broker, lifecycle, clients
 
     def wait(self, predicate):
-        deadline = time.monotonic() + 3
+        # PR groups run concurrently with fresh Swift/Xcode builds. Keep this
+        # deterministic polling assertion tolerant of scheduler pressure; the
+        # production lifecycle deadlines remain unchanged.
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             value = predicate()
             if value:
