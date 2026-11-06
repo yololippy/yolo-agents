@@ -363,25 +363,30 @@ class Engine:
             gate = load_gate(source)
             prepared = gate.prepare(source, metadata_path, config.product)
             run_dir = Path(prepared["run_dir"])
-            commands = [
-                [str(source / "bin/yolo-agents-pr-gate"), "--root", str(source), "run-group",
-                 "--run-dir", str(run_dir), "--group", group]
-                for group in gate.GROUPS
-            ]
             logs = attempt_dir / "controller-logs"
             private_directory(logs)
-            self.active = [self._spawn(command, source, logs / f"{group}.log")
-                           for command, group in zip(commands, gate.GROUPS)]
-            self._wait(self.active, candidate, deadline)
-            self.active = []
-            manifest, key = gate.load_manifest(run_dir, source)
-            for group in gate.GROUPS:
-                report = gate.read_json(run_dir / group / "report.json")
-                try:
-                    gate.validate_group(report, group, manifest, run_dir, key)
-                except Exception:
-                    raise RunnerError(f"{group}_failed") from None
+            for groups in (("p0",), ("mac", "simulator")):
+                self._current(candidate)
+                if self.clock() >= deadline:
+                    raise RunnerError("attempt_deadline_exceeded")
+                for group in groups:
+                    command = [
+                        str(source / "bin/yolo-agents-pr-gate"), "--root", str(source), "run-group",
+                        "--run-dir", str(run_dir), "--group", group,
+                    ]
+                    self.active.append(self._spawn(command, source, logs / f"{group}.log"))
+                self._wait(self.active, candidate, deadline)
+                self.active = []
+                manifest, key = gate.load_manifest(run_dir, source)
+                for group in groups:
+                    report = gate.read_json(run_dir / group / "report.json")
+                    try:
+                        gate.validate_group(report, group, manifest, run_dir, key)
+                    except Exception:
+                        raise RunnerError(f"{group}_failed") from None
             self._current(candidate)
+            if self.clock() >= deadline:
+                raise RunnerError("attempt_deadline_exceeded")
             ui_command = [
                 str(config.python), str(source / "bin/test_yolo_trade_pr_ui.py"),
                 "--run-dir", str(run_dir / "ui"), "--run-id", manifest["run_id"],
