@@ -40,7 +40,8 @@ from yolo_trade.apple_upgrade import (  # noqa: E402
     validate_ios_bundle,
     validate_macos_bundle,
 )
-from yolo_trade.full_test import live_preflight  # noqa: E402
+from yolo_trade.full_test import FullTestPreflightError, live_preflight  # noqa: E402
+from yolo_trade.host_service import _paths as host_service_paths, install as install_host_service  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -342,6 +343,18 @@ def _matching_candidate(report: dict, current: dict, phase: str) -> None:
         raise LivePhaseBlocked(f"{phase} 阶段验证的不是当前候选代码状态。")
 
 
+def wait_for_live_preflight(preflight, *, device: str, mac_destination: Path,
+                            timeout_seconds: float = 120, sleep=time.sleep) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return preflight(device=device, mac_destination=mac_destination)
+        except FullTestPreflightError:
+            if time.monotonic() >= deadline:
+                raise FullTestPreflightError("Host 重启后未在时限内恢复完整就绪状态。") from None
+            sleep(1)
+
+
 def execute_live(
     product: str,
     report_dir: Path,
@@ -362,6 +375,9 @@ def execute_live(
     ios_installer=replace_ios_app,
     mac_validator=validate_macos_bundle,
     ios_validator=validate_ios_bundle,
+    host_installer=install_host_service,
+    host_config_reader=lambda: host_service_paths()["config"],
+    preflight_waiter=wait_for_live_preflight,
 ) -> tuple[dict, int]:
     if product != "yolo-trade":
         raise ValueError(f"unsupported full-test product: {product}")
@@ -417,6 +433,10 @@ def execute_live(
             ios_validator(ios_candidate)
             ios_validator(ios_rollback)
             before = preflight(device=device, mac_destination=mac_destination)
+            host_installer(host_config_reader())
+            after_host_restart = preflight_waiter(
+                preflight, device=device, mac_destination=mac_destination,
+            )
             mac_result = mac_installer(mac_candidate, mac_destination, mac_backup_root)
             ios_attempted = True
             ios_result = ios_installer(
@@ -425,7 +445,9 @@ def execute_live(
             after = preflight(device=device, mac_destination=mac_destination)
             details = {
                 "preflight": before,
+                "post_host_restart": after_host_restart,
                 "post_install": after,
+                "host_restarted": True,
                 "macos": {
                     "candidate_fingerprint": mac_fingerprint,
                     "backup_created": mac_result.backup is not None,

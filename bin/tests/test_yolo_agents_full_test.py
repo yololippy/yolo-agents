@@ -171,8 +171,16 @@ class FullTestRunnerTests(unittest.TestCase):
             }), encoding="utf-8")
             report_dir = root / "report"
             report_dir.mkdir()
-            preflight = Mock(return_value={"status": "passed"})
+            events = []
+            preflight = Mock(side_effect=lambda **_kwargs: events.append("preflight") or {"status": "passed"})
+            host_installer = Mock(side_effect=lambda _path: events.append("host"))
             metadata = BundleMetadata("com.yoloagents.yolotrade", "2", "2", "YoloTrade")
+            def install_mac(*_args):
+                events.append("mac")
+                return MacReplacement("installed", "backup", metadata)
+            def install_ios(*_args, **_kwargs):
+                events.append("ios")
+                return IOSReplacement(True, metadata)
             report, code = full_test.execute_live(
                 "yolo-trade", report_dir,
                 automated_report=automated, upgrade_report=upgrade,
@@ -181,13 +189,17 @@ class FullTestRunnerTests(unittest.TestCase):
                 ios_rollback=rollback, device="private-device",
                 state_reader=lambda: state, preflight=preflight,
                 mac_validator=lambda _path: metadata, ios_validator=lambda _path: metadata,
-                mac_installer=lambda *_args: MacReplacement("installed", "backup", metadata),
-                ios_installer=lambda *_args, **_kwargs: IOSReplacement(True, metadata),
+                mac_installer=install_mac,
+                ios_installer=install_ios,
+                host_installer=host_installer,
+                host_config_reader=lambda: root / "ibkr.json",
             )
             saved = (report_dir / "report.json").read_text(encoding="utf-8")
         self.assertEqual(code, 0)
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(preflight.call_count, 2)
+        self.assertEqual(preflight.call_count, 3)
+        host_installer.assert_called_once()
+        self.assertEqual(events, ["preflight", "host", "preflight", "mac", "ios", "preflight"])
         self.assertNotIn("private-device", saved)
 
     def test_live_phase_restores_mac_and_ios_after_install_failure(self):
@@ -229,6 +241,7 @@ class FullTestRunnerTests(unittest.TestCase):
                     raise RuntimeError("fixture install failure")
                 return IOSReplacement(True, metadata)
             restorer = Mock(return_value=MacReplacement("installed", "displaced", metadata))
+            host_installer = Mock()
             report_dir = root / "report"
             report_dir.mkdir()
             report, code = full_test.execute_live(
@@ -241,6 +254,8 @@ class FullTestRunnerTests(unittest.TestCase):
                 mac_validator=lambda _path: metadata, ios_validator=lambda _path: metadata,
                 mac_installer=lambda *_args: MacReplacement("installed", str(root / "old.app"), metadata),
                 mac_restorer=restorer, ios_installer=ios_installer,
+                host_installer=host_installer,
+                host_config_reader=lambda: root / "ibkr.json",
             )
         self.assertEqual(code, 1)
         self.assertEqual(report["status"], "failed")
