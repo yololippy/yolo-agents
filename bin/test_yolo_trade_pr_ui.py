@@ -226,7 +226,12 @@ def read_evidence(directory: Path) -> dict:
         matches = []
         for test in manifest:
             for attachment in test["attachments"]:
-                if attachment.get("suggestedHumanReadableName") != "pr-ui-evidence.json":
+                name = attachment.get("suggestedHumanReadableName")
+                # xcresulttool adds an index and attachment UUID to exported
+                # human-readable names even when XCTAttachment.name is fixed.
+                generated = (isinstance(name, str) and re.fullmatch(
+                    r"pr-ui-evidence_[0-9]+_[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\.json", name))
+                if name != "pr-ui-evidence.json" and not generated:
                     continue
                 relative = attachment["exportedFileName"]
                 if not isinstance(relative, str) or Path(relative).name != relative:
@@ -417,6 +422,30 @@ class UIWorkflow:
             # screenshots. They are never retained as report attachments.
             shutil.rmtree(phase_root, ignore_errors=True)
 
+    def simulator_state(self) -> str | None:
+        """Read only this run's device state; absence means it was removed."""
+        try:
+            value = json.loads(self.command([
+                "/usr/bin/xcrun", "simctl", "list", "devices", "--json",
+            ], 30))
+            matches = []
+            for devices in value["devices"].values():
+                if not isinstance(devices, list):
+                    raise ValueError
+                for device in devices:
+                    if UUID(device["udid"]) == UUID(self.device):
+                        matches.append(device)
+            if len(matches) > 1:
+                raise ValueError
+            if not matches:
+                return None
+            state = matches[0]["state"]
+            if not isinstance(state, str):
+                raise ValueError
+            return state
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise UIError("simulator_state_unavailable") from None
+
     def cleanup(self) -> bool:
         clean = True
         # Keep the Host alive until both apps have forgotten their run-scoped records.
@@ -457,8 +486,16 @@ class UIWorkflow:
                 try:
                     self.command(["/usr/bin/xcrun", "simctl", action, self.device], 60)
                 except (Exception, KeyboardInterrupt):
-                    # A shutdown failure still attempts deletion, and never passes silently.
-                    clean = False
+                    # XCTest can shut down its destination before returning.
+                    # Accept a failed command only after independently confirming
+                    # its intended state for this exact owned device.
+                    try:
+                        state = self.simulator_state()
+                        released = state is None or (action == "shutdown" and state == "Shutdown")
+                    except (Exception, KeyboardInterrupt):
+                        released = False
+                    if not released:
+                        clean = False
         return clean
 
 

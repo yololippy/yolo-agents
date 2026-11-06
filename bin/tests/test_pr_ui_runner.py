@@ -228,7 +228,14 @@ class PRUIGateTests(unittest.TestCase):
             manifest = [{"attachments": [attachment]}]
             (root / "manifest.json").write_text(json.dumps(manifest))
             self.assertEqual(ui.read_evidence(root), evidence())
-            for attachments in [[], [attachment, attachment], [{**attachment, "exportedFileName": "../secret.json"}]]:
+            exported = {**attachment, "suggestedHumanReadableName":
+                        "pr-ui-evidence_0_C50CAB4D-E4A3-4766-BEBA-A47359EDB092.json"}
+            (root / "manifest.json").write_text(json.dumps([{"attachments": [exported]}]))
+            self.assertEqual(ui.read_evidence(root), evidence())
+            for attachments in [[], [attachment, attachment], [attachment, exported],
+                                [{**exported, "suggestedHumanReadableName": "other-pr-ui-evidence.json"}],
+                                [{**exported, "suggestedHumanReadableName": "pr-ui-evidence_0_invalid.json"}],
+                                [{**attachment, "exportedFileName": "../secret.json"}]]:
                 (root / "manifest.json").write_text(json.dumps([{"attachments": attachments}]))
                 with self.assertRaises(ui.UIError): ui.read_evidence(root)
 
@@ -261,6 +268,41 @@ class PRUIGateTests(unittest.TestCase):
             self.assertEqual([call.args[0] for call in workflow.phase.call_args_list], ["mac_cleanup", "ios_cleanup"])
             self.assertTrue(any("shutdown" in command for command in commands))
             self.assertTrue(any("delete" in command for command in commands))
+
+    def test_cleanup_verifies_owned_device_state_after_simctl_failure(self):
+        foreign_id = "50000000-0000-4000-8000-000000000005"
+        def devices(state):
+            rows = [{"udid": foreign_id, "state": "Booted"}]
+            if state is not None:
+                rows.append({"udid": CONVERSATION, "state": state})
+            return json.dumps({"devices": {"fixture-runtime": rows}}).encode()
+        cases = [
+            ("already_shutdown", {"shutdown"}, [devices("Shutdown")], True),
+            ("already_removed", {"shutdown", "delete"}, [devices(None), devices(None)], True),
+            ("still_booted", {"shutdown"}, [devices("Booted")], False),
+            ("deletion_not_complete", {"delete"}, [devices("Shutdown")], False),
+            ("deleted_despite_error", {"delete"}, [devices(None)], True),
+            ("unreadable_state", {"shutdown"}, [b"invalid-json"], False),
+        ]
+        for name, failures, states, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                commands = []
+                remaining = iter(states)
+                def execute(command, **_):
+                    commands.append(command)
+                    if command[1:4] == ["simctl", "list", "devices"]:
+                        return next(remaining)
+                    if len(command) > 2 and command[1] == "simctl" and command[2] in failures:
+                        raise ui.UIError("command_failed")
+                    return b""
+                workflow = ui.UIWorkflow(self.options(directory), Path(directory), execute=execute)
+                workflow.device = CONVERSATION
+                self.assertEqual(workflow.cleanup(), expected)
+                actions = [command for command in commands
+                           if len(command) > 2 and command[1] == "simctl"
+                           and command[2] in ("shutdown", "delete")]
+                self.assertEqual([command[2] for command in actions], ["shutdown", "delete"])
+                self.assertTrue(all(command[3] == CONVERSATION for command in actions))
 
 
     def test_production_app_or_missing_test_marker_cannot_be_launched_by_xcode(self):
