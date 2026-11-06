@@ -3,7 +3,9 @@ import YoloAgentsUI
 import YoloAgentsSDK
 
 public struct YoloTradeRootView: View {
-    public init() {}
+    private let identity: AgentAppIdentity
+    public init() { identity = YoloTradeProduct.identity }
+    init(prTestIdentity: AgentAppIdentity) { identity = prTestIdentity }
     static func paperOrdersPage(connection: PairedConnection) -> TradeView {
         #if os(iOS)
         TradeView(connection: connection, presentation: .page)
@@ -13,7 +15,7 @@ public struct YoloTradeRootView: View {
     }
 
     public var body: some View {
-        YoloAgentsRootView(identity: YoloTradeProduct.identity, features: [
+        YoloAgentsRootView(identity: identity, features: [
             ChatFeature(id: "chat.paper-orders", title: "交易", compactTitle: "交易",
                         systemImage: "chart.line.uptrend.xyaxis") {
                 Self.paperOrdersPage(connection: $0)

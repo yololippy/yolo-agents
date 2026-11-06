@@ -2,3 +2,7 @@ YOLO_TRADE_DISPLAY_NAME = YoloTrade
 YOLO_TRADE_BUNDLE_IDENTIFIER = com.yoloagents.yolotrade
 MARKETING_VERSION = 1.0
 CURRENT_PROJECT_VERSION = 1
+
+// Empty in ordinary builds; the PR UI runner supplies a unique suffix per run.
+PR_TEST_BUNDLE_SUFFIX =
+PR_TEST_BUILD = NO

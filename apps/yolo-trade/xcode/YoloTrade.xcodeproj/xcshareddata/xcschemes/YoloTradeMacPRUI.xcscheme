@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1600" version="1.3">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries>
+    <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000005" BuildableName="YoloTradeMac.app" BlueprintName="YoloTradeMac" ReferencedContainer="container:YoloTrade.xcodeproj"/></BuildActionEntry>
+    <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="D00000000000000000000064" BuildableName="YoloTradeMacPRUITests.xctest" BlueprintName="YoloTradeMacPRUITests" ReferencedContainer="container:YoloTrade.xcodeproj"/></BuildActionEntry>
+  </BuildActionEntries></BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="NO">
+    <Testables><TestableReference skipped="NO" parallelizable="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="D00000000000000000000064" BuildableName="YoloTradeMacPRUITests.xctest" BlueprintName="YoloTradeMacPRUITests" ReferencedContainer="container:YoloTrade.xcodeproj"/></TestableReference></Testables>
+    <MacroExpansion><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000005" BuildableName="YoloTradeMac.app" BlueprintName="YoloTradeMac" ReferencedContainer="container:YoloTrade.xcodeproj"/></MacroExpansion>
+  </TestAction>
+  <AnalyzeAction buildConfiguration="Debug"/>
+</Scheme>
