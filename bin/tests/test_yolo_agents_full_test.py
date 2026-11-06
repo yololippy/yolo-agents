@@ -17,6 +17,7 @@ class FullTestRunnerTests(unittest.TestCase):
         self.assertEqual([item.name for item in checks], [
             "full-test-runner", "python-core", "python-yolo-trade", "agent-isolation", "swift-sdk", "swift-ui",
             "swift-yolo-trade", "swift-python-integration", "xcode-macos", "xcode-ios-simulator",
+            "xcode-ios-device",
         ])
         command_text = "\n".join(" ".join(item.command) for item in checks)
         self.assertIn("agents/yolo-trade", command_text)

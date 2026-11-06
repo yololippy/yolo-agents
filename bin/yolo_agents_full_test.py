@@ -96,6 +96,11 @@ def automated_checks(product: str, report_dir: Path) -> list[Check]:
             "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", str(report_dir / "derived-ios"),
             "-skipMacroValidation", "SWIFT_ENABLE_EXPLICIT_MODULES=NO", "-quiet", "build",
         )),
+        Check("xcode-ios-device", (
+            xcodebuild, "-project", project, "-scheme", "YoloTradeIOS", "-configuration", "Debug",
+            "-destination", "generic/platform=iOS", "-derivedDataPath", str(report_dir / "derived-ios-device"),
+            "-skipMacroValidation", "SWIFT_ENABLE_EXPLICIT_MODULES=NO", "-quiet", "build",
+        )),
     ]
 
 
