@@ -74,7 +74,7 @@ class PRUIGateTests(unittest.TestCase):
                        "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-1",
                        "supportedDeviceTypes": [{"identifier": "phone-supported"}]}
             phones = [{"identifier": identifier, "productFamily": "iPhone",
-                       "minRuntimeVersionString": "27.0"}
+                       "minRuntimeVersionString": "27.1.0"}
                       for identifier in ["phone-supported", "phone-unsupported-later"]]
             calls = []
             def execute(command, **_):
