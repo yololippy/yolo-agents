@@ -37,7 +37,11 @@ def app_bundle(root: Path, name: str, *, bundle_id: str = "com.yoloagents.yolotr
 def apple_runner(command, **_kwargs):
     if command[0] == "/usr/bin/ditto":
         shutil.copytree(command[-2], command[-1], copy_function=shutil.copy2)
-    return Mock(returncode=0)
+    requirement = (
+        'designated => identifier "com.yoloagents.yolotrade" and anchor apple generic '
+        'and certificate leaf[subject.OU] = "FIXTURETEAM"\n'
+    )
+    return Mock(returncode=0, stdout=b"", stderr=requirement.encode())
 
 
 class DeviceRunner:
@@ -126,6 +130,42 @@ class AppleUpgradeTests(unittest.TestCase):
             candidate = app_bundle(root / "build", "Other.app", bundle_id="example.other", version="2")
             with self.assertRaises(AppleUpgradeError):
                 replace_macos_app(candidate, installed, root / "backups", run=apple_runner)
+            self.assertEqual(bundle_metadata(installed).short_version, "1")
+
+    def test_macos_upgrade_rejects_adhoc_candidate_before_moving_existing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed = app_bundle(root / "installed", "YoloTrade.app", version="1")
+            candidate = app_bundle(root / "build", "YoloTrade.app", version="2")
+
+            def runner(command, **kwargs):
+                if command[0] == "/usr/bin/codesign" and "-r-" in command:
+                    requirement = 'designated => cdhash H"0123456789abcdef"\n'
+                    return Mock(returncode=0, stdout=b"", stderr=requirement.encode())
+                return apple_runner(command, **kwargs)
+
+            with self.assertRaisesRegex(AppleUpgradeError, "ad-hoc"):
+                replace_macos_app(candidate, installed, root / "backups", run=runner)
+            self.assertEqual(bundle_metadata(installed).short_version, "1")
+
+    def test_macos_upgrade_rejects_changed_designated_requirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed = app_bundle(root / "installed", "YoloTrade.app", version="1")
+            candidate = app_bundle(root / "build", "YoloTrade.app", version="2")
+
+            def runner(command, **kwargs):
+                if command[0] == "/usr/bin/codesign" and "-r-" in command:
+                    team = "NEWTEAM" if Path(command[-1]) == candidate.resolve() else "OLDTEAM"
+                    requirement = (
+                        'designated => identifier "com.yoloagents.yolotrade" and anchor apple generic '
+                        f'and certificate leaf[subject.OU] = "{team}"\n'
+                    )
+                    return Mock(returncode=0, stdout=b"", stderr=requirement.encode())
+                return apple_runner(command, **kwargs)
+
+            with self.assertRaisesRegex(AppleUpgradeError, "代码签名身份不同"):
+                replace_macos_app(candidate, installed, root / "backups", run=runner)
             self.assertEqual(bundle_metadata(installed).short_version, "1")
 
     def test_failed_final_switch_restores_old_app(self):

@@ -105,6 +105,30 @@ def validate_macos_bundle(path: Path, *, expected_bundle_id: str = YOLO_TRADE_BU
     return metadata
 
 
+def macos_designated_requirement(path: Path, *, run=subprocess.run) -> str:
+    app = _regular_directory(path, "App")
+    try:
+        result = run(
+            ["/usr/bin/codesign", "-d", "-r-", str(app)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    except OSError:
+        raise AppleUpgradeError("无法读取 Mac App 的代码签名身份。") from None
+    if result.returncode != 0:
+        raise AppleUpgradeError("无法读取 Mac App 的代码签名身份。")
+    output = (result.stdout or b"") + b"\n" + (result.stderr or b"")
+    try:
+        requirement = next(
+            line.strip() for line in output.decode("utf-8").splitlines()
+            if line.strip().startswith("designated =>")
+        )
+    except (UnicodeError, StopIteration):
+        raise AppleUpgradeError("Mac App 缺少可验证的 designated requirement。") from None
+    if "anchor apple generic" not in requirement or "cdhash H\"" in requirement:
+        raise AppleUpgradeError("Mac App 使用不稳定的 ad-hoc 签名，不能访问既有 Keychain。")
+    return requirement
+
+
 def validate_ios_bundle(path: Path, *, expected_bundle_id: str = YOLO_TRADE_BUNDLE_ID,
                         run=subprocess.run) -> BundleMetadata:
     metadata = bundle_metadata(path, platform="ios")
@@ -206,10 +230,13 @@ def replace_macos_app(candidate: Path, destination: Path, backup_root: Path, *,
     if destination.is_symlink() or backup_root.is_symlink():
         raise AppleUpgradeError("安装路径或备份路径不能是符号链接。")
     candidate_metadata = validate_macos_bundle(candidate, expected_bundle_id=expected_bundle_id, run=run)
+    candidate_requirement = macos_designated_requirement(candidate, run=run)
     if destination.exists():
         current = bundle_metadata(destination, platform="macos")
         if current.bundle_id != expected_bundle_id:
             raise AppleUpgradeError("安装位置已有另一个应用，不能覆盖。")
+        if macos_designated_requirement(destination, run=run) != candidate_requirement:
+            raise AppleUpgradeError("候选 App 与已安装 App 的代码签名身份不同，不能覆盖并继承 Keychain。")
     destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     backup_root.chmod(0o700)
