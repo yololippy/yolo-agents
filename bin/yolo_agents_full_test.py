@@ -3,14 +3,17 @@
 
 The runner never repairs code. It executes every independent check, writes one
 redacted JSON summary plus per-check logs, and exits non-zero when a required
-check fails. Live installation is added as a separate phase by product tooling.
+check fails. Automated, isolated upgrade, live installation, and acceptance are
+separate explicit phases.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -72,6 +75,29 @@ class UpgradeCheckResult:
     baseline_fingerprint: str | None
     candidate_fingerprint: str | None
     details: dict[str, object]
+
+
+class FullTestAlreadyRunning(RuntimeError):
+    pass
+
+
+@contextmanager
+def full_test_lock(product: str):
+    DEFAULT_REPORT_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = DEFAULT_REPORT_ROOT / f"{product}.lock"
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise FullTestAlreadyRunning("同一产品已有完整测试阶段正在运行。") from None
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def python_executable() -> str:
@@ -503,9 +529,125 @@ def execute_live(
     return report, 0 if status in ("passed", "not_run") else 1
 
 
+def run_stored_model_probe(*, run=subprocess.run) -> dict[str, object]:
+    command = [
+        "/usr/bin/xcrun", "swift", "run", "--quiet", "--package-path",
+        str(ROOT / "apps/yolo-trade/client-swift"), "YoloTradeAcceptanceProbe",
+    ]
+    try:
+        result = run(
+            command,
+            cwd=ROOT,
+            env=safe_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeError("Mac 模型验收探针未能启动或超时。") from None
+    if result.returncode != 0 or len(result.stdout) > 65536:
+        raise RuntimeError("Mac 模型验收探针未通过。")
+    try:
+        value = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise RuntimeError("Mac 模型验收探针返回格式无效。") from None
+    expected = {
+        "status": "passed",
+        "agent_id": "yolo-trade",
+        "provider_authenticated": True,
+        "model_catalog_available": True,
+        "mac_client_online": True,
+        "model_roundtrip_passed": True,
+        "business_tools_enabled": False,
+        "conversation_saved": False,
+    }
+    if not isinstance(value, dict) or any(value.get(key) != expected_value for key, expected_value in expected.items()):
+        raise RuntimeError("Mac 模型验收探针没有满足全部门槛。")
+    if not isinstance(value.get("model"), str) or not value["model"]:
+        raise RuntimeError("Mac 模型验收探针缺少模型标识。")
+    return {key: value[key] for key in (*expected, "model")}
+
+
+def execute_acceptance(
+    product: str,
+    report_dir: Path,
+    *,
+    live_report: Path | None,
+    mac_destination: Path | None,
+    device: str | None,
+    ios_client_online: bool,
+    dry_run: bool = False,
+    state_reader=candidate_state,
+    preflight=live_preflight,
+    model_probe=run_stored_model_probe,
+) -> tuple[dict, int]:
+    if product != "yolo-trade":
+        raise ValueError(f"unsupported full-test product: {product}")
+    started = time.monotonic()
+    log_path = report_dir / "logs/acceptance.log"
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    current = {"revision": "dry-run", "dirty": None, "difference_fingerprint": None} if dry_run else state_reader()
+    details: dict[str, object] = {"device_identifier_recorded": False}
+    if dry_run:
+        status, message = "not_run", "dry run"
+    else:
+        try:
+            if live_report is None or mac_destination is None or device is None:
+                raise LivePhaseBlocked("acceptance 阶段缺少 live 报告、Mac 安装位置或本轮设备。")
+            live = _passing_phase_report(live_report, "live")
+            _matching_candidate(live, current, "live")
+        except LivePhaseBlocked as error:
+            status, message = "blocked", str(error)
+        else:
+            checks = []
+            try:
+                snapshot = preflight(device=device, mac_destination=mac_destination)
+                checks.append({"name": "product-state", "status": "passed", "details": snapshot})
+            except Exception as error:
+                checks.append({
+                    "name": "product-state", "status": "failed",
+                    "error": type(error).__name__,
+                })
+            try:
+                probe = model_probe()
+                checks.append({"name": "mac-provider-model", "status": "passed", "details": probe})
+            except Exception as error:
+                checks.append({
+                    "name": "mac-provider-model", "status": "failed",
+                    "error": type(error).__name__,
+                })
+            checks.append({
+                "name": "ios-client-online-sync",
+                "status": "passed" if ios_client_online else "blocked",
+                "details": {"verified_in_current_ui_session": ios_client_online},
+            })
+            details.update({"checks": checks})
+            statuses = {item["status"] for item in checks}
+            status = "failed" if "failed" in statuses else "blocked" if "blocked" in statuses else "passed"
+            message = json.dumps(details, ensure_ascii=False, sort_keys=True)
+    log_path.write_text(message + "\n", encoding="utf-8")
+    log_path.chmod(0o600)
+    report = {
+        "schema_version": 1,
+        "product": product,
+        "phase": "acceptance",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate": current,
+        "status": status,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "log": str(log_path.relative_to(report_dir)),
+        "details": details,
+    }
+    destination = report_dir / "report.json"
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination.chmod(0o600)
+    return report, 0 if status in ("passed", "not_run") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("automated", "upgrade", "live"))
+    parser.add_argument("phase", choices=("automated", "upgrade", "live", "acceptance"))
     parser.add_argument("--product", choices=("yolo-trade",), required=True)
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -521,34 +663,60 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ios-candidate-app", type=Path)
     parser.add_argument("--ios-rollback-app", type=Path)
     parser.add_argument("--device")
+    parser.add_argument("--live-report", type=Path)
+    parser.add_argument("--ios-client-online", action="store_true")
     args = parser.parse_args(argv)
     report_dir = create_report_dir(args.report_dir)
-    if args.phase == "automated":
-        report, code = execute_automated(args.product, report_dir, dry_run=args.dry_run)
-    elif args.phase == "upgrade":
-        report, code = execute_upgrade(
-            args.product,
-            report_dir,
-            baseline_macos=args.baseline_macos_app,
-            candidate_macos=args.candidate_macos_app,
-            baseline_ios=args.baseline_ios_app,
-            candidate_ios=args.candidate_ios_app,
-            dry_run=args.dry_run,
-        )
-    else:
-        report, code = execute_live(
-            args.product,
-            report_dir,
-            automated_report=args.automated_report,
-            upgrade_report=args.upgrade_report,
-            mac_candidate=args.mac_candidate_app,
-            mac_destination=args.mac_destination,
-            mac_backup_root=args.mac_backup_root,
-            ios_candidate=args.ios_candidate_app,
-            ios_rollback=args.ios_rollback_app,
-            device=args.device,
-            dry_run=args.dry_run,
-        )
+    try:
+        with full_test_lock(args.product):
+            if args.phase == "automated":
+                report, code = execute_automated(args.product, report_dir, dry_run=args.dry_run)
+            elif args.phase == "upgrade":
+                report, code = execute_upgrade(
+                    args.product,
+                    report_dir,
+                    baseline_macos=args.baseline_macos_app,
+                    candidate_macos=args.candidate_macos_app,
+                    baseline_ios=args.baseline_ios_app,
+                    candidate_ios=args.candidate_ios_app,
+                    dry_run=args.dry_run,
+                )
+            elif args.phase == "live":
+                report, code = execute_live(
+                    args.product,
+                    report_dir,
+                    automated_report=args.automated_report,
+                    upgrade_report=args.upgrade_report,
+                    mac_candidate=args.mac_candidate_app,
+                    mac_destination=args.mac_destination,
+                    mac_backup_root=args.mac_backup_root,
+                    ios_candidate=args.ios_candidate_app,
+                    ios_rollback=args.ios_rollback_app,
+                    device=args.device,
+                    dry_run=args.dry_run,
+                )
+            else:
+                report, code = execute_acceptance(
+                    args.product,
+                    report_dir,
+                    live_report=args.live_report,
+                    mac_destination=args.mac_destination,
+                    device=args.device,
+                    ios_client_online=args.ios_client_online,
+                    dry_run=args.dry_run,
+                )
+    except FullTestAlreadyRunning as error:
+        report, code = {
+            "schema_version": 1,
+            "product": args.product,
+            "phase": args.phase,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "blocked",
+            "reason": str(error),
+        }, 1
+        destination = report_dir / "report.json"
+        destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        destination.chmod(0o600)
     print(json.dumps({"status": report["status"], "report": str(report_dir / "report.json")}, ensure_ascii=False))
     return code
 

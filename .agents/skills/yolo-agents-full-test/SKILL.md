@@ -12,7 +12,7 @@ description: "执行 yolo-agents 的独立完整测试，包括自动化回归�
 1. 读取仓库根目录 `AGENTS.md`、`docs/ROADMAP.md` 和目标产品参考。YoloTrade 读取 `../yolo-agents-coordination/references/yolo-trade.md`；涉及 iPhone 操作时同时读取 `../yolo-agent-device-pairing/SKILL.md`。
 2. 明确目标产品。无法从用户指令和当前产品上下文唯一确定时，停止并询问，不猜测。
 3. 记录当前 Git revision、未提交差异、已安装版本、目标设备和运行状态。报告可以测试包含未提交改动的候选版本，但必须明确其差异指纹。
-4. 为本轮创建 `.agents/runtime/yolo-agents-full-test/` 下的运行锁和脱敏报告。已有活动锁时停止，避免两个会话同时安装、重启或配对同一产品。
+4. 每个阶段在 `.agents/runtime/yolo-agents-full-test/` 下获取同产品运行锁并创建脱敏报告。已有活动锁时停止，避免两个会话同时检查、安装、重启或配对同一产品。
 
 ## 执行顺序
 
@@ -21,7 +21,7 @@ description: "执行 yolo-agents 的独立完整测试，包括自动化回归�
 1. `automated`：运行 `bin/yolo-agents-full-test automated --product <产品 ID>`，执行共享层与目标产品的单元、契约、集成测试和 Apple 构建。
 2. `upgrade`：使用明确提供的旧版基线与当前候选产物，运行 `bin/yolo-agents-full-test upgrade --product <产品 ID> --baseline-macos-app <旧版 Mac.app> --candidate-macos-app <候选 Mac.app> --baseline-ios-app <旧版 Simulator.app> --candidate-ios-app <候选 Simulator.app>`，在隔离目录和一次性 Simulator 执行升级替换测试。没有可靠旧版基线时仍运行入口并将本阶段标为受阻，不得以当前版本的两份副本冒充升级。
 3. `live`：只有前两个阶段的必需检查通过后，运行 `bin/yolo-agents-full-test live --product <产品 ID> --automated-report <automated/report.json> --upgrade-report <upgrade/report.json> --mac-candidate-app <候选 Mac.app> --mac-destination <已安装 Mac.app> --mac-backup-root <产品私有备份目录> --ios-candidate-app <候选真机 App> --ios-rollback-app <旧版真机 App> --device <本轮发现的设备>`。入口会重新核对代码状态与产物指纹、Host/Broker/订单安全、现有 App 身份，再升级真实 Mac 和 iPhone。Mac 必须整包替换并保留可恢复备份；iOS Bundle ID 不一致属于身份迁移，停止普通覆盖安装。设备 ID 只作为本轮参数使用，不写入报告。
-4. `acceptance`：完成安装后的真实功能验收。包含 AI 的产品必须使用产品自己的授权完成无业务副作用的真实模型往返。
+4. `acceptance`：完成安装后的真实功能验收。先按设备配对 Skill 在当前 iPhone UI 和服务端确认客户端在线、同步与产品身份，只有实际通过后才运行 `bin/yolo-agents-full-test acceptance --product <产品 ID> --live-report <live/report.json> --mac-destination <已安装 Mac.app> --device <本轮发现的设备> --ios-client-online`。入口会从 YoloTrade 自己的 Mac Keychain 连接核对 Provider 授权、模型目录、客户端读取，并调用执行层无业务工具、无 Skills、无记忆、无会话落盘的真实模型探针；不得仅凭提示词声称模型不会交易。
 
 阶段结果只有 `passed`、`failed`、`blocked`、`not_run`。跳过、超时、运行旧产物或只收到请求受理均不得记为通过。依赖失败项的后续阶段不执行；其余互不依赖检查继续完成。
 

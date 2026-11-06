@@ -262,6 +262,66 @@ class FullTestRunnerTests(unittest.TestCase):
         self.assertEqual(ios_calls, 2)
         restorer.assert_called_once()
 
+    def test_acceptance_runs_independent_checks_and_never_records_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {"revision": "fixture", "dirty": False, "difference_fingerprint": "x"}
+            live = root / "live.json"
+            live.write_text(__import__("json").dumps({
+                "phase": "live", "status": "passed", "candidate": state,
+            }), encoding="utf-8")
+            report_dir = root / "report"
+            report_dir.mkdir()
+            probe = Mock(return_value={
+                "status": "passed", "agent_id": "yolo-trade",
+                "provider_authenticated": True, "model_catalog_available": True,
+                "mac_client_online": True, "model_roundtrip_passed": True,
+                "business_tools_enabled": False, "conversation_saved": False,
+                "model": "fixture-model",
+            })
+            report, code = full_test.execute_acceptance(
+                "yolo-trade", report_dir,
+                live_report=live, mac_destination=root / "YoloTrade.app",
+                device="private-device", ios_client_online=True,
+                state_reader=lambda: state,
+                preflight=lambda **_kwargs: {"status": "passed"},
+                model_probe=probe,
+            )
+            saved = (report_dir / "report.json").read_text(encoding="utf-8")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "passed")
+        self.assertNotIn("private-device", saved)
+        probe.assert_called_once()
+
+    def test_acceptance_keeps_model_check_when_ios_ui_evidence_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {"revision": "fixture", "dirty": False, "difference_fingerprint": "x"}
+            live = root / "live.json"
+            live.write_text(__import__("json").dumps({
+                "phase": "live", "status": "passed", "candidate": state,
+            }), encoding="utf-8")
+            report_dir = root / "report"
+            report_dir.mkdir()
+            probe = Mock(return_value={"status": "passed"})
+            report, code = full_test.execute_acceptance(
+                "yolo-trade", report_dir,
+                live_report=live, mac_destination=root / "YoloTrade.app",
+                device="private-device", ios_client_online=False,
+                state_reader=lambda: state,
+                preflight=lambda **_kwargs: {"status": "passed"},
+                model_probe=probe,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "blocked")
+        probe.assert_called_once()
+
+    def test_full_test_lock_rejects_a_concurrent_phase_for_same_product(self):
+        with full_test.full_test_lock("fixture-product"):
+            with self.assertRaises(full_test.FullTestAlreadyRunning):
+                with full_test.full_test_lock("fixture-product"):
+                    self.fail("nested lock unexpectedly succeeded")
+
 
 if __name__ == "__main__":
     unittest.main()

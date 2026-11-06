@@ -23,6 +23,12 @@ private actor AcceptanceHTTP: HTTPTransport {
                 "models": [["id": "fixture-model", "display_name": "Fixture"]],
                 "default_model": "fixture-model", "auth": ["status": "authenticated"],
             ] as [String: Any]
+        case "/v1/conversations":
+            object = ["conversations": [[
+                "id": "20000000-0000-4000-8000-000000000002", "title": "主会话",
+                "created_at": "2026-11-06T00:00:00Z", "updated_at": "2026-11-06T00:00:00Z",
+                "archived": false, "model": NSNull(),
+            ]], "primary_conversation_id": "20000000-0000-4000-8000-000000000002"]
         case "/v1/admin/full-test/model-probe":
             object = ["probe": [
                 "status": "passed", "model": "fixture-model",
@@ -62,10 +68,11 @@ private func acceptanceConnection() throws -> PairedConnection {
     )
     #expect(result.status == "passed")
     #expect(result.modelRoundtripPassed)
+    #expect(result.macClientOnline)
     #expect(!result.businessToolsEnabled)
     #expect(!result.conversationSaved)
     let requests = await http.requests
-    #expect(requests.count == 4)
+    #expect(requests.count == 5)
     #expect(requests.first?.value(forHTTPHeaderField: "Authorization") == nil)
     #expect(requests.dropFirst().allSatisfy {
         $0.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token"

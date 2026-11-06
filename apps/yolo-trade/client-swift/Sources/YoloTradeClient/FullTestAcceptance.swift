@@ -6,6 +6,7 @@ public struct YoloTradeFullTestProbeResult: Codable, Equatable, Sendable {
     public let agentID: String
     public let providerAuthenticated: Bool
     public let modelCatalogAvailable: Bool
+    public let macClientOnline: Bool
     public let modelRoundtripPassed: Bool
     public let businessToolsEnabled: Bool
     public let conversationSaved: Bool
@@ -16,6 +17,7 @@ public struct YoloTradeFullTestProbeResult: Codable, Equatable, Sendable {
         case agentID = "agent_id"
         case providerAuthenticated = "provider_authenticated"
         case modelCatalogAvailable = "model_catalog_available"
+        case macClientOnline = "mac_client_online"
         case modelRoundtripPassed = "model_roundtrip_passed"
         case businessToolsEnabled = "business_tools_enabled"
         case conversationSaved = "conversation_saved"
@@ -75,6 +77,9 @@ public enum YoloTradeFullTestAcceptance {
         guard !catalog.models.isEmpty, catalog.auth?.needsLogin != true else {
             throw FullTestAcceptanceFailure()
         }
+        guard !(try await client.conversations(includeArchived: true)).isEmpty else {
+            throw FullTestAcceptanceFailure()
+        }
         let response: ModelProbeEnvelope = try await client.request(
             "POST", path: "admin/full-test/model-probe", body: Data("{}".utf8)
         )
@@ -89,6 +94,7 @@ public enum YoloTradeFullTestAcceptance {
             agentID: YoloTradeProduct.agentID,
             providerAuthenticated: true,
             modelCatalogAvailable: true,
+            macClientOnline: true,
             modelRoundtripPassed: true,
             businessToolsEnabled: false,
             conversationSaved: false,
