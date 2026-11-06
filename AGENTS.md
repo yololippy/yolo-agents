@@ -95,10 +95,10 @@ IBKR 集成属于 `yolo-trade`，应继续放在 `agents/yolo-trade/runtime-pyth
 - 所有代码修改从最新 `origin/master` 创建独立功能分支：`feat/`、`fix/`、`refactor/`、`test/` 或 `docs/`；不得直接修改、提交或 push 到 `master`，不使用 `codex/` 分支前缀。
 - 开发 commit 只做范围审查、精确暂存和差异格式检查，不运行测试配对门禁、测试或构建。执行时机以本节为准，通用 commit-workflow 也必须服从本仓库的后置测试策略。用户单独要求某项测试时照常执行。
 - 获得本轮 push/PR 授权后，先 commit、push 并创建 PR，再启动测试；不得把创建 PR 作为测试完成后的步骤。功能和测试代码必须进入同一个 PR，不要求每个开发 commit 同时包含二者。
-- PR 创建后，由主会话自动按 [PR 流程](docs/PR_WORKFLOW.md) 冻结准确的 head SHA 与 master base SHA，准备独立 worktree，派发最多三个左侧栏可见的只读测试会话并行运行 P0、Mac 和 Simulator 组；随后完成两端真实 App UI 对话和双向同步验收。不得用内部临时子 Agent、只构建、SDK 测试或命令行模型探针冒充双端 UI 验收。
-- 测试会话只执行与报告，不修改代码、不提交、不 push、不继续派发；允许固定入口为核对版本执行只读 Git 命令。测试失败由开发会话修复并创建新 commit，推送后重新冻结版本并重跑；旧 head 或旧 base 的报告不得复用。
+- PR 创建或更新后，由本机确定性 runner 按 [PR 流程](docs/PR_WORKFLOW.md) 自动读取官方 GitHub 元数据、冻结准确的 head/base、准备独立 worktree，并行运行 P0、Mac 和 Simulator，随后执行双端真实 App UI 对话和同步验收。执行和重试调度不依赖主会话、测试会话或内部临时 Agent；只构建、SDK 测试或命令行模型探针不能冒充双端 UI 验收。
+- runner 只执行与报告，不修改代码、不提交、不 push、不合并。每个 PR 最多消费两轮测试，次数在每轮启动前持久预留，换 head、进程重启或中断均不退还或清零；同一 head 不重复执行。第一轮失败后只等待一次修复 push，第二轮仍失败即停止，后续 push 也不得自动或手工开启第三轮。
 - 同产品的真实验收使用跨 worktree 的运行锁。候选 App、Keychain service、缓存和对话数据按测试运行隔离；模型执行层禁用业务工具、Skills 和记忆；不替换正式 App、不重启正式 Host、不操作真实 iPhone。
-- 合并前重新读取 GitHub PR 与 master 的实际状态，要求所有必需组和双端 UI 验收均为 `passed`，head/base 未变化、工作树未污染、PR 无冲突且无未满足的 GitHub 门禁。已有本轮合并授权时，由主会话使用 `rebase and merge` 合入，保留每个 commit，不 squash、不创建 merge commit；没有合并授权时只报告就绪。
+- 合并前重新读取 GitHub PR 与 master 的实际状态，要求同一轮的所有必需组和双端 UI 验收均为 `passed`，head/base 未变化、工作树未污染、PR 无冲突且无未满足的 GitHub 门禁。runner 永不合并；已有本轮合并授权时才由主会话使用 `rebase and merge` 合入，保留每个 commit，不 squash、不创建 merge commit；没有合并授权时只报告就绪。
 - 任一缺失报告、`failed`、`blocked`、`not_run`、超时、跳过或 dry run 都不能放行合并。PR 后置测试与用户单独触发的完整安装/升级/真机测试是两个入口，不能互相冒充。
 
 ## 功能与测试同改

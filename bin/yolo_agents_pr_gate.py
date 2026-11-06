@@ -349,6 +349,19 @@ def execute_check(check: Check, worktree: Path, output: Path, *, dry_run: bool =
                     process.wait()
                     status, reason = "failed", "timeout"
                     log.write(b"\nPR gate timeout; process group stopped.\n")
+                except KeyboardInterrupt:
+                    # The deterministic controller may cancel a stale PR run.
+                    # Stop only this check's owned process group, then propagate
+                    # so run_group cannot publish an interrupted passing report.
+                    try:
+                        os.killpg(process.pid, signal.SIGINT)
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                    except ProcessLookupError:
+                        pass
+                    raise
             except OSError:
                 status, reason = "blocked", "could_not_start"
                 log.write(b"\nPR gate could not start command.\n")

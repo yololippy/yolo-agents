@@ -26,6 +26,7 @@ errors = [item for item in items if isinstance(item, unittest.loader._FailedTest
 if errors:
     raise AssertionError('repository test collection contains import failures')
 assert any(item.id().startswith('test_pr_ui_runner.') for item in items)
+assert any(item.id().startswith('test_yolo_agents_pr_runner.') for item in items)
 """
         result = subprocess.run(
             [sys.executable, "-c", program, str(root)], cwd=root,
