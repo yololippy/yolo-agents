@@ -316,6 +316,38 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue((self.run_dir / "manifest.json").is_file())
         self.assertTrue((self.root / "README.md").is_file())
 
+    def test_cleanup_removes_build_artifacts_and_retains_reports_and_logs(self):
+        self.prepare()
+        for group in gate.GROUPS:
+            (self.run_dir / group / "build/artifact.bin").write_bytes(b"build output")
+            (self.run_dir / group / "logs/check.log").write_text("retained log\n")
+            (self.run_dir / group / "report.json").write_text('{"retained":true}\n')
+
+        result = gate.cleanup(self.root, self.run_dir)
+
+        self.assertEqual(set(result["build_artifacts_removed"]), set(gate.GROUPS))
+        for group in gate.GROUPS:
+            self.assertFalse((self.run_dir / group / "build").exists())
+            self.assertEqual((self.run_dir / group / "logs/check.log").read_text(), "retained log\n")
+            self.assertEqual((self.run_dir / group / "report.json").read_text(), '{"retained":true}\n')
+        self.assertEqual(gate.cleanup(self.root, self.run_dir)["build_artifacts_removed"], [])
+
+    def test_cleanup_rejects_build_symlink_without_touching_external_target(self):
+        manifest, _ = self.prepare()
+        build = self.run_dir / "mac/build"
+        build.rmdir()
+        external = Path(self.temporary.name) / "external-build"
+        external.mkdir()
+        marker = external / "keep.txt"
+        marker.write_text("keep\n")
+        build.symlink_to(external, target_is_directory=True)
+
+        with self.assertRaisesRegex(gate.GateError, "构建目录无效"):
+            gate.cleanup(self.root, self.run_dir)
+
+        self.assertTrue(marker.is_file())
+        self.assertTrue(Path(manifest["groups"]["p0"]).is_dir())
+
     def test_merge_conflicts_block_readiness(self):
         # Divergent changes to the same file: keep the source at PR head while
         # exporting and fetching the newer base before prepare.
