@@ -9,10 +9,12 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import tempfile
 from uuid import uuid4
 
 
 YOLO_TRADE_BUNDLE_ID = "com.yoloagents.yolotrade"
+DEFAULT_DEVELOPER_DIR = Path("/Applications/Xcode.app/Contents/Developer")
 
 
 class AppleUpgradeError(RuntimeError):
@@ -31,6 +33,19 @@ class BundleMetadata:
 class MacReplacement:
     installed: str
     backup: str | None
+    metadata: BundleMetadata
+
+
+@dataclass(frozen=True)
+class DeviceApp:
+    bundle_id: str
+    short_version: str | None
+    build_version: str | None
+
+
+@dataclass(frozen=True)
+class IOSReplacement:
+    replaced_existing: bool
     metadata: BundleMetadata
 
 
@@ -72,6 +87,11 @@ def _run_checked(command: list[str], *, run=subprocess.run, message: str) -> Non
         raise AppleUpgradeError(message)
 
 
+def _developer_tool(name: str) -> str:
+    developer = Path(os.environ.get("DEVELOPER_DIR", str(DEFAULT_DEVELOPER_DIR)))
+    return str(developer / "usr" / "bin" / name)
+
+
 def validate_macos_bundle(path: Path, *, expected_bundle_id: str = YOLO_TRADE_BUNDLE_ID,
                           run=subprocess.run) -> BundleMetadata:
     metadata = bundle_metadata(path, platform="macos")
@@ -82,6 +102,91 @@ def validate_macos_bundle(path: Path, *, expected_bundle_id: str = YOLO_TRADE_BU
         run=run, message="候选 App 签名验证失败。",
     )
     return metadata
+
+
+def validate_ios_bundle(path: Path, *, expected_bundle_id: str = YOLO_TRADE_BUNDLE_ID,
+                        run=subprocess.run) -> BundleMetadata:
+    metadata = bundle_metadata(path, platform="ios")
+    if metadata.bundle_id != expected_bundle_id:
+        raise AppleUpgradeError("候选 iOS App 的 Bundle ID 与 YoloTrade 不一致，不能作为普通升级安装。")
+    _run_checked(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path.resolve())],
+        run=run, message="候选 iOS App 签名验证失败。",
+    )
+    return metadata
+
+
+def device_apps(device: str, *, run=subprocess.run) -> list[DeviceApp]:
+    descriptor, output = tempfile.mkstemp(prefix="yolo-device-apps.", suffix=".json")
+    os.close(descriptor)
+    try:
+        _run_checked([
+            _developer_tool("devicectl"), "device", "info", "apps", "--device", device,
+            "--json-output", output, "--quiet",
+        ], run=run, message="无法读取 iPhone 已安装 App。")
+        try:
+            payload = json.loads(Path(output).read_text(encoding="utf-8"))
+            rows = payload["result"]["apps"]
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+            raise AppleUpgradeError("iPhone App 列表格式无效。") from None
+        if not isinstance(rows, list):
+            raise AppleUpgradeError("iPhone App 列表格式无效。")
+        result = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("bundleIdentifier"), str):
+                raise AppleUpgradeError("iPhone App 列表包含无效记录。")
+            result.append(DeviceApp(
+                row["bundleIdentifier"],
+                row.get("version") if isinstance(row.get("version"), str) else None,
+                row.get("bundleVersion") if isinstance(row.get("bundleVersion"), str) else None,
+            ))
+        return result
+    finally:
+        Path(output).unlink(missing_ok=True)
+
+
+def _install_ios_bundle(candidate: Path, device: str, *, run=subprocess.run) -> None:
+    descriptor, output = tempfile.mkstemp(prefix="yolo-device-install.", suffix=".json")
+    os.close(descriptor)
+    try:
+        _run_checked([
+            _developer_tool("devicectl"), "device", "install", "app", "--device", device,
+            str(candidate), "--json-output", output, "--quiet",
+        ], run=run, message="iPhone App 安装失败。")
+    finally:
+        Path(output).unlink(missing_ok=True)
+
+
+def replace_ios_app(candidate: Path, device: str, *, expected_bundle_id: str = YOLO_TRADE_BUNDLE_ID,
+                    legacy_bundle_ids: tuple[str, ...] = ("com.yoloagents.tradingagent",),
+                    require_existing: bool = True, rollback_candidate: Path | None = None,
+                    run=subprocess.run) -> IOSReplacement:
+    candidate = _regular_directory(candidate, "候选 iOS App")
+    metadata = validate_ios_bundle(candidate, expected_bundle_id=expected_bundle_id, run=run)
+    installed = device_apps(device, run=run)
+    installed_ids = {item.bundle_id for item in installed}
+    legacy = sorted(installed_ids.intersection(legacy_bundle_ids))
+    if legacy:
+        raise AppleUpgradeError("iPhone 仍安装旧身份 App；这是身份迁移，不能作为普通覆盖升级。")
+    existing = expected_bundle_id in installed_ids
+    if require_existing and not existing:
+        raise AppleUpgradeError("iPhone 未安装当前身份的 YoloTrade，不能执行升级替换测试。")
+    rollback = None
+    if rollback_candidate is not None:
+        rollback = _regular_directory(rollback_candidate, "回滚 iOS App")
+        validate_ios_bundle(rollback, expected_bundle_id=expected_bundle_id, run=run)
+    _install_ios_bundle(candidate, device, run=run)
+    final = next((item for item in device_apps(device, run=run) if item.bundle_id == expected_bundle_id), None)
+    matches = final is not None
+    if metadata.short_version is not None:
+        matches = matches and final.short_version == metadata.short_version
+    if metadata.build_version is not None:
+        matches = matches and final.build_version == metadata.build_version
+    if not matches:
+        if rollback is not None:
+            _install_ios_bundle(rollback, device, run=run)
+        raise AppleUpgradeError("iPhone 安装后的版本校验失败。")
+    return IOSReplacement(existing, metadata)
 
 
 def _copy_macos_bundle(source: Path, destination: Path, *, run=subprocess.run) -> None:
@@ -174,11 +279,22 @@ def main(argv: list[str] | None = None) -> int:
     restore.add_argument("--backup", type=Path, required=True)
     restore.add_argument("--destination", type=Path, required=True)
     restore.add_argument("--backup-root", type=Path, required=True)
+    ios = commands.add_parser("install-ios")
+    ios.add_argument("--candidate", type=Path, required=True)
+    ios.add_argument("--device", required=True)
+    ios.add_argument("--rollback-candidate", type=Path)
+    ios.add_argument("--allow-fresh-install", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = (replace_macos_app(args.candidate, args.destination, args.backup_root)
-                  if args.command == "install-macos"
-                  else restore_macos_app(args.backup, args.destination, args.backup_root))
+        if args.command == "install-macos":
+            result = replace_macos_app(args.candidate, args.destination, args.backup_root)
+        elif args.command == "restore-macos":
+            result = restore_macos_app(args.backup, args.destination, args.backup_root)
+        else:
+            result = replace_ios_app(
+                args.candidate, args.device, rollback_candidate=args.rollback_candidate,
+                require_existing=not args.allow_fresh_install,
+            )
         print(json.dumps({**asdict(result), "metadata": asdict(result.metadata)}, ensure_ascii=False, sort_keys=True))
         return 0
     except AppleUpgradeError as error:
