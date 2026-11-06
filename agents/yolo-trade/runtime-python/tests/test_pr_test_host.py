@@ -433,10 +433,28 @@ class PRHostTests(unittest.TestCase):
         self.assertEqual(self.request(session, 'POST', f'/v1/conversations/{cid}/messages', message, token=token)[0], 202)
         result = self.wait_reply(session, cid, token, 1)
         self.assertEqual(result[-1]['status'], 'failed')
-        self.assertEqual(result[-1]['error']['code'], 'agent_failed')
+        run_id = result[-1]['run_id']
+        status, body = self.request(session, 'GET', f'/v1/events?conversation_id={cid}', token=token)
+        self.assertEqual(status, 200)
+        run_events = [event for event in body['events'] if event['payload'].get('run_id') == run_id]
+        terminal = [event for event in run_events
+                    if event['type'] in ('assistant.failed', 'assistant.completed')]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(terminal[0]['type'], 'assistant.failed')
+        self.assertEqual(terminal[0]['payload']['message'], result[-1])
+        self.assertEqual(terminal[0]['payload']['error']['code'], 'agent_failed')
+        self.assertFalse(any(event['type'] == 'assistant.delta' for event in run_events))
+        self.assertNotIn('fixture provider timeout', json.dumps(terminal, ensure_ascii=False))
         self.assertNotIn('fixture provider timeout', result[-1]['content'])
+        self.assertNotEqual(result[-1]['content'], 'MACUI' + self.run_id)
         self.assertIsNone(session.server.service.store.get_agent_state(cid))
-        self.assertEqual(self.request(session, 'POST', f'/v1/conversations/{cid}/messages', message, token=token)[0], 202)
+        status, duplicate = self.request(session, 'POST', f'/v1/conversations/{cid}/messages', message, token=token)
+        self.assertEqual(status, 202)
+        self.assertEqual(duplicate['status'], 'duplicate')
+        self.assertEqual(duplicate['run_id'], run_id)
+        status, after = self.request(session, 'GET', f'/v1/events?conversation_id={cid}', token=token)
+        self.assertEqual(status, 200)
+        self.assertEqual(after['events'], body['events'])
         self.assertEqual(len(self.agent_calls), 1)
         self.assertEqual(self.clients_closed, ['fixture-model'])
 
