@@ -33,6 +33,14 @@ from yolo_trade.upgrade_test import (  # noqa: E402
     exercise_macos_upgrade,
     tree_fingerprint,
 )
+from yolo_trade.apple_upgrade import (  # noqa: E402
+    replace_ios_app,
+    replace_macos_app,
+    restore_macos_app,
+    validate_ios_bundle,
+    validate_macos_bundle,
+)
+from yolo_trade.full_test import live_preflight  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -172,6 +180,21 @@ def create_report_dir(requested: Path | None) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"{stamp}-", dir=DEFAULT_REPORT_ROOT)).resolve()
 
 
+def automated_artifacts(report_dir: Path) -> dict[str, dict[str, str]]:
+    expected = {
+        "macos": report_dir / "derived-macos/Build/Products/Debug/YoloTradeMac.app",
+        "ios_simulator": report_dir / "derived-ios/Build/Products/Debug-iphonesimulator/YoloTradeIOS.app",
+        "ios_device": report_dir / "derived-ios-device/Build/Products/Debug-iphoneos/YoloTradeIOS.app",
+    }
+    return {
+        name: {
+            "path": str(path.relative_to(report_dir)),
+            "fingerprint": tree_fingerprint(path),
+        }
+        for name, path in expected.items() if path.is_dir()
+    }
+
+
 def execute_automated(product: str, report_dir: Path, *, dry_run: bool = False, run=subprocess.run) -> tuple[dict, int]:
     checks = automated_checks(product, report_dir)
     results = [run_check(check, report_dir, run=run, dry_run=dry_run) for check in checks]
@@ -183,6 +206,7 @@ def execute_automated(product: str, report_dir: Path, *, dry_run: bool = False, 
         "candidate": candidate_state() if not dry_run else {"revision": "dry-run", "dirty": None, "difference_fingerprint": None},
         "status": "not_run" if dry_run else ("passed" if all(item.status == "passed" for item in results) else "failed"),
         "checks": [asdict(item) for item in results],
+        "artifacts": {} if dry_run else automated_artifacts(report_dir),
     }
     destination = report_dir / "report.json"
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -297,9 +321,169 @@ def execute_upgrade(product: str, report_dir: Path, *, baseline_macos: Path | No
     return report, 0 if status in ("passed", "not_run") else 1
 
 
+class LivePhaseBlocked(RuntimeError):
+    pass
+
+
+def _passing_phase_report(path: Path | None, phase: str) -> dict:
+    if path is None or not path.is_file():
+        raise LivePhaseBlocked(f"缺少已完成的 {phase} 阶段报告。")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise LivePhaseBlocked(f"{phase} 阶段报告不可读取。") from None
+    if not isinstance(value, dict) or value.get("phase") != phase or value.get("status") != "passed":
+        raise LivePhaseBlocked(f"{phase} 阶段尚未通过。")
+    return value
+
+
+def _matching_candidate(report: dict, current: dict, phase: str) -> None:
+    if report.get("candidate") != current:
+        raise LivePhaseBlocked(f"{phase} 阶段验证的不是当前候选代码状态。")
+
+
+def execute_live(
+    product: str,
+    report_dir: Path,
+    *,
+    automated_report: Path | None,
+    upgrade_report: Path | None,
+    mac_candidate: Path | None,
+    mac_destination: Path | None,
+    mac_backup_root: Path | None,
+    ios_candidate: Path | None,
+    ios_rollback: Path | None,
+    device: str | None,
+    dry_run: bool = False,
+    state_reader=candidate_state,
+    preflight=live_preflight,
+    mac_installer=replace_macos_app,
+    mac_restorer=restore_macos_app,
+    ios_installer=replace_ios_app,
+    mac_validator=validate_macos_bundle,
+    ios_validator=validate_ios_bundle,
+) -> tuple[dict, int]:
+    if product != "yolo-trade":
+        raise ValueError(f"unsupported full-test product: {product}")
+    started = time.monotonic()
+    log_path = report_dir / "logs/live.log"
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    current = {"revision": "dry-run", "dirty": None, "difference_fingerprint": None} if dry_run else state_reader()
+    status = "not_run" if dry_run else "blocked"
+    details: dict[str, object] = {}
+    message = "dry run" if dry_run else ""
+    mac_result = None
+    ios_attempted = False
+    if not dry_run:
+        try:
+            required = {
+                "automated_report": automated_report,
+                "upgrade_report": upgrade_report,
+                "mac_candidate": mac_candidate,
+                "mac_destination": mac_destination,
+                "mac_backup_root": mac_backup_root,
+                "ios_candidate": ios_candidate,
+                "ios_rollback": ios_rollback,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if device is None:
+                missing.append("device")
+            if missing:
+                raise LivePhaseBlocked("live 阶段缺少显式输入：" + ", ".join(missing))
+            automated = _passing_phase_report(automated_report, "automated")
+            upgrade = _passing_phase_report(upgrade_report, "upgrade")
+            _matching_candidate(automated, current, "automated")
+            _matching_candidate(upgrade, current, "upgrade")
+            automated_checks = {item.get("name"): item.get("status") for item in automated.get("checks", [])}
+            if automated_checks.get("xcode-macos") != "passed" or automated_checks.get("xcode-ios-device") != "passed":
+                raise LivePhaseBlocked("automated 阶段缺少通过的 Mac 或 iPhone 真机构建。")
+            upgrade_checks = {item.get("name"): item for item in upgrade.get("checks", [])}
+            if (upgrade_checks.get("macos-upgrade", {}).get("status") != "passed"
+                    or upgrade_checks.get("ios-simulator-upgrade", {}).get("status") != "passed"):
+                raise LivePhaseBlocked("upgrade 阶段缺少通过的 Mac 或 iOS 隔离升级。")
+            mac_fingerprint = tree_fingerprint(mac_candidate)
+            automated_artifact_values = automated.get("artifacts") if isinstance(automated.get("artifacts"), dict) else {}
+            if automated_artifact_values.get("macos", {}).get("fingerprint") != mac_fingerprint:
+                raise LivePhaseBlocked("live Mac 候选产物不是 automated 阶段构建的产物。")
+            if upgrade_checks["macos-upgrade"].get("candidate_fingerprint") != mac_fingerprint:
+                raise LivePhaseBlocked("live Mac 候选产物不是 upgrade 阶段验证过的产物。")
+            ios_fingerprint = tree_fingerprint(ios_candidate)
+            rollback_fingerprint = tree_fingerprint(ios_rollback)
+            if automated_artifact_values.get("ios_device", {}).get("fingerprint") != ios_fingerprint:
+                raise LivePhaseBlocked("live iPhone 候选产物不是 automated 阶段构建的真机产物。")
+            if ios_fingerprint == rollback_fingerprint:
+                raise LivePhaseBlocked("iPhone 候选与回滚产物相同，不能证明升级或恢复。")
+            mac_validator(mac_candidate)
+            ios_validator(ios_candidate)
+            ios_validator(ios_rollback)
+            before = preflight(device=device, mac_destination=mac_destination)
+            mac_result = mac_installer(mac_candidate, mac_destination, mac_backup_root)
+            ios_attempted = True
+            ios_result = ios_installer(
+                ios_candidate, device, rollback_candidate=ios_rollback,
+            )
+            after = preflight(device=device, mac_destination=mac_destination)
+            details = {
+                "preflight": before,
+                "post_install": after,
+                "macos": {
+                    "candidate_fingerprint": mac_fingerprint,
+                    "backup_created": mac_result.backup is not None,
+                    "short_version": mac_result.metadata.short_version,
+                    "build_version": mac_result.metadata.build_version,
+                },
+                "ios": {
+                    "candidate_fingerprint": ios_fingerprint,
+                    "rollback_fingerprint": rollback_fingerprint,
+                    "short_version": ios_result.metadata.short_version,
+                    "build_version": ios_result.metadata.build_version,
+                },
+                "device_identifier_recorded": False,
+            }
+            status = "passed"
+            message = json.dumps(details, ensure_ascii=False, sort_keys=True)
+        except LivePhaseBlocked as error:
+            status = "blocked"
+            message = str(error)
+        except Exception as error:
+            status = "failed"
+            recovery = []
+            if ios_attempted and ios_rollback is not None and device is not None:
+                try:
+                    ios_installer(ios_rollback, device, require_existing=True)
+                    recovery.append("ios_restored")
+                except Exception as rollback_error:
+                    recovery.append(f"ios_restore_failed:{type(rollback_error).__name__}")
+            if mac_result is not None and mac_result.backup is not None and mac_destination is not None and mac_backup_root is not None:
+                try:
+                    mac_restorer(Path(mac_result.backup), mac_destination, mac_backup_root)
+                    recovery.append("macos_restored")
+                except Exception as rollback_error:
+                    recovery.append(f"macos_restore_failed:{type(rollback_error).__name__}")
+            details = {"recovery": recovery, "device_identifier_recorded": False}
+            message = f"{type(error).__name__}: {error}\n" + json.dumps(details, ensure_ascii=False, sort_keys=True)
+    log_path.write_text(message + "\n", encoding="utf-8")
+    log_path.chmod(0o600)
+    report = {
+        "schema_version": 1,
+        "product": product,
+        "phase": "live",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate": current,
+        "status": status,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "log": str(log_path.relative_to(report_dir)),
+        "details": details,
+    }
+    destination = report_dir / "report.json"
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination.chmod(0o600)
+    return report, 0 if status in ("passed", "not_run") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("automated", "upgrade"))
+    parser.add_argument("phase", choices=("automated", "upgrade", "live"))
     parser.add_argument("--product", choices=("yolo-trade",), required=True)
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -307,11 +491,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-macos-app", type=Path)
     parser.add_argument("--baseline-ios-app", type=Path)
     parser.add_argument("--candidate-ios-app", type=Path)
+    parser.add_argument("--automated-report", type=Path)
+    parser.add_argument("--upgrade-report", type=Path)
+    parser.add_argument("--mac-candidate-app", type=Path)
+    parser.add_argument("--mac-destination", type=Path)
+    parser.add_argument("--mac-backup-root", type=Path)
+    parser.add_argument("--ios-candidate-app", type=Path)
+    parser.add_argument("--ios-rollback-app", type=Path)
+    parser.add_argument("--device")
     args = parser.parse_args(argv)
     report_dir = create_report_dir(args.report_dir)
     if args.phase == "automated":
         report, code = execute_automated(args.product, report_dir, dry_run=args.dry_run)
-    else:
+    elif args.phase == "upgrade":
         report, code = execute_upgrade(
             args.product,
             report_dir,
@@ -319,6 +511,20 @@ def main(argv: list[str] | None = None) -> int:
             candidate_macos=args.candidate_macos_app,
             baseline_ios=args.baseline_ios_app,
             candidate_ios=args.candidate_ios_app,
+            dry_run=args.dry_run,
+        )
+    else:
+        report, code = execute_live(
+            args.product,
+            report_dir,
+            automated_report=args.automated_report,
+            upgrade_report=args.upgrade_report,
+            mac_candidate=args.mac_candidate_app,
+            mac_destination=args.mac_destination,
+            mac_backup_root=args.mac_backup_root,
+            ios_candidate=args.ios_candidate_app,
+            ios_rollback=args.ios_rollback_app,
+            device=args.device,
             dry_run=args.dry_run,
         )
     print(json.dumps({"status": report["status"], "report": str(report_dir / "report.json")}, ensure_ascii=False))

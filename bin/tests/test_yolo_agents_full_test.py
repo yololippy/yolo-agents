@@ -116,6 +116,137 @@ class FullTestRunnerTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         exercise.assert_not_called()
 
+    def test_live_phase_blocks_failed_dependencies_before_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            automated = root / "automated.json"
+            automated.write_text('{"phase":"automated","status":"failed"}', encoding="utf-8")
+            report_dir = root / "report"
+            report_dir.mkdir()
+            installer = Mock(side_effect=AssertionError("must not install"))
+            report, code = full_test.execute_live(
+                "yolo-trade", report_dir,
+                automated_report=automated, upgrade_report=None,
+                mac_candidate=root / "mac", mac_destination=root / "installed",
+                mac_backup_root=root / "backups", ios_candidate=root / "ios",
+                ios_rollback=root / "rollback", device="private-device",
+                state_reader=lambda: {"revision": "fixture", "dirty": False, "difference_fingerprint": "x"},
+                mac_installer=installer,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "blocked")
+        installer.assert_not_called()
+
+    def test_live_phase_installs_both_apps_without_recording_device_identifier(self):
+        from yolo_trade.apple_upgrade import BundleMetadata, IOSReplacement, MacReplacement
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {"revision": "fixture", "dirty": False, "difference_fingerprint": "x"}
+            mac = root / "mac"
+            ios = root / "ios"
+            rollback = root / "rollback"
+            for path, content in ((mac, "mac"), (ios, "ios"), (rollback, "old-ios")):
+                path.mkdir()
+                (path / "artifact").write_text(content, encoding="utf-8")
+            mac_fingerprint = full_test.tree_fingerprint(mac)
+            automated = root / "automated.json"
+            automated.write_text(__import__("json").dumps({
+                "phase": "automated", "status": "passed", "candidate": state,
+                "artifacts": {
+                    "macos": {"fingerprint": mac_fingerprint},
+                    "ios_device": {"fingerprint": full_test.tree_fingerprint(ios)},
+                },
+                "checks": [
+                    {"name": "xcode-macos", "status": "passed"},
+                    {"name": "xcode-ios-device", "status": "passed"},
+                ],
+            }), encoding="utf-8")
+            upgrade = root / "upgrade.json"
+            upgrade.write_text(__import__("json").dumps({
+                "phase": "upgrade", "status": "passed", "candidate": state,
+                "checks": [
+                    {"name": "macos-upgrade", "status": "passed", "candidate_fingerprint": mac_fingerprint},
+                    {"name": "ios-simulator-upgrade", "status": "passed"},
+                ],
+            }), encoding="utf-8")
+            report_dir = root / "report"
+            report_dir.mkdir()
+            preflight = Mock(return_value={"status": "passed"})
+            metadata = BundleMetadata("com.yoloagents.yolotrade", "2", "2", "YoloTrade")
+            report, code = full_test.execute_live(
+                "yolo-trade", report_dir,
+                automated_report=automated, upgrade_report=upgrade,
+                mac_candidate=mac, mac_destination=root / "installed",
+                mac_backup_root=root / "backups", ios_candidate=ios,
+                ios_rollback=rollback, device="private-device",
+                state_reader=lambda: state, preflight=preflight,
+                mac_validator=lambda _path: metadata, ios_validator=lambda _path: metadata,
+                mac_installer=lambda *_args: MacReplacement("installed", "backup", metadata),
+                ios_installer=lambda *_args, **_kwargs: IOSReplacement(True, metadata),
+            )
+            saved = (report_dir / "report.json").read_text(encoding="utf-8")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(preflight.call_count, 2)
+        self.assertNotIn("private-device", saved)
+
+    def test_live_phase_restores_mac_and_ios_after_install_failure(self):
+        from yolo_trade.apple_upgrade import BundleMetadata, IOSReplacement, MacReplacement
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {"revision": "fixture", "dirty": False, "difference_fingerprint": "x"}
+            artifacts = {}
+            for name in ("mac", "ios", "rollback"):
+                path = root / name
+                path.mkdir()
+                (path / "artifact").write_text(name, encoding="utf-8")
+                artifacts[name] = path
+            automated = root / "automated.json"
+            automated.write_text(__import__("json").dumps({
+                "phase": "automated", "status": "passed", "candidate": state,
+                "artifacts": {
+                    "macos": {"fingerprint": full_test.tree_fingerprint(artifacts["mac"])},
+                    "ios_device": {"fingerprint": full_test.tree_fingerprint(artifacts["ios"])},
+                },
+                "checks": [{"name": "xcode-macos", "status": "passed"},
+                           {"name": "xcode-ios-device", "status": "passed"}],
+            }), encoding="utf-8")
+            upgrade = root / "upgrade.json"
+            upgrade.write_text(__import__("json").dumps({
+                "phase": "upgrade", "status": "passed", "candidate": state,
+                "checks": [
+                    {"name": "macos-upgrade", "status": "passed",
+                     "candidate_fingerprint": full_test.tree_fingerprint(artifacts["mac"])},
+                    {"name": "ios-simulator-upgrade", "status": "passed"},
+                ],
+            }), encoding="utf-8")
+            metadata = BundleMetadata("com.yoloagents.yolotrade", "2", "2", "YoloTrade")
+            ios_calls = 0
+            def ios_installer(*_args, **_kwargs):
+                nonlocal ios_calls
+                ios_calls += 1
+                if ios_calls == 1:
+                    raise RuntimeError("fixture install failure")
+                return IOSReplacement(True, metadata)
+            restorer = Mock(return_value=MacReplacement("installed", "displaced", metadata))
+            report_dir = root / "report"
+            report_dir.mkdir()
+            report, code = full_test.execute_live(
+                "yolo-trade", report_dir,
+                automated_report=automated, upgrade_report=upgrade,
+                mac_candidate=artifacts["mac"], mac_destination=root / "installed",
+                mac_backup_root=root / "backups", ios_candidate=artifacts["ios"],
+                ios_rollback=artifacts["rollback"], device="private-device",
+                state_reader=lambda: state, preflight=lambda **_kwargs: {"status": "passed"},
+                mac_validator=lambda _path: metadata, ios_validator=lambda _path: metadata,
+                mac_installer=lambda *_args: MacReplacement("installed", str(root / "old.app"), metadata),
+                mac_restorer=restorer, ios_installer=ios_installer,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(ios_calls, 2)
+        restorer.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
