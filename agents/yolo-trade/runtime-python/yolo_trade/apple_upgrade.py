@@ -14,6 +14,7 @@ from uuid import uuid4
 
 
 YOLO_TRADE_BUNDLE_ID = "com.yoloagents.yolotrade"
+LEGACY_YOLO_TRADE_BUNDLE_IDS = ("com.yoloagents.tradingagent",)
 DEFAULT_DEVELOPER_DIR = Path("/Applications/Xcode.app/Contents/Developer")
 
 
@@ -158,7 +159,7 @@ def _install_ios_bundle(candidate: Path, device: str, *, run=subprocess.run) -> 
 
 
 def replace_ios_app(candidate: Path, device: str, *, expected_bundle_id: str = YOLO_TRADE_BUNDLE_ID,
-                    legacy_bundle_ids: tuple[str, ...] = ("com.yoloagents.tradingagent",),
+                    legacy_bundle_ids: tuple[str, ...] = LEGACY_YOLO_TRADE_BUNDLE_IDS,
                     require_existing: bool = True, rollback_candidate: Path | None = None,
                     run=subprocess.run) -> IOSReplacement:
     candidate = _regular_directory(candidate, "候选 iOS App")
