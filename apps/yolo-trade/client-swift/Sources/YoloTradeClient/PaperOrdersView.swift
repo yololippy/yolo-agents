@@ -1,10 +1,12 @@
 import SwiftUI
 import YoloAgentsSDK
+import YoloAgentsUI
 
 private typealias OrderViewState<Value> = SwiftUI.State<Value>
 
 struct PaperOrdersView: View {
     @StateObject private var model: PaperOrdersModel
+    let presentation: AgentContentPresentation
     private let proposal: PaperOrderProposal?
     private let selectedOrderID: UUID?
     @Environment(\.dismiss) private var dismiss
@@ -12,7 +14,9 @@ struct PaperOrdersView: View {
     @OrderViewState private var reviewing = false
     #endif
 
-    init(connection: PairedConnection, proposal: PaperOrderProposal? = nil, selectedOrderID: UUID? = nil) {
+    init(connection: PairedConnection, proposal: PaperOrderProposal? = nil, selectedOrderID: UUID? = nil,
+         presentation: AgentContentPresentation = .modal) {
+        self.presentation = presentation
         self.proposal = proposal
         self.selectedOrderID = selectedOrderID
         _model = StateObject(wrappedValue: PaperOrdersModel(connection: connection))
@@ -61,9 +65,11 @@ struct PaperOrdersView: View {
             .navigationTitle(model.currentOrder.map { "\($0.contract.symbol) · Paper" } ?? "Paper 订单")
         }
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("完成") { dismiss() }.disabled(model.isWriting)
-                    .accessibilityIdentifier("orders.close")
+            if presentation.showsDismissAction {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }.disabled(model.isWriting)
+                        .accessibilityIdentifier("orders.close")
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { Task { await model.refresh() } } label: {

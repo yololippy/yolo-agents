@@ -9,10 +9,13 @@ struct ChatGPTAccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AccountViewState private var confirmingLogout = false
+    let presentation: AgentContentPresentation
     let onAccountChanged: () -> Void
 
-    init(connection: PairedConnection, identity: AgentAppIdentity?, onAccountChanged: @escaping () -> Void) {
+    init(connection: PairedConnection, identity: AgentAppIdentity?, presentation: AgentContentPresentation = .modal,
+         onAccountChanged: @escaping () -> Void) {
         _model = StateObject(wrappedValue: ChatGPTAccountModel(connection: connection, identity: identity))
+        self.presentation = presentation
         self.onAccountChanged = onAccountChanged
     }
     var body: some View {
@@ -80,13 +83,15 @@ struct ChatGPTAccountView: View {
             .formStyle(.grouped)
             .navigationTitle("ChatGPT 账号")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("完成") {
-                        Task {
-                            if model.isWaitingForLogin { await model.cancelLogin() }
-                            if !model.isWaitingForLogin { dismiss() }
-                        }
-                    }.disabled(model.isManaging)
+                if presentation.showsDismissAction {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("完成") {
+                            Task {
+                                if model.isWaitingForLogin { await model.cancelLogin() }
+                                if !model.isWaitingForLogin { dismiss() }
+                            }
+                        }.disabled(model.isManaging)
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { Task { await model.refresh() } } label: { Label("刷新状态", systemImage: "arrow.clockwise") }
