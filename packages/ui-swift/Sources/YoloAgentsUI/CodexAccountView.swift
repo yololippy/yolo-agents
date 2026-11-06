@@ -36,7 +36,7 @@ struct ChatGPTAccountView: View {
                         Button {
                             Task {
                                 guard let url = await model.beginLogin() else { return }
-                                openURL(url) { opened in model.browserOpened(opened) }
+                                openURL(url, completion: model.browserOpenedFromSystem)
                             }
                         } label: { Label("使用 ChatGPT 登录", systemImage: "person.crop.circle.badge.plus") }
                         .disabled(model.account?.isAuthenticated == true || model.isLoading || model.isManaging || model.hasPendingLogin)

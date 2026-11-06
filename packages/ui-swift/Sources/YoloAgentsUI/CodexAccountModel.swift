@@ -176,6 +176,13 @@ public final class ChatGPTAccountModel: ObservableObject {
             }
         }
     }
+    /// LaunchServices may invoke URL-opening completions from a background queue.
+    /// Keep that system callback outside the main actor and cross the boundary here.
+    nonisolated public func browserOpenedFromSystem(_ opened: Bool) {
+        Task { @MainActor [weak self] in
+            self?.browserOpened(opened)
+        }
+    }
     public func cancelLogin() async {
         guard managerDevice, !isManaging, accountReady, hasPendingLogin else { return }
         stopWaiting()

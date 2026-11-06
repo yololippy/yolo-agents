@@ -125,6 +125,16 @@ private func accountConnection(platform: DevicePlatform, identity: AgentAppIdent
     #expect(await http.requests.filter { $0.httpMethod == "POST" }.map { $0.url?.path } == ["/v1/account/login"])
 }
 
+@Test @MainActor func systemBrowserCompletionCanArriveFromBackgroundQueue() async throws {
+    let http = AccountStateHTTP(authenticatedAfter: 2)
+    let model = try accountModel(http)
+    defer { model.stopWaiting() }
+    _ = await model.beginLogin()
+    await Task.detached { model.browserOpenedFromSystem(true) }.value
+    try await accountWait { !model.isWaitingForLogin }
+    #expect(model.account?.isAuthenticated == true && model.errorMessage == nil)
+}
+
 @Test @MainActor func cancellingLoginCancelsBackendAndStopsPolling() async throws {
     let http = AccountStateHTTP()
     let model = try accountModel(http)
