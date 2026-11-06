@@ -31,11 +31,6 @@ private func copyConversationID(_ id: UUID) {
     #endif
 }
 
-private enum HomeDockActionID {
-    static let account = "chat.account"
-    static let settings = "chat.settings"
-}
-
 public struct YoloAgentsRootView: View {
     @StateObject private var model: ChatModel
     @Environment(\.scenePhase) private var scenePhase
@@ -90,6 +85,7 @@ public struct YoloAgentsRootView: View {
 private struct PairingView: View {
     @ObservedObject var model: ChatModel
     let isSettings: Bool
+    var presentation: AgentContentPresentation = .modal
     @Environment(\.dismiss) private var dismiss
     @ViewState private var address = ""
     @ViewState private var deviceName = ""
@@ -140,7 +136,7 @@ private struct PairingView: View {
                         Task {
                             if await model.pair(address: address, code: code, deviceName: deviceName, allowHTTP: allowHTTP) {
                                 code = ""
-                                if isSettings { dismiss() }
+                                if isSettings && presentation.showsDismissAction { dismiss() }
                             }
                         }
                     } label: {
@@ -171,10 +167,15 @@ private struct PairingView: View {
             .formStyle(.grouped)
             .navigationTitle(isSettings ? "连接设置" : model.appName)
             .toolbar {
-                if isSettings { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
+                if isSettings && presentation.showsDismissAction {
+                    ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } }
+                }
             }
             .confirmationDialog("清除本机配对和缓存？", isPresented: $confirmingDisconnect) {
-                Button("清除本机记录", role: .destructive) { model.disconnect(); dismiss() }
+                Button("清除本机记录", role: .destructive) {
+                    model.disconnect()
+                    if presentation.showsDismissAction { dismiss() }
+                }
             }
             .onAppear {
                 address = model.connection?.endpoint.url.absoluteString ?? defaultAddress
@@ -212,10 +213,11 @@ private struct ChatShell: View {
     @ViewState private var showSettings = false
     @ViewState private var showAccount = false
     @ViewState private var selectedFeature: ChatFeature?
-    @ViewState private var selectedHomeActionID: String?
+    @ViewState private var compactNavigationState = AgentShellNavigation()
     @ViewState private var renameRequest: ConversationRenameRequest? = nil
+    #if os(macOS)
     @ViewState private var drafts = ComposerDrafts()
-    @ViewState private var compactPath: [UUID] = []
+    #endif
 
     private var sections: ConversationHomeSections {
         ConversationHomeSections(state: model.state, includeArchived: includeArchived)
@@ -225,34 +227,18 @@ private struct ChatShell: View {
         sections.primary + sections.recent + sections.archived
     }
 
-    private var homeDockItems: [AgentActionDockItem<String>] {
-        features.map {
-            AgentActionDockItem(
-                id: $0.id,
-                title: $0.title,
-                compactTitle: $0.compactTitle,
-                systemImage: $0.systemImage
-            )
-        } + [
-            AgentActionDockItem(
-                id: HomeDockActionID.account,
-                title: "ChatGPT 账号",
-                compactTitle: "账号",
-                systemImage: "person.crop.circle"
-            ),
-            AgentActionDockItem(
-                id: HomeDockActionID.settings,
-                title: "连接设置",
-                compactTitle: "设置",
-                systemImage: "gearshape"
-            ),
-        ]
-    }
-
     var body: some View {
         Group {
             #if os(iOS)
-            compactNavigation
+            compactContent
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    AgentActionDock(
+                        selection: Binding(get: { compactNavigationState.destination },
+                                           set: { if let destination = $0 { selectCompactDestination(destination) } }),
+                        items: AgentShellNavigation.dockItems(features: features, configuration: configuration),
+                        onSelect: { _ in }
+                    )
+                }
             #else
             splitNavigation
             #endif
@@ -279,21 +265,45 @@ private struct ChatShell: View {
     }
 
     #if os(iOS)
+    @ViewBuilder
+    private var compactContent: some View {
+        switch compactNavigationState.destination {
+        case .conversations:
+            compactNavigation
+        case .account:
+            if let connection = model.connection {
+                ChatGPTAccountView(connection: connection, identity: model.identity, presentation: .page) {
+                    Task { await model.refreshAccountContext() }
+                }
+            }
+        case .settings:
+            PairingView(model: model, isSettings: true, presentation: .page)
+        case .feature(let id):
+            if let connection = model.connection, let feature = features.first(where: { $0.id == id }) {
+                feature.content(connection)
+            }
+        }
+    }
+
     private var compactNavigation: some View {
-        NavigationStack(path: $compactPath) {
+        NavigationStack(path: $compactNavigationState.conversationPath) {
             conversationHome
                 .navigationDestination(for: UUID.self) { id in
-                    ChatDetail(model: model, drafts: $drafts,
-                               openSettings: { showSettings = true },
-                               openAccount: { showAccount = true }, features: features,
+                    ChatDetail(model: model, drafts: $compactNavigationState.drafts,
+                               openSettings: { selectCompactDestination(.settings) },
+                               openAccount: { selectCompactDestination(.account) }, features: features,
                                messageAccessory: messageAccessory,
                                composerConfiguration: composerConfiguration,
-                               openFeature: { selectedFeature = $0 },
+                               openFeature: { selectCompactDestination(.feature($0.id)) },
                                renameConversation: beginRename,
-                               conversationArchived: { compactPath.removeAll() })
+                               conversationArchived: { compactNavigationState.conversationPath.removeAll() })
                         .onAppear { model.selectedID = id }
                 }
         }
+    }
+
+    private func selectCompactDestination(_ destination: AgentShellDestination) {
+        compactNavigationState.select(destination, availableFeatureIDs: features.map(\.id))
     }
 
     private var conversationHome: some View {
@@ -324,13 +334,6 @@ private struct ChatShell: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle(configuration.conversationsTitle)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            AgentActionDock(
-                selection: $selectedHomeActionID,
-                items: homeDockItems,
-                onSelect: openHomeDockAction
-            )
-        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { createAndOpenConversation() } label: {
@@ -346,7 +349,7 @@ private struct ChatShell: View {
     private func conversationRow(_ conversation: Conversation) -> some View {
         Button {
             model.selectedID = conversation.id
-            compactPath.append(conversation.id)
+            compactNavigationState.conversationPath.append(conversation.id)
         } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -408,7 +411,7 @@ private struct ChatShell: View {
         Task {
             await model.createConversation()
             guard let id = model.selectedID else { return }
-            compactPath.append(id)
+            compactNavigationState.conversationPath.append(id)
         }
     }
     #else
@@ -486,17 +489,6 @@ private struct ChatShell: View {
 
     private func beginRename(_ conversation: Conversation) {
         renameRequest = ConversationRenameRequest(conversation)
-    }
-
-    private func openHomeDockAction(_ id: String) {
-        switch id {
-        case HomeDockActionID.account:
-            showAccount = true
-        case HomeDockActionID.settings:
-            showSettings = true
-        default:
-            selectedFeature = features.first { $0.id == id }
-        }
     }
 }
 

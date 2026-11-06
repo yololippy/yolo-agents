@@ -382,3 +382,18 @@ private actor OrdersHTTP: HTTPTransport {
     #expect(await http.posts.isEmpty)
 }
 #endif
+
+@Test @MainActor func paperOrdersPageKeepsItsOwnNavigationAndModalCallersKeepDismissal() throws {
+    let connection = try ordersConnection(platform: .ios, privileged: false)
+    let sheet = PaperOrdersView(connection: connection)
+    #expect(sheet.presentation == .modal)
+    #expect(sheet.presentation.showsDismissAction)
+    let page = PaperOrdersView(connection: connection, presentation: .page)
+    #expect(!page.presentation.showsDismissAction)
+    let feature = YoloTradeRootView.paperOrdersPage(connection: connection)
+    #if os(iOS)
+    #expect(feature.presentation == .page)
+    #else
+    #expect(feature.presentation == .modal)
+    #endif
+}
