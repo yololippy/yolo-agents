@@ -6,6 +6,7 @@
 
 ## 当前状态
 
+- 开发交付采用 [PR 后置测试流程](PR_WORKFLOW.md)：功能分支正常 commit，创建 PR 后冻结 head/base、并行测试和双端真实 UI 验收，通过后 rebase 合并；完整安装与真机测试仍为独立入口。
 - YoloTrade 与 YoloBeni 已完成产品身份、数据目录、授权、Skills、Keychain 和客户端缓存隔离。
 - 共享 Host、聊天 API、主会话、上下文压缩、消息分页、图片消息与分月文件存储已实现。
 - 两个产品均有可构建的 macOS/iOS 客户端；iOS 最低版本为 26，共享玻璃功能坞已经接入。
