@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 import fcntl
 import os
@@ -5,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,6 +14,32 @@ import yolo_agents_full_test as full_test
 
 
 class FullTestRunnerTests(unittest.TestCase):
+    def test_main_live_does_not_forward_acceptance_only_host_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_dir = Path(directory) / "live-report"
+            execute = Mock(return_value=({"status": "not_run"}, 0))
+            with patch.object(full_test, "full_test_lock", return_value=nullcontext()), \
+                    patch.object(full_test, "execute_live", execute):
+                code = full_test.main([
+                    "live", "--product", "yolo-trade", "--report-dir", str(report_dir),
+                    "--host-endpoint", "http://127.0.0.1:8765", "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertNotIn("host_endpoint", execute.call_args.kwargs)
+
+    def test_main_acceptance_forwards_host_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_dir = Path(directory) / "acceptance-report"
+            execute = Mock(return_value=({"status": "not_run"}, 0))
+            with patch.object(full_test, "full_test_lock", return_value=nullcontext()), \
+                    patch.object(full_test, "execute_acceptance", execute):
+                code = full_test.main([
+                    "acceptance", "--product", "yolo-trade", "--report-dir", str(report_dir),
+                    "--host-endpoint", "http://127.0.0.1:8765", "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertEqual(execute.call_args.kwargs["host_endpoint"], "http://127.0.0.1:8765")
+
     def test_automated_plan_is_ordered_and_product_scoped(self):
         with tempfile.TemporaryDirectory() as directory:
             checks = full_test.automated_checks("yolo-trade", Path(directory))
